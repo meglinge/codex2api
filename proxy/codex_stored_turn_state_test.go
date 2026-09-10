@@ -21,16 +21,22 @@ func TestInjectStoredCodexTurnStateFillsMissingHeaderAndMetadata(t *testing.T) {
 	}
 }
 
-func TestInjectStoredCodexTurnStateDoesNotOverrideExisting(t *testing.T) {
+func TestInjectStoredCodexTurnStateOverridesExisting(t *testing.T) {
 	account := &auth.Account{CodexTurnStates: map[string]string{"gpt-5.6-sol": "saved-blob"}}
 	body := []byte(`{"model":"gpt-5.6-sol","client_metadata":{"x-codex-turn-state":"client-blob"}}`)
 	headers := http.Header{codexTurnStateHeader: []string{"client-header"}}
 	outBody, outHeaders := injectStoredCodexTurnState(context.Background(), account, body, headers)
-	if got := outHeaders.Get(codexTurnStateHeader); got != "client-header" {
-		t.Fatalf("header = %q", got)
+	if got := outHeaders.Get(codexTurnStateHeader); got != "saved-blob" {
+		t.Fatalf("header = %q, want saved-blob", got)
 	}
-	if got := gjson.GetBytes(outBody, "client_metadata.x-codex-turn-state").String(); got != "client-blob" {
-		t.Fatalf("client_metadata = %q", got)
+	if got := gjson.GetBytes(outBody, "client_metadata.x-codex-turn-state").String(); got != "saved-blob" {
+		t.Fatalf("client_metadata = %q, want saved-blob", got)
+	}
+	if got := headers.Get(codexTurnStateHeader); got != "client-header" {
+		t.Fatalf("original headers mutated: %q", got)
+	}
+	if got := gjson.GetBytes(body, "client_metadata.x-codex-turn-state").String(); got != "client-blob" {
+		t.Fatalf("original body mutated: %q", got)
 	}
 }
 

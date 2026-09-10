@@ -29,9 +29,9 @@ func skipStoredCodexTurnState(ctx context.Context) bool {
 	return skip
 }
 
-// injectStoredCodexTurnState 在下游没有回带 turn-state 时，把账号为该模型保存的
-// 上游 blob 填进请求头；若正文已有 client_metadata 对象，也补上同名字段。
-// 已有值（客户端回带或网关 token 解析结果）不覆盖。
+// injectStoredCodexTurnState 把账号为该模型保存的上游 blob 写进出站请求头；
+// 若正文已有 client_metadata 对象，同名字段一并覆盖。
+// 下游回带、网关 token 解析结果都让路：用户流量必须带我们保存的未降智值。
 func injectStoredCodexTurnState(ctx context.Context, account *auth.Account, body []byte, headers http.Header) ([]byte, http.Header) {
 	if skipStoredCodexTurnState(ctx) || account == nil {
 		return body, headers
@@ -43,19 +43,14 @@ func injectStoredCodexTurnState(ctx context.Context, account *auth.Account, body
 	}
 	if headers == nil {
 		headers = make(http.Header, 1)
-	} else if strings.TrimSpace(headers.Get(codexTurnStateHeader)) == "" {
+	} else {
 		headers = headers.Clone()
 	}
-	if strings.TrimSpace(headers.Get(codexTurnStateHeader)) == "" {
-		headers.Set(codexTurnStateHeader, stored)
-	}
+	headers.Set(codexTurnStateHeader, stored)
 	if meta := gjson.GetBytes(body, "client_metadata"); meta.IsObject() {
 		const path = "client_metadata.x-codex-turn-state"
-		field := gjson.GetBytes(body, path)
-		if field.Type != gjson.String || strings.TrimSpace(field.String()) == "" {
-			if updated, err := sjson.SetBytes(body, path, stored); err == nil {
-				body = updated
-			}
+		if updated, err := sjson.SetBytes(body, path, stored); err == nil {
+			body = updated
 		}
 	}
 	return body, headers
