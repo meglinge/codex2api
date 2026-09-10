@@ -39,6 +39,7 @@ func userAgentAuditFromContext(ctx context.Context) *userAgentAudit {
 
 func resetUpstreamUserAgentAudit(ctx context.Context) {
 	resetUpstreamAttemptTrace(ctx)
+	resetCodexTurnStateAudit(ctx)
 	if audit := userAgentAuditFromContext(ctx); audit != nil {
 		audit.mu.Lock()
 		audit.upstreamUserAgent = ""

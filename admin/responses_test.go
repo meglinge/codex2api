@@ -470,9 +470,11 @@ func TestUsageLogsResponse(t *testing.T) {
 				APIKeyID:            3,
 				APIKeyName:          "Team A",
 				APIKeyMasked:        "sk-a****...****1111",
-				ClientUserAgent:     "codex-tui/0.150.0",
-				UpstreamUserAgent:   "codex-tui/0.151.0",
-				UserAgentOverridden: true,
+				ClientUserAgent:        "codex-tui/0.150.0",
+				UpstreamUserAgent:      "codex-tui/0.151.0",
+				UserAgentOverridden:    true,
+				OutboundCodexTurnState: "sent-blob",
+				InboundCodexTurnState:  "returned-blob",
 			},
 		},
 	}
@@ -511,6 +513,12 @@ func TestUsageLogsResponse(t *testing.T) {
 	}
 	if got := decoded.Logs[0]["user_agent_overridden"]; got != true {
 		t.Fatalf("user_agent_overridden = %v, want true", got)
+	}
+	if got := decoded.Logs[0]["outbound_codex_turn_state"]; got != "sent-blob" {
+		t.Fatalf("outbound_codex_turn_state = %v, want sent-blob", got)
+	}
+	if got := decoded.Logs[0]["inbound_codex_turn_state"]; got != "returned-blob" {
+		t.Fatalf("inbound_codex_turn_state = %v, want returned-blob", got)
 	}
 }
 

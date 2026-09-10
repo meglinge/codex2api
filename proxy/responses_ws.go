@@ -398,7 +398,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	}
 
 	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
-	downstreamIdentity := newDownstreamIdentityContext(rawBody, nil)
+	downstreamIdentity := newDownstreamIdentityContextWithCtx(c.Request.Context(), rawBody, nil)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
 	hasPreviousResponse := strings.TrimSpace(gjson.GetBytes(rawBody, "previous_response_id").String()) != ""

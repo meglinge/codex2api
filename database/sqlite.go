@@ -567,6 +567,8 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"usage_logs", "client_user_agent", "TEXT DEFAULT ''"},
 		{"usage_logs", "upstream_user_agent", "TEXT DEFAULT ''"},
 		{"usage_logs", "user_agent_overridden", "INTEGER DEFAULT 0"},
+		{"usage_logs", "outbound_codex_turn_state", "TEXT DEFAULT ''"},
+		{"usage_logs", "inbound_codex_turn_state", "TEXT DEFAULT ''"},
 		{"usage_logs", "internal_reason", "TEXT DEFAULT ''"},
 		{"usage_logs", "parent_request_id", "TEXT DEFAULT ''"},
 		{"usage_logs", "request_id", "TEXT DEFAULT ''"},

@@ -140,6 +140,9 @@ func doTracedUpstreamRequest(client *http.Client, req *http.Request, account *au
 	record := beginUpstreamTrace(req.Context(), account, proxyURL, false)
 	resp, err := client.Do(req)
 	record(resp)
+	if resp != nil {
+		recordInboundCodexTurnStateFromHeaders(req.Context(), resp.Header)
+	}
 	return resp, err
 }
 

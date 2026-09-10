@@ -1023,6 +1023,95 @@ function UsageErrorSummaryCell({ log, mobile = false }: { log: UsageLog; mobile?
   )
 }
 
+function TurnStateCell({ log, mobile = false }: { log: UsageLog; mobile?: boolean }) {
+  const { t } = useTranslation()
+  const outbound = log.outbound_codex_turn_state?.trim() || ''
+  const inbound = log.inbound_codex_turn_state?.trim() || ''
+  const hasAudit = Boolean(outbound || inbound)
+  const changed = hasAudit && outbound !== inbound
+  const outboundLabel = outbound || (hasAudit ? t('usage.turnStateNotSent') : '-')
+  const inboundLabel = inbound || (hasAudit ? t('usage.turnStateNotSent') : '-')
+  const statusLabel = !hasAudit
+    ? t('usage.turnStateNotRecorded')
+    : changed
+      ? t('usage.turnStateChanged')
+      : t('usage.turnStateUnchanged')
+
+  if (!hasAudit) {
+    return (
+      <div className="font-mono text-[11px] text-muted-foreground" title={t('usage.turnStateNotRecorded')}>
+        TS: -
+      </div>
+    )
+  }
+
+  const statusChip = (
+    <Badge
+      variant="outline"
+      className={`ml-auto shrink-0 border-transparent px-1.5 py-0 text-[10px] font-semibold ${
+        changed
+          ? 'bg-amber-500/12 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300'
+          : 'bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300'
+      }`}
+    >
+      {statusLabel}
+    </Badge>
+  )
+  const same = Boolean(outbound) && outbound === inbound
+
+  const content = same ? (
+    <div className={`${mobile ? 'w-full' : 'w-[260px] max-w-[28vw]'} font-mono text-[11px] leading-relaxed`}>
+      <div className="flex min-w-0 items-center gap-1.5" title={`${t('usage.outboundTurnState')} = ${t('usage.inboundTurnState')}`}>
+        <span className="shrink-0 font-sans font-semibold text-muted-foreground">S=R</span>
+        <span className="min-w-0 truncate text-foreground/80">{outbound}</span>
+        {statusChip}
+      </div>
+    </div>
+  ) : (
+    <div className={`${mobile ? 'w-full' : 'w-[260px] max-w-[28vw]'} space-y-1 font-mono text-[11px] leading-relaxed`}>
+      <div className="flex min-w-0 items-center gap-1.5" title={t('usage.outboundTurnState')}>
+        <span className="w-4 shrink-0 font-sans font-semibold text-muted-foreground">S</span>
+        <span className="min-w-0 truncate text-foreground/80">{outboundLabel}</span>
+      </div>
+      <div className="flex min-w-0 items-center gap-1.5" title={t('usage.inboundTurnState')}>
+        <span className="w-4 shrink-0 font-sans font-semibold text-muted-foreground">R</span>
+        <span className="min-w-0 truncate text-foreground/80">{inboundLabel}</span>
+        {statusChip}
+      </div>
+    </div>
+  )
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <div
+          tabIndex={0}
+          aria-label={`${t('usage.outboundTurnState')}: ${outboundLabel}; ${t('usage.inboundTurnState')}: ${inboundLabel}; ${statusLabel}`}
+          className="cursor-help focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {content}
+        </div>
+      </TooltipTrigger>
+      <TooltipContent side="top" sideOffset={6} className="max-w-[440px] p-3">
+        <div className="space-y-2 text-xs">
+          <div>
+            <div className="font-semibold text-background/70">{t('usage.outboundTurnState')}</div>
+            <div className="mt-0.5 break-all font-mono leading-relaxed">{outboundLabel}</div>
+          </div>
+          <div>
+            <div className="font-semibold text-background/70">{t('usage.inboundTurnState')}</div>
+            <div className="mt-0.5 break-all font-mono leading-relaxed">{inboundLabel}</div>
+          </div>
+          <div className="font-semibold">{statusLabel}</div>
+          {log.via_websocket ? (
+            <div className="leading-relaxed text-background/70">{t('usage.turnStateWebSocketHint')}</div>
+          ) : null}
+        </div>
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
 function UserAgentCell({ log, mobile = false }: { log: UsageLog; mobile?: boolean }) {
   const { t } = useTranslation()
   const clientUserAgent = log.client_user_agent?.trim() || ''
@@ -1514,7 +1603,7 @@ function EmptyPanel({ accent, icon, text }: { accent: PanelAccentKey; icon: Reac
   )
 }
 
-type UsageTableColumn = 'status' | 'error' | 'model' | 'account' | 'apiKey' | 'clientIp' | 'userAgent' | 'endpoint' | 'type' | 'token' | 'cost' | 'cached' | 'wsAcquire' | 'tokensPerSec' | 'timing' | 'time'
+type UsageTableColumn = 'status' | 'error' | 'model' | 'account' | 'apiKey' | 'clientIp' | 'userAgent' | 'turnState' | 'endpoint' | 'type' | 'token' | 'cost' | 'cached' | 'wsAcquire' | 'tokensPerSec' | 'timing' | 'time'
 
 const USAGE_COLUMN_DEFINITIONS: Array<{ key: UsageTableColumn; labelKey: string }> = [
   { key: 'status', labelKey: 'usage.tableStatus' },
@@ -1523,6 +1612,7 @@ const USAGE_COLUMN_DEFINITIONS: Array<{ key: UsageTableColumn; labelKey: string 
   { key: 'apiKey', labelKey: 'usage.tableApiKey' },
   { key: 'clientIp', labelKey: 'usage.tableClientIP' },
   { key: 'userAgent', labelKey: 'usage.tableUserAgent' },
+  { key: 'turnState', labelKey: 'usage.tableTurnState' },
   { key: 'endpoint', labelKey: 'usage.tableEndpoint' },
   { key: 'type', labelKey: 'usage.tableType' },
   { key: 'token', labelKey: 'usage.tableToken' },
@@ -1548,6 +1638,7 @@ const DEFAULT_USAGE_VISIBLE_COLUMNS: Record<UsageTableColumn, boolean> = {
   apiKey: true,
   clientIp: true,
   userAgent: true,
+  turnState: true,
   endpoint: true,
   type: true,
   token: true,
@@ -2579,7 +2670,7 @@ export default function Usage() {
               <TooltipProvider>
               <div className="grid gap-3 lg:hidden">
                 {logs.map((log: UsageLog) => {
-                  const hasDetails = visibleColumns.account || visibleColumns.apiKey || visibleColumns.clientIp || visibleColumns.endpoint || visibleColumns.userAgent
+                  const hasDetails = visibleColumns.account || visibleColumns.apiKey || visibleColumns.clientIp || visibleColumns.endpoint || visibleColumns.userAgent || visibleColumns.turnState
                   const hasMetrics = visibleColumns.token || visibleColumns.cached || visibleColumns.timing || visibleColumns.tokensPerSec || visibleColumns.cost
                   return (
                     <div
@@ -2680,6 +2771,11 @@ export default function Usage() {
                               <UserAgentCell log={log} mobile />
                             </div>
                           )}
+                          {visibleColumns.turnState && (
+                            <div className="border-t border-border/60 pt-2">
+                              <TurnStateCell log={log} mobile />
+                            </div>
+                          )}
                         </div>
                       )}
 
@@ -2763,6 +2859,7 @@ export default function Usage() {
                       {visibleColumns.apiKey && <TableHead className={usageTableHeadClass}>{t('usage.tableApiKey')}</TableHead>}
                       {visibleColumns.clientIp && <TableHead className={usageTableHeadClass}>{t('usage.tableClientIP')}</TableHead>}
                       {visibleColumns.userAgent && <TableHead className={usageTableHeadClass}>{t('usage.tableUserAgent')}</TableHead>}
+                      {visibleColumns.turnState && <TableHead className={usageTableHeadClass}>{t('usage.tableTurnState')}</TableHead>}
                       {visibleColumns.endpoint && <TableHead className={usageTableHeadClass}>{t('usage.tableEndpoint')}</TableHead>}
                       {visibleColumns.type && <TableHead className={usageTableHeadClass}>{t('usage.tableType')}</TableHead>}
                       {visibleColumns.token && <TableHead className={`${usageTableHeadClass} text-right`}>{t('usage.tableToken')}</TableHead>}
@@ -2872,6 +2969,9 @@ export default function Usage() {
                         </TableCell>}
                         {visibleColumns.userAgent && <TableCell>
                           <UserAgentCell log={log} />
+                        </TableCell>}
+                        {visibleColumns.turnState && <TableCell>
+                          <TurnStateCell log={log} />
                         </TableCell>}
                         {visibleColumns.endpoint && <TableCell>
                           <div

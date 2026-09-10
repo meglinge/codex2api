@@ -624,6 +624,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	// 放在身份统一之后，合成出的 client_metadata 也能带上这个字段。Ping 用
 	// WithSkipStoredCodexTurnState 跳过。HTTP/SSE 与 WebSocket 共用这一步。
 	requestBody, headers = injectStoredCodexTurnState(ctx, account, requestBody, headers)
+	RecordOutboundCodexTurnState(ctx, headers.Get(codexTurnStateHeader))
 	if wantWebsocket && WebsocketExecuteFunc != nil {
 		requestBody, headers = prepareCodexResponsesLiteTransport(requestBody, headers, true, responsesLite)
 		if responsesLite {
@@ -1045,6 +1046,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	}
 	requestBody, ctx, sessionID = unifyCodexOutboundIdentity(ctx, account, requestBody, headers, sessionID, apiKey, deviceCfg)
 	requestBody, headers = injectStoredCodexTurnState(ctx, account, requestBody, headers)
+	RecordOutboundCodexTurnState(ctx, headers.Get(codexTurnStateHeader))
 
 	existingCacheKey := strings.TrimSpace(gjson.GetBytes(requestBody, "prompt_cache_key").String())
 	cacheKey := existingCacheKey
@@ -1347,6 +1349,7 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 	ApplyCodexOutboundIdentityHeaders(req.Header, req.Context())
 	applyAccountCustomHeaders(req, account)
 	RecordUpstreamUserAgent(req.Context(), req.Header.Get("User-Agent"))
+	RecordOutboundCodexTurnState(req.Context(), req.Header.Get(codexTurnStateHeader))
 }
 
 func applyOpenAIResponsesRequestHeaders(req *http.Request, account *auth.Account, apiKey string, headers http.Header) {
@@ -1416,6 +1419,7 @@ func applyOpenAIResponsesRequestHeaders(req *http.Request, account *auth.Account
 	}
 	applyAccountCustomHeaders(req, account)
 	RecordUpstreamUserAgent(req.Context(), req.Header.Get("User-Agent"))
+	RecordOutboundCodexTurnState(req.Context(), req.Header.Get(codexTurnStateHeader))
 }
 
 // codexIdentityPassthroughActive 判断 OpenAI Responses 中转账号是否开启

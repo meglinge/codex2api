@@ -1483,6 +1483,7 @@ func (h *Handler) logUsageForRequest(c *gin.Context, input *database.UsageLogInp
 	populateInternalUsageMetaFromContext(c, input)
 	populateClientIPFromRequest(c, input)
 	populateUserAgentMetaFromRequest(c, input)
+	populateCodexTurnStateMetaFromRequest(c, input)
 	populateWsAcquireFromRequest(c, input)
 	populateUpstreamTrace(c, input)
 	populateCompactUsageMetaFromRequest(c, input)
@@ -3065,6 +3066,7 @@ func (h *Handler) authMiddleware() gin.HandlerFunc {
 	allowAnonymous := h.cfg != nil && h.cfg.AllowAnonymousV1
 	return func(c *gin.Context) {
 		attachUserAgentAudit(c)
+		attachCodexTurnStateAudit(c)
 		attachWsAcquireAudit(c)
 		attachUpstreamTrace(c, h.store)
 		// 如果没有配置任何密钥
@@ -3750,7 +3752,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	}
 	rawBody, _ = normalizePortableResponsesCompactionHistory(rawBody)
 	// 下行身份隔离：上游回显的 prompt_cache_key 换回客户端自己的值（见 codex_downstream_identity.go）。
-	downstreamIdentity := newDownstreamIdentityContext(rawBody, nil)
+	downstreamIdentity := newDownstreamIdentityContextWithCtx(c.Request.Context(), rawBody, nil)
 	setRawRequestBody(c, rawBody)
 
 	// Validate request

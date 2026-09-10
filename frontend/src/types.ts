@@ -3343,6 +3343,8 @@ export interface UsageLog {
   client_user_agent: string
   upstream_user_agent: string
   user_agent_overridden: boolean
+  outbound_codex_turn_state?: string
+  inbound_codex_turn_state?: string
   internal_reason: string
   parent_request_id: string
   endpoint: string

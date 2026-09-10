@@ -148,6 +148,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	// still auditable. A reused connection replaces this below with the UA that
 	// was actually sent when that connection was established.
 	proxy.RecordUpstreamUserAgent(ctx, headers.Get("User-Agent"))
+	proxy.RecordOutboundCodexTurnState(ctx, headers.Get("X-Codex-Turn-State"))
 
 	// Resin 反代：注入账号身份头
 	if proxy.IsResinEnabled() {
@@ -769,6 +770,7 @@ func websocketResponseToHTTP(ctx context.Context, wsResp *WsResponse, statusCode
 				resp.Header.Add(key, v)
 			}
 		}
+		proxy.RecordInboundCodexTurnState(ctx, handshakeHeader.Get("X-Codex-Turn-State"))
 	}
 
 	// 设置 SSE 响应头

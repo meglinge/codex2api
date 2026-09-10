@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"strings"
 
 	"github.com/codex2api/auth"
@@ -19,13 +20,19 @@ import (
 
 // downstreamIdentityContext 是一次下游请求里客户端自己声明的参数，用于还原回显。
 type downstreamIdentityContext struct {
+	ctx              context.Context
 	promptCacheKey   string
 	safetyIdentifier string
 	account          *auth.Account
 }
 
 func newDownstreamIdentityContext(rawBody []byte, account *auth.Account) downstreamIdentityContext {
+	return newDownstreamIdentityContextWithCtx(nil, rawBody, account)
+}
+
+func newDownstreamIdentityContextWithCtx(ctx context.Context, rawBody []byte, account *auth.Account) downstreamIdentityContext {
 	return downstreamIdentityContext{
+		ctx:              ctx,
 		promptCacheKey:   strings.TrimSpace(gjson.GetBytes(rawBody, "prompt_cache_key").String()),
 		safetyIdentifier: strings.TrimSpace(gjson.GetBytes(rawBody, "safety_identifier").String()),
 		account:          account,
@@ -61,6 +68,7 @@ func sanitizeDownstreamResponseIdentity(payload []byte, ctx downstreamIdentityCo
 	if trimmed == "" || trimmed[0] != '{' || !gjson.ValidBytes(payload) {
 		return payload
 	}
+	recordInboundCodexTurnStateFromEvent(ctx.ctx, payload)
 	out := rewriteCodexTurnStateInEvent(payload, ctx.account)
 	prefix := ""
 	if gjson.GetBytes(out, "response").IsObject() {

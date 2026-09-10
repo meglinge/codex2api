@@ -1990,6 +1990,42 @@ func TestUsageLogsPersistEffectiveModel(t *testing.T) {
 	}
 }
 
+func TestUsageLogsPersistCodexTurnStateAudit(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.InsertUsageLog(ctx, &UsageLogInput{
+		AccountID:              1,
+		Endpoint:               "/v1/responses",
+		Model:                  "gpt-5.4",
+		StatusCode:             200,
+		OutboundCodexTurnState: "sent-blob",
+		InboundCodexTurnState:  "returned-blob",
+	}); err != nil {
+		t.Fatalf("InsertUsageLog 返回错误: %v", err)
+	}
+	db.flushLogs()
+
+	logs, err := db.ListRecentUsageLogs(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListRecentUsageLogs 返回错误: %v", err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("len(logs) = %d, want 1", len(logs))
+	}
+	if got := logs[0].OutboundCodexTurnState; got != "sent-blob" {
+		t.Fatalf("OutboundCodexTurnState = %q, want sent-blob", got)
+	}
+	if got := logs[0].InboundCodexTurnState; got != "returned-blob" {
+		t.Fatalf("InboundCodexTurnState = %q, want returned-blob", got)
+	}
+}
+
 func TestUsageLogsPersistUserAgentAudit(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 
