@@ -37,10 +37,18 @@ import (
 
 type codexOutboundIdentity struct {
 	installationID string
-	sessionID      string
-	threadID       string
-	windowID       string
-	turnID         string
+	// 传输身份：session-id 头、请求体 prompt_cache_key、以及 WS 连接池通道键。
+	// 收敛档位下它仍是网关的每会话键，绝不能塌缩成账号级常量——否则同账号下所有
+	// 下游会话共用一份 prompt cache，并且全部挤在同一条 WS 连接上串行。
+	sessionID string
+	threadID  string
+	windowID  string
+	// 元数据身份：turn metadata 与 client_metadata。收敛档位下取收敛值（账号级
+	// session + 按客户端会话派生的 thread），未收敛时与传输身份相同。
+	metaSessionID string
+	metaThreadID  string
+	metaWindowID  string
+	turnID        string
 	// converged 表示身份来自指纹收敛档位。
 	converged bool
 	// synthesized 表示下游没有任何 Codex 身份载体（普通 SDK 客户端），整套载体由
@@ -69,7 +77,7 @@ func codexOutboundIdentityFromContext(ctx context.Context) (codexOutboundIdentit
 // codexClientIdentityCarriers 是从下游请求里读出的客户端自报身份。
 type codexClientIdentityCarriers struct {
 	sessionID, threadID, windowID, installationID, turnID string
-	hasTurnMetadata, hasClientMetadata                   bool
+	hasTurnMetadata, hasClientMetadata                    bool
 }
 
 func readCodexClientIdentityCarriers(headers http.Header, body []byte) codexClientIdentityCarriers {
@@ -128,9 +136,23 @@ func resolveCodexOutboundIdentity(account *auth.Account, upstreamSessionID strin
 	}
 	ids := resolveCodexFingerprintIDs(account, headers)
 	if ids != nil && ids.sessionID != "" {
+		// session / full 档：metadata 用收敛值，传输身份保持网关的每会话键。
+		// 收敛的 session id 是账号级常量（resolveCodexFingerprintIDs 只按 accountID
+		// 派生），拿它当 prompt_cache_key 会让同账号所有下游用户共用一份缓存前缀，
+		// 当 WS 通道键则会把同账号的所有会话串行到一条连接上。
+		// CODEX_SESSION_HEADER_ALIGN_CONVERGED 是显式对齐两者的既有逃生阀。
 		identity.converged = true
 		identity.installationID = ids.installationID
-		identity.sessionID = ids.sessionID
+		identity.metaSessionID = ids.sessionID
+		identity.metaThreadID = ids.threadID
+		identity.metaWindowID = ids.windowID
+		if codexSessionHeaderAlignsConverged() {
+			identity.sessionID = ids.sessionID
+		} else {
+			identity.sessionID = strings.TrimSpace(upstreamSessionID)
+		}
+		// thread / window 头在收敛档位下本就取收敛值（ApplyCodexSessionHeaders 与
+		// ApplyCodexFingerprintHeaders 的既有行为），保持不变。
 		identity.threadID = ids.threadID
 		identity.windowID = ids.windowID
 		return identity
@@ -170,16 +192,20 @@ func resolveCodexOutboundIdentity(account *auth.Account, upstreamSessionID strin
 		// SDK 客户端没有安装标识，按账号恒定派生（与收敛档位同一种子，切换档位不漂移）。
 		identity.installationID = deriveStableCodexUUID(fmt.Sprintf("codex2api:codex-install-id:v1:%d", account.ID()))
 	}
+	// 未收敛：metadata 与传输身份同源，四处载体报同一组值。
+	identity.metaSessionID = identity.sessionID
+	identity.metaThreadID = identity.threadID
+	identity.metaWindowID = identity.windowID
 	return identity
 }
 
-// metadataUpdates 是身份写入 turn metadata JSON 时的键值对。
+// metadataUpdates 是身份写入 turn metadata JSON 时的键值对（元数据身份）。
 func (id codexOutboundIdentity) metadataUpdates() [][2]string {
 	return [][2]string{
 		{"installation_id", id.installationID},
-		{"session_id", id.sessionID},
-		{"thread_id", id.threadID},
-		{"window_id", id.windowID},
+		{"session_id", id.metaSessionID},
+		{"thread_id", id.metaThreadID},
+		{"window_id", id.metaWindowID},
 	}
 }
 
@@ -215,9 +241,9 @@ func applyCodexOutboundIdentityBody(body []byte, id codexOutboundIdentity) []byt
 	}
 	if gjson.GetBytes(body, "client_metadata").IsObject() {
 		body = setExistingJSONString(body, "client_metadata.x-codex-installation-id", id.installationID)
-		body = setExistingJSONString(body, "client_metadata.session_id", id.sessionID)
-		body = setExistingJSONString(body, "client_metadata.thread_id", id.threadID)
-		body = setExistingJSONString(body, "client_metadata.x-codex-window-id", id.windowID)
+		body = setExistingJSONString(body, "client_metadata.session_id", id.metaSessionID)
+		body = setExistingJSONString(body, "client_metadata.thread_id", id.metaThreadID)
+		body = setExistingJSONString(body, "client_metadata.x-codex-window-id", id.metaWindowID)
 		const embeddedPath = "client_metadata.x-codex-turn-metadata"
 		if embedded := gjson.GetBytes(body, embeddedPath); embedded.Type == gjson.String {
 			if rewritten, changed := setExistingMetadataStrings(embedded.String(), id.metadataUpdates()); changed {
@@ -265,9 +291,9 @@ func ApplyCodexOutboundIdentityHeaders(outbound http.Header, ctx context.Context
 
 // unifyCodexOutboundIdentity 是 ExecuteRequest / ExecuteCompactRequest 的接线点：
 // 从原始下游请求解析出站身份，改写请求体，并把身份挂到 ctx 供头装配末尾使用。
-// 返回的 sessionID 是网关后续用作 prompt_cache_key / 会话头的键——真实客户端自报身份
-// 或收敛档位改变了 session_id 时，会话键随之改用同一个值。WS stateless 的连接标识
-// 不是会话，保持原样。
+// 返回的 sessionID 是网关后续用作 prompt_cache_key / 会话头 / WS 通道键的传输身份：
+// 真实客户端自报会话时改用其自报值（off / device 档的透传契约），收敛档位下保持
+// 网关的每会话键不变。WS stateless 的连接标识不是会话，保持原样。
 func unifyCodexOutboundIdentity(ctx context.Context, account *auth.Account, body []byte, headers http.Header, sessionID, apiKey string, deviceCfg *DeviceProfileConfig) ([]byte, context.Context, string) {
 	upstreamKey := strings.TrimSpace(sessionID)
 	if upstreamKey == "" || IsStatelessWebsocketSessionID(upstreamKey) {

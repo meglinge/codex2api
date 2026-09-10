@@ -68,8 +68,8 @@ func codexSandboxTagsForFamily(family CodexClientOSFamily) (sandbox, sandboxMode
 // buildCodexTurnMetadataJSON 按真实键序拼出一轮普通请求的 turn metadata。
 func buildCodexTurnMetadataJSON(id codexOutboundIdentity, family CodexClientOSFamily, startedAtUnixMs int64) string {
 	sandbox, sandboxMode := codexSandboxTagsForFamily(family)
-	windowNumber := codexWindowNumber(id.windowID)
-	contextWindowID := DeriveStableSessionUUIDv7(fmt.Sprintf("codex2api:context-window:v1:%s:%d", id.sessionID, windowNumber))
+	windowNumber := codexWindowNumber(id.metaWindowID)
+	contextWindowID := DeriveStableSessionUUIDv7(fmt.Sprintf("codex2api:context-window:v1:%s:%d", id.metaSessionID, windowNumber))
 	raw := "{}"
 	set := func(path string, value any) {
 		if updated, err := sjson.Set(raw, path, value); err == nil {
@@ -77,11 +77,11 @@ func buildCodexTurnMetadataJSON(id codexOutboundIdentity, family CodexClientOSFa
 		}
 	}
 	set("installation_id", id.installationID)
-	set("session_id", id.sessionID)
-	set("thread_id", id.threadID)
+	set("session_id", id.metaSessionID)
+	set("thread_id", id.metaThreadID)
 	set("agent_name", "/root")
 	set("turn_id", id.turnID)
-	set("window_id", id.windowID)
+	set("window_id", id.metaWindowID)
 	set("window_number", windowNumber)
 	set("context_window_id", contextWindowID)
 	set("request_kind", "turn")
@@ -100,7 +100,7 @@ func buildCodexTurnMetadataJSON(id codexOutboundIdentity, family CodexClientOSFa
 // 并把 x-codex-turn-metadata 头值挂到身份上（由 ApplyCodexOutboundIdentityHeaders 写出）。
 // 只在请求体确实没有 client_metadata 时合成；关闭合成或身份不完整时原样返回。
 func synthesizeCodexIdentityCarriers(ctx context.Context, account *auth.Account, body []byte, headers http.Header, id codexOutboundIdentity, apiKey string, deviceCfg *DeviceProfileConfig) ([]byte, codexOutboundIdentity) {
-	if !codexIdentitySynthesisEnabled() || !gjson.ValidBytes(body) || id.sessionID == "" || id.threadID == "" || id.installationID == "" {
+	if !codexIdentitySynthesisEnabled() || !gjson.ValidBytes(body) || id.sessionID == "" || id.metaThreadID == "" || id.installationID == "" {
 		return body, id
 	}
 	if gjson.GetBytes(body, "client_metadata").Exists() {
@@ -108,6 +108,9 @@ func synthesizeCodexIdentityCarriers(ctx context.Context, account *auth.Account,
 	}
 	if id.windowID == "" {
 		id.windowID = id.threadID + ":0"
+	}
+	if id.metaWindowID == "" {
+		id.metaWindowID = id.metaThreadID + ":0"
 	}
 	if id.turnID == "" {
 		id.turnID = codexIdentitySynthesisNewTurnID()
@@ -125,12 +128,12 @@ func synthesizeCodexIdentityCarriers(ctx context.Context, account *auth.Account,
 		}
 	}
 	// client_metadata 在真实客户端里是 HashMap，键序无意义；这里沿用样本里的顺序。
-	set("client_metadata.thread_id", id.threadID)
+	set("client_metadata.thread_id", id.metaThreadID)
 	set("client_metadata.turn_id", id.turnID)
 	set("client_metadata.root_turn_id", id.turnID)
-	set("client_metadata.x-codex-window-id", id.windowID)
+	set("client_metadata.x-codex-window-id", id.metaWindowID)
 	set("client_metadata.x-codex-turn-metadata", metadata)
-	set("client_metadata.session_id", id.sessionID)
+	set("client_metadata.session_id", id.metaSessionID)
 	set("client_metadata.x-codex-installation-id", id.installationID)
 	id.turnMetadataHeader = metadata
 	return updated, id

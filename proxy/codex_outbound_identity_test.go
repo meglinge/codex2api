@@ -174,3 +174,63 @@ func TestUnifyCodexOutboundIdentityRealignsSessionKey(t *testing.T) {
 		t.Fatalf("stateless websocket session id must be kept, got %q", kept)
 	}
 }
+
+// TestResolveCodexOutboundIdentityKeepsTransportSessionUnderConvergence 锁死一个回归：
+// session / full 档的收敛 session id 是账号级常量，只能出现在 metadata 里。
+// 传输身份（session-id 头 / prompt_cache_key / WS 通道键）必须保持网关的每会话键，
+// 否则同账号所有下游会话共用一份 prompt cache，并且全部串行到一条 WS 连接上。
+func TestResolveCodexOutboundIdentityKeepsTransportSessionUnderConvergence(t *testing.T) {
+	account := &auth.Account{DBID: 42, AccountID: "42", CodexFingerprintMode: auth.CodexFingerprintModeSession}
+	body := []byte(`{"model":"gpt-5.5","prompt_cache_key":"gw-key-a","client_metadata":{"session_id":"client-a","thread_id":"client-a","x-codex-window-id":"client-a:0","x-codex-installation-id":"inst","x-codex-turn-metadata":"{\"installation_id\":\"inst\",\"session_id\":\"client-a\",\"thread_id\":\"client-a\",\"window_id\":\"client-a:0\"}"}}`)
+	headersA := http.Header{"Session-Id": []string{"client-a"}, "Thread-Id": []string{"client-a"}}
+	headersB := http.Header{"Session-Id": []string{"client-b"}, "Thread-Id": []string{"client-b"}}
+
+	a := resolveCodexOutboundIdentity(account, "gw-key-a", headersA, body)
+	b := resolveCodexOutboundIdentity(account, "gw-key-b", headersB, body)
+
+	if !a.converged || !b.converged {
+		t.Fatalf("session mode must converge: %+v %+v", a, b)
+	}
+	if a.metaSessionID != b.metaSessionID || a.metaSessionID == "" {
+		t.Fatalf("metadata session must be the account-level converged constant: %q vs %q", a.metaSessionID, b.metaSessionID)
+	}
+	if a.sessionID != "gw-key-a" || b.sessionID != "gw-key-b" {
+		t.Fatalf("transport session must stay the gateway per-session key, got %q and %q", a.sessionID, b.sessionID)
+	}
+	if a.sessionID == a.metaSessionID {
+		t.Fatalf("transport session collapsed into the converged constant")
+	}
+	if a.metaThreadID == b.metaThreadID {
+		t.Fatalf("session mode must derive a distinct thread per client session")
+	}
+
+	// 请求体：metadata 取收敛值，prompt_cache_key 保持网关键。
+	out := applyCodexOutboundIdentityBody(body, a)
+	if got := gjson.GetBytes(out, "prompt_cache_key").String(); got != "gw-key-a" {
+		t.Fatalf("prompt_cache_key = %q, want the gateway key", got)
+	}
+	if got := gjson.GetBytes(out, "client_metadata.session_id").String(); got != a.metaSessionID {
+		t.Fatalf("client_metadata.session_id = %q, want converged %q", got, a.metaSessionID)
+	}
+	embedded := gjson.GetBytes(out, "client_metadata.x-codex-turn-metadata").String()
+	if got := gjson.Get(embedded, "session_id").String(); got != a.metaSessionID {
+		t.Fatalf("turn metadata session_id = %q, want converged %q", got, a.metaSessionID)
+	}
+
+	// 出站头：session-id 用传输身份，thread/window 用收敛值。
+	outbound := http.Header{}
+	ApplyCodexOutboundIdentityHeaders(outbound, withCodexOutboundIdentity(context.Background(), a))
+	if got := outbound.Get(codexSessionIDHeader); got != "gw-key-a" {
+		t.Fatalf("session-id header = %q, want the gateway key", got)
+	}
+	if got := outbound.Get(codexThreadIDHeader); got != a.metaThreadID {
+		t.Fatalf("thread-id header = %q, want converged thread %q", got, a.metaThreadID)
+	}
+
+	// 显式对齐开关仍然可以把两者拉平（既有逃生阀）。
+	t.Setenv("CODEX_SESSION_HEADER_ALIGN_CONVERGED", "true")
+	aligned := resolveCodexOutboundIdentity(account, "gw-key-a", headersA, body)
+	if aligned.sessionID != aligned.metaSessionID {
+		t.Fatalf("align switch must collapse transport into the converged session")
+	}
+}
