@@ -48,7 +48,13 @@ func relayCodexTurnStateResponseHeader(c *gin.Context, affinityKey string, accou
 		c.Writer.Header().Del(codexTurnStateHeader)
 		return
 	}
-	c.Header(codexTurnStateHeader, token)
+	// 下游只拿网关签发的 token，上游 blob 留在映射表里（codex_id_isolation.go）。
+	downstreamToken := mintCodexTurnStateToken(account, token)
+	if downstreamToken == "" {
+		c.Writer.Header().Del(codexTurnStateHeader)
+		return
+	}
+	c.Header(codexTurnStateHeader, downstreamToken)
 	noteCodexTurnStateProvenance(affinityKey, account)
 }
 
@@ -70,10 +76,10 @@ func (h *Handler) commitResponsesStreamAttempt(c *gin.Context, attempt *continuo
 	}
 	if c != nil && c.Writer != nil && !c.Writer.Written() {
 		stagedHeader = true
-		if token == "" {
+		if downstreamToken := mintCodexTurnStateToken(account, token); downstreamToken == "" {
 			c.Writer.Header().Del(codexTurnStateHeader)
 		} else {
-			c.Header(codexTurnStateHeader, token)
+			c.Header(codexTurnStateHeader, downstreamToken)
 		}
 	}
 

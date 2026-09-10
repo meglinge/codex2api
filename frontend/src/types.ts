@@ -2086,7 +2086,7 @@ export interface SystemSettings {
   prompt_filter_review_model: string
   prompt_filter_review_timeout_seconds: number
   prompt_filter_review_fail_closed: boolean
-  client_compat_mode: 'preserve' | 'auto' | 'force' | string
+  client_compat_mode: 'preserve' | 'auto' | 'force' | 'force_platform' | string
   codex_min_cli_version: string
   codex_images_main_model: string
   codex_images_default_main_model?: string

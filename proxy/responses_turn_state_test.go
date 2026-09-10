@@ -265,8 +265,13 @@ func TestResponsesCopiesCodexTurnStateResponseHeader(t *testing.T) {
 	if hits.Load() != 1 {
 		t.Fatalf("upstream hits = %d, want 1", hits.Load())
 	}
-	if got := recorder.Header().Get(codexTurnStateHeader); got != "turn-state-upstream" {
-		t.Fatalf("%s = %q, want turn-state-upstream", codexTurnStateHeader, got)
+	// 下游拿到网关 token，而不是上游 blob；token 在映射表里对应上游值。
+	got := recorder.Header().Get(codexTurnStateHeader)
+	if !isCodexTurnStateToken(got) || got == "turn-state-upstream" {
+		t.Fatalf("%s = %q, want gateway token", codexTurnStateHeader, got)
+	}
+	if raw, ok := codexTurnStateTokens.Load(got); !ok || raw.(*codexTurnStateEntry).upstream != "turn-state-upstream" {
+		t.Fatalf("token %q must map to turn-state-upstream", got)
 	}
 }
 

@@ -16,6 +16,9 @@ const (
 	ClientCompatModePreserve = "preserve"
 	ClientCompatModeAuto     = "auto"
 	ClientCompatModeForce    = "force"
+	// ClientCompatModeForcePlatform（三端强制模拟）：同 force 始终使用服务端画像，
+	// 但画像平台段按下游用户的操作系统对齐到 windows / macos / linux。
+	ClientCompatModeForcePlatform = "force_platform"
 
 	StreamFlushPolicyImmediate = "immediate"
 	StreamFlushPolicyCoalesce  = "coalesce"
@@ -224,6 +227,8 @@ func NormalizeClientCompatMode(mode string) string {
 		return ClientCompatModeAuto
 	case ClientCompatModeForce:
 		return ClientCompatModeForce
+	case ClientCompatModeForcePlatform, "force-platform", "platform":
+		return ClientCompatModeForcePlatform
 	default:
 		return ClientCompatModePreserve
 	}

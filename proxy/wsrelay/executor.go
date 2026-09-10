@@ -143,7 +143,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	}
 
 	// 准备请求头
-	headers := e.prepareWebsocketHeaders(accessToken, account, accountIDStr, headerSessionID, apiKey, deviceCfg, ginHeaders, wsBody)
+	headers := e.prepareWebsocketHeaders(ctx, accessToken, account, accountIDStr, headerSessionID, apiKey, deviceCfg, ginHeaders, wsBody)
 	// Record the attempted handshake UA immediately so failed handshakes are
 	// still auditable. A reused connection replaces this below with the UA that
 	// was actually sent when that connection was established.
@@ -314,8 +314,9 @@ func (e *Executor) prepareWebsocketBody(body []byte, sessionID string) []byte {
 	return wsBody
 }
 
-// prepareWebsocketHeaders 准备 WebSocket 请求头
-func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Account, accountID, sessionID, apiKey string, deviceCfg *proxy.DeviceProfileConfig, ginHeaders http.Header, wsBody []byte) http.Header {
+// prepareWebsocketHeaders 准备 WebSocket 请求头。ctx 携带下游操作系统家族
+// （proxy.WithCodexClientOSFamily），生成的 UA 平台段据此对齐。
+func (e *Executor) prepareWebsocketHeaders(ctx context.Context, accessToken string, account *auth.Account, accountID, sessionID, apiKey string, deviceCfg *proxy.DeviceProfileConfig, ginHeaders http.Header, wsBody []byte) http.Header {
 	headers := http.Header{}
 
 	// 认证头
@@ -330,7 +331,7 @@ func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Acc
 			account = &auth.Account{AccountID: accountID}
 		}
 		var userAgent, version string
-		userAgent, version, usedGeneratedHeaders = proxy.ResolveCodexOutboundClientHeadersWithDecision(account, apiKey, deviceCfg, ginHeaders)
+		userAgent, version, usedGeneratedHeaders = proxy.ResolveCodexOutboundClientHeadersWithDecisionContext(ctx, account, apiKey, deviceCfg, ginHeaders)
 		headers.Set("User-Agent", userAgent)
 		if version != "" {
 			headers.Set("Version", version)
@@ -358,9 +359,9 @@ func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Acc
 	} else {
 		headers.Set("Originator", proxy.Originator)
 	}
-	// X-Oai-Attestation：DeviceCheck 设备认证头（上游 openai/codex#20619），
-	// 仅在下游携带时透传，本代理不伪造（假 token 服务端验证必败，反而暴露）。
-	for _, name := range []string{"X-Codex-Turn-State", "X-Codex-Turn-Metadata", "X-Client-Request-Id", "X-Responsesapi-Include-Timing-Metrics", "X-Oai-Attestation"} {
+	// X-Oai-Attestation（DeviceCheck 设备认证，上游 openai/codex#20619）与 HTTP 路径
+	// 一样不透传：它把下游真实设备与号池账号绑定，且无法与生成的 UA 画像自洽。
+	for _, name := range []string{"X-Codex-Turn-State", "X-Codex-Turn-Metadata", "X-Client-Request-Id", "X-Codex-Window-Id", "X-Responsesapi-Include-Timing-Metrics"} {
 		if value := strings.TrimSpace(ginHeaders.Get(name)); value != "" {
 			headers.Set(name, value)
 		}
@@ -380,6 +381,9 @@ func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Acc
 	// legacy 档下该函数恢复旧的 Session_id + 清 Conversation_id 行为。
 	if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
 		proxy.ApplyCodexSessionHeaders(headers, account, sessionID, ginHeaders, true)
+		// 出站身份统一（proxy.unifyCodexOutboundIdentity 挂在 ctx 上）：握手头逐连接冻结，
+		// 只在握手带会话（显式会话）时覆盖；stateless 连接的身份只在帧体里。
+		proxy.ApplyCodexOutboundIdentityHeaders(headers, ctx)
 	}
 	for name, value := range account.GetCustomHeaders() {
 		name = strings.TrimSpace(name)

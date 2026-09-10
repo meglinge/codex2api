@@ -1,0 +1,25 @@
+# Builds the c2a-sender binary (Rust) from the codex submodule.
+#
+#   git submodule update --init third_party/codex
+#   docker build -f Dockerfile.sender -t codex2api-sender .
+#   docker run --network host -e C2A_SENDER_TOKEN=... codex2api-sender
+#
+# Run it next to codex2api (same host / pod network namespace) and set
+# CODEX_TRANSPORT_MODE=rust on codex2api. The sender listens on loopback only, so both
+# processes must share a network namespace.
+
+FROM rust:1.95-bookworm AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev cmake clang \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY sender/ sender/
+COPY third_party/codex/codex-rs/ third_party/codex/codex-rs/
+WORKDIR /src/sender
+RUN cargo build --release --locked
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /src/sender/target/release/c2a-sender /usr/local/bin/c2a-sender
+ENV C2A_SENDER_LISTEN=127.0.0.1:8799
+ENTRYPOINT ["/usr/local/bin/c2a-sender"]

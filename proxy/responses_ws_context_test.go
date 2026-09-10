@@ -107,12 +107,18 @@ func TestResponsesWSContextSurvivesMultiTurnFallback(t *testing.T) {
 				`{"previous_response_id":"resp_turn2","input":[{"type":"custom_tool_call_output","call_id":"call_two","output":"world"}]}`,
 				`{"previous_response_id":"resp_turn3","input":[{"type":"message","role":"user","content":"continue"}]}`,
 			}
+			// 下游只拿到网关签发的 response id，续链必须用收到的那个；上游 id（resp_turnN）
+			// 只在网关出站时经映射还原。
+			lastDownstreamID := ""
 			for turnIndex, input := range inputs {
 				var request map[string]any
 				if err := json.Unmarshal([]byte(input), &request); err != nil {
 					t.Fatal(err)
 				}
 				request["type"], request["model"], request["prompt_cache_key"] = "response.create", "gpt-5.5", "har-context-test"
+				if _, chained := request["previous_response_id"]; chained {
+					request["previous_response_id"] = lastDownstreamID
+				}
 				if err := conn.WriteJSON(request); err != nil {
 					t.Fatal(err)
 				}
@@ -124,6 +130,10 @@ func TestResponsesWSContextSurvivesMultiTurnFallback(t *testing.T) {
 				}
 				if gjson.GetBytes(terminal, "type").String() != wantTerminal {
 					t.Fatalf("unexpected terminal: %s", terminal)
+				}
+				lastDownstreamID = gjson.GetBytes(terminal, "response.id").String()
+				if strings.HasPrefix(lastDownstreamID, "resp_turn") || strings.HasPrefix(lastDownstreamID, "resp_after") {
+					t.Fatalf("upstream response id leaked to the client: %q", lastDownstreamID)
 				}
 			}
 			select {
@@ -380,16 +390,17 @@ func TestResponsesWSContextOnDemandBootstrapsFromStoreSignal(t *testing.T) {
 	// 决定在下一轮终态到达时必然已经落定，断言按这个顺序排。
 	send(`{"type":"response.create","model":"gpt-5.5","store":false,"input":[{"type":"message","role":"user","content":"full context every turn"}]}`)
 	send(`{"type":"response.create","model":"gpt-5.5","input":[{"type":"message","role":"user","content":"incremental root"}]}`)
-	if getResponseCache("anon", "resp_1") != nil {
+	// 缓存与客户端都以网关签发的 id 为键；downstreamCodexResponseID 返回流转发时已签发的映射值。
+	if getResponseCache("anon", downstreamCodexResponseID("resp_1")) != nil {
 		t.Fatal("store:false root turn was cached under on_demand")
 	}
-	send(`{"type":"response.create","model":"gpt-5.5","previous_response_id":"resp_2","input":[{"type":"message","role":"user","content":"second turn"}]}`)
-	if getResponseCache("anon", "resp_2") == nil {
+	send(`{"type":"response.create","model":"gpt-5.5","previous_response_id":"` + downstreamCodexResponseID("resp_2") + `","input":[{"type":"message","role":"user","content":"second turn"}]}`)
+	if getResponseCache("anon", downstreamCodexResponseID("resp_2")) == nil {
 		t.Fatal("continuation-capable root turn was not cached under on_demand")
 	}
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		if cached := getResponseCache("anon", "resp_3"); len(cached) == 4 {
+		if cached := getResponseCache("anon", downstreamCodexResponseID("resp_3")); len(cached) == 4 {
 			break
 		} else if time.Now().After(deadline) {
 			t.Fatalf("continuation snapshot has %d items, want root + answer + new message + answer", len(cached))

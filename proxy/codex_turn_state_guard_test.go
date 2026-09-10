@@ -92,8 +92,11 @@ func TestRelayCodexTurnStateClearsStaleHeaderOnFailover(t *testing.T) {
 	first := http.Header{}
 	first.Set(codexTurnStateHeader, "blob-attempt-1")
 	relayCodexTurnStateResponseHeader(c, affinityKey, &auth.Account{DBID: 101}, first)
-	if got := recorder.Header().Get(codexTurnStateHeader); got != "blob-attempt-1" {
-		t.Fatalf("first relay header = %q", got)
+	// 下游拿到的是网关 token，映射表里对应铸造账号的上游 blob。
+	if got := recorder.Header().Get(codexTurnStateHeader); !isCodexTurnStateToken(got) {
+		t.Fatalf("first relay header = %q, want gateway token", got)
+	} else if upstream, ok := resolveCodexTurnStateToken(got, &auth.Account{DBID: 101}); !ok || upstream != "blob-attempt-1" {
+		t.Fatalf("relay token must resolve to the upstream blob for the minting account")
 	}
 
 	relayCodexTurnStateResponseHeader(c, affinityKey, &auth.Account{DBID: 202}, http.Header{})
@@ -120,8 +123,10 @@ func TestCommitResponsesStreamAttemptStagesWinningTurnStateBeforeHeadersCommit(t
 		t.Fatalf("commit response attempt: %v", err)
 	}
 	result := recorder.Result()
-	if got := result.Header.Get(codexTurnStateHeader); got != "winning-turn-state" {
-		t.Fatalf("committed response header = %q, want winning-turn-state", got)
+	if got := result.Header.Get(codexTurnStateHeader); !isCodexTurnStateToken(got) {
+		t.Fatalf("committed response header = %q, want gateway token", got)
+	} else if upstream, ok := resolveCodexTurnStateToken(got, account); !ok || upstream != "winning-turn-state" {
+		t.Fatalf("committed token must resolve to winning-turn-state")
 	}
 	raw, ok := codexTurnStateOrigins.Load(affinityKey)
 	origin, valid := raw.(codexTurnStateOrigin)
