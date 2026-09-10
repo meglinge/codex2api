@@ -4,6 +4,7 @@ import {
   clampCodexTestPercent,
   codexTestTokenMetrics,
   codexTestWindowKind,
+  extractCodexTurnState,
   formatCodexTestMS,
   formatCodexTestReset,
   isFinalCodexTestDiagnostics,
@@ -45,6 +46,19 @@ test("token metrics scale bars against the largest observed count", () => {
   assert.equal(metrics[3].value, null);
   assert.equal(metrics[3].percent, 0);
   assert.equal(codexTestTokenMetrics(undefined).every((m) => m.value === null), true);
+});
+
+test("turn-state prefers the dedicated field then the response header", () => {
+  assert.equal(extractCodexTurnState({ model: "gpt-5.4", turn_state: "turn-field" }), "turn-field");
+  assert.equal(
+    extractCodexTurnState({
+      model: "gpt-5.4",
+      response_headers: [{ name: "X-Codex-Turn-State", value: "turn-header" }],
+    }),
+    "turn-header",
+  );
+  assert.equal(extractCodexTurnState({ model: "gpt-5.4" }), "");
+  assert.equal(extractCodexTurnState(null), "");
 });
 
 test("final diagnostics are recognised by duration_ms only", () => {

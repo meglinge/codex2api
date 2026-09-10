@@ -10,17 +10,19 @@ import {
   Copy,
   Gauge,
   Loader2,
+  Radio,
   RefreshCw,
   RotateCcw,
   XCircle,
 } from "lucide-react";
-import { api, getAdminKey } from "../api";
+import { api, getAdminKey, type ProxyRow } from "../api";
 import type { AccountRow } from "../types";
 import type { CodexTestDiagnostics, CodexTestWindow } from "../lib/codexConnectionTest";
 import {
   clampCodexTestPercent,
   codexTestTokenMetrics,
   codexTestWindowKind,
+  extractCodexTurnState,
   formatCodexTestMS,
   formatCodexTestReset,
   isFinalCodexTestDiagnostics,
@@ -38,8 +40,10 @@ import { orderAntigravityTestModels } from "../lib/antigravityModels";
 import { cn } from "@/lib/utils";
 import { useToast } from "../hooks/useToast";
 import Modal from "./Modal";
+import { ProxyField } from "./ProxyField";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 
 async function copyTextToClipboard(text: string) {
@@ -95,8 +99,8 @@ export default function TestConnectionModal({
   const { showToast } = useToast();
   const [output, setOutput] = useState<string[]>([]);
   const [status, setStatus] = useState<
-    "connecting" | "streaming" | "success" | "error"
-  >("connecting");
+    "idle" | "connecting" | "streaming" | "success" | "error"
+  >("idle");
   const [errorMsg, setErrorMsg] = useState("");
   const [model, setModel] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
@@ -106,7 +110,11 @@ export default function TestConnectionModal({
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [headersOpen, setHeadersOpen] = useState(false);
   const [rawOpen, setRawOpen] = useState(false);
-  const [attempt, setAttempt] = useState(0);
+  const [proxyUrl, setProxyUrl] = useState(account.proxy_url ?? "");
+  const [proxyPool, setProxyPool] = useState<ProxyRow[]>([]);
+  const [turnStates, setTurnStates] = useState<Record<string, string>>({});
+  const [pingTurnState, setPingTurnState] = useState("");
+  const [turnStateChanged, setTurnStateChanged] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const outputEndRef = useRef<HTMLDivElement>(null);
   const settledRef = useRef(false);
@@ -128,6 +136,8 @@ export default function TestConnectionModal({
   const isOpenAIResponsesAccount = Boolean(
     account.openai_responses_api || account.grok_api,
   );
+  const isCodexAccount =
+    !isClaudeAccount && !isAntigravityAccount && !isOpenAIResponsesAccount;
 
   const modelSelectOptions = useMemo(
     () =>
@@ -138,6 +148,26 @@ export default function TestConnectionModal({
       ).map((item) => ({ label: item, value: item })),
     [isAntigravityAccount, isClaudeAccount, isOpenAIResponsesAccount, modelOptions, selectedModel],
   );
+
+  useEffect(() => {
+    setProxyUrl(account.proxy_url ?? "");
+  }, [account.id, account.proxy_url]);
+
+  useEffect(() => {
+    if (!isCodexAccount) return;
+    let active = true;
+    void api
+      .listProxies()
+      .then((res) => {
+        if (active) setProxyPool(res.proxies ?? []);
+      })
+      .catch(() => {
+        if (active) setProxyPool([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [isCodexAccount]);
 
   useEffect(() => {
     let active = true;
@@ -267,27 +297,39 @@ export default function TestConnectionModal({
     };
   }, [account.claude_api, account.model_mapping, account.models, isAntigravityAccount, isClaudeAccount, isOpenAIResponsesAccount]);
 
-  useEffect(() => {
-    if (!modelOptionsReady || !selectedModel) return;
+  const runConnectionTest = useCallback(
+    async (options?: { replayTurnState?: boolean }) => {
+      if (!selectedModel) return;
 
-    // 重置状态（StrictMode 二次 mount 时清理上一次的残留）
-    setOutput([]);
-    setStatus("connecting");
-    setErrorMsg("");
-    setDiagnostics(null);
-    setModel(selectedModel);
-    settledRef.current = false;
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
 
-    const controller = new AbortController();
-    abortRef.current = controller;
+      setOutput([]);
+      setStatus("connecting");
+      setErrorMsg("");
+      setDiagnostics(null);
+      setPingTurnState("");
+      setTurnStateChanged(false);
+      setModel(selectedModel);
+      settledRef.current = false;
 
-    const run = async () => {
-      if (controller.signal.aborted) return;
+      const replayTurnState = Boolean(options?.replayTurnState);
+      const sentTurnState = replayTurnState
+        ? (turnStates[selectedModel] ?? "").trim()
+        : "";
 
       try {
         const params = new URLSearchParams({ model: selectedModel });
         if (restoreOnSuccess) {
           params.set("restore_on_success", "true");
+        }
+        const trimmedProxy = proxyUrl.trim();
+        if (trimmedProxy) {
+          params.set("proxy_url", trimmedProxy);
+        }
+        if (sentTurnState) {
+          params.set("turn_state", sentTurnState);
         }
         const res = await fetch(
           `/api/admin/accounts/${account.id}/test?${params.toString()}`,
@@ -323,6 +365,7 @@ export default function TestConnectionModal({
         const decoder = new TextDecoder();
         let buffer = "";
         let receivedTerminalEvent = false;
+        let latestDiagnostics: CodexTestDiagnostics | null = null;
 
         const processEventLines = (lines: string[]) => {
           for (const line of lines) {
@@ -334,6 +377,7 @@ export default function TestConnectionModal({
               // 请求阶段失败时后端不单发 diagnostics 帧,而是把诊断挂在 error 事件上,
               // 因此不分事件类型,带了就收。
               if (event.codex_diagnostics) {
+                latestDiagnostics = event.codex_diagnostics;
                 setDiagnostics(event.codex_diagnostics);
               }
 
@@ -382,6 +426,14 @@ export default function TestConnectionModal({
           processEventLines([buffer]);
         }
 
+        const observedTurnState = extractCodexTurnState(latestDiagnostics);
+        if (observedTurnState) {
+          setPingTurnState(observedTurnState);
+          if (sentTurnState && sentTurnState !== observedTurnState) {
+            setTurnStateChanged(true);
+          }
+        }
+
         if (receivedTerminalEvent) {
           // 等服务端关闭 SSE 后再刷新列表：后端会在连接结束时提交状态并失效
           // 账号快照，提前刷新会重新读到“未采样”的旧缓存。
@@ -399,38 +451,37 @@ export default function TestConnectionModal({
         );
         markSettled();
       }
-    };
+    },
+    [
+      account.id,
+      markSettled,
+      proxyUrl,
+      restoreOnSuccess,
+      selectedModel,
+      t,
+      turnStates,
+    ],
+  );
 
-    // 延迟 50ms 启动，确保 StrictMode cleanup 有足够时间执行 abort
-    const timer = window.setTimeout(() => {
-      void run();
-    }, 50);
-
+  useEffect(() => {
     return () => {
-      window.clearTimeout(timer);
-      controller.abort();
+      abortRef.current?.abort();
     };
-  }, [
-    account.id,
-    attempt,
-    markSettled,
-    modelOptionsReady,
-    restoreOnSuccess,
-    selectedModel,
-    t,
-  ]);
+  }, []);
 
   useEffect(() => {
     outputEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [output]);
 
   const statusText = {
+    idle: t("accounts.testIdle"),
     connecting: t("accounts.connecting"),
     streaming: t("accounts.receivingResponse"),
     success: t("accounts.testSuccess"),
     error: t("accounts.testFailed"),
   }[status];
   const StatusIcon = {
+    idle: Radio,
     connecting: Loader2,
     streaming: Loader2,
     success: CheckCircle,
@@ -439,6 +490,7 @@ export default function TestConnectionModal({
   const statusIconSpin = status === "connecting" || status === "streaming";
 
   const statusColor = {
+    idle: "text-muted-foreground",
     connecting: "text-muted-foreground",
     streaming: "text-blue-500",
     success: "text-emerald-500",
@@ -454,6 +506,19 @@ export default function TestConnectionModal({
     }
   };
   const running = status === "connecting" || status === "streaming";
+  const selectedTurnState = turnStates[selectedModel] ?? "";
+  const applyPingTurnState = () => {
+    if (!pingTurnState || !selectedModel) return;
+    setTurnStates((prev) => ({ ...prev, [selectedModel]: pingTurnState }));
+  };
+  const handleCopyTurnState = async (value: string) => {
+    try {
+      await copyTextToClipboard(value);
+      showToast(t("common.copied"));
+    } catch {
+      showToast(t("common.copyFailed"), "error");
+    }
+  };
   const diagnosticsFinal = isFinalCodexTestDiagnostics(diagnostics);
   const handleCopyDiagnostics = async () => {
     try {
@@ -525,6 +590,7 @@ export default function TestConnectionModal({
     return parts.join(" · ");
   })();
   const identityRows: Array<{ label: string; value?: string; hint?: string }> = [
+    { label: "X-Codex-Turn-State", value: extractCodexTurnState(diagnostics) || undefined },
     { label: t("accounts.testDiagResponseModel"), value: diagnostics?.response_model },
     { label: t("accounts.testDiagTransport"), value: diagnostics?.transport },
     { label: t("accounts.testDiagPlan"), value: diagnostics?.plan_type },
@@ -587,13 +653,24 @@ export default function TestConnectionModal({
           >
             {t("common.close")}
           </Button>
+          {isCodexAccount ? (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={running || !modelOptionsReady || !selectedModel}
+              onClick={() => void runConnectionTest()}
+            >
+              <Radio className={cn("size-3.5", running && "animate-pulse")} />
+              {t("accounts.testPing")}
+            </Button>
+          ) : null}
           <Button
             type="button"
             disabled={running || !modelOptionsReady || !selectedModel}
-            onClick={() => setAttempt((value) => value + 1)}
+            onClick={() => void runConnectionTest({ replayTurnState: isCodexAccount })}
           >
             <RefreshCw className={cn("size-3.5", running && "animate-spin")} />
-            {t("accounts.testDiagRetry")}
+            {status === "idle" ? t("accounts.testStart") : t("accounts.testDiagRetry")}
           </Button>
         </div>
       }
@@ -616,9 +693,99 @@ export default function TestConnectionModal({
             onValueChange={setSelectedModel}
             options={modelSelectOptions}
             placeholder={model || t("settings.testModel")}
-            disabled={!modelOptionsReady || modelSelectOptions.length === 0}
+            disabled={!modelOptionsReady || modelSelectOptions.length === 0 || running}
           />
         </div>
+
+        {isCodexAccount && (
+          <div className="space-y-3 rounded-xl border border-border bg-muted/20 px-4 py-3">
+            <ProxyField
+              value={proxyUrl}
+              onChange={setProxyUrl}
+              proxies={proxyPool}
+              label={t("accounts.testProxyOverride")}
+              labelClassName="text-[11px] font-semibold"
+              disabled={running}
+            />
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              {t("accounts.testProxyOverrideHint")}
+            </p>
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2 text-[11px] font-semibold text-muted-foreground">
+                <span>{t("accounts.testTurnStatePing")}</span>
+                {pingTurnState ? (
+                  <div className="flex items-center gap-1">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2"
+                      disabled={running}
+                      onClick={() => void handleCopyTurnState(pingTurnState)}
+                    >
+                      <Copy className="size-3.5" />
+                      {t("common.copy")}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2"
+                      disabled={running || !selectedModel}
+                      onClick={applyPingTurnState}
+                    >
+                      {t("accounts.testTurnStateApply")}
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+              <pre
+                className="max-h-20 overflow-auto rounded-md border border-border/70 bg-background px-2.5 py-2 text-[11px] leading-relaxed whitespace-pre-wrap break-all"
+                style={monoStyle}
+              >
+                {pingTurnState || t("accounts.testTurnStateEmpty")}
+              </pre>
+              {turnStateChanged ? (
+                <p className="text-[11px] leading-relaxed text-amber-600 dark:text-amber-400">
+                  {t("accounts.testTurnStateChanged")}
+                </p>
+              ) : null}
+            </div>
+            <div className="space-y-2">
+              <div className="text-[11px] font-semibold text-muted-foreground">
+                {t("accounts.testTurnStateByModel")}
+              </div>
+              <div className="max-h-48 space-y-2 overflow-auto pr-0.5">
+                {modelSelectOptions.map((option) => (
+                  <label key={option.value} className="block space-y-1">
+                    <span className="block text-[11px] text-muted-foreground" style={monoStyle}>
+                      {option.label}
+                    </span>
+                    <Input
+                      value={turnStates[option.value] ?? ""}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setTurnStates((prev) => ({ ...prev, [option.value]: value }));
+                      }}
+                      placeholder={t("accounts.testTurnStatePlaceholder")}
+                      disabled={running}
+                      className="h-8 font-mono text-[11px]"
+                    />
+                  </label>
+                ))}
+              </div>
+              {selectedTurnState ? (
+                <p className="text-[11px] leading-relaxed text-muted-foreground">
+                  {t("accounts.testTurnStateReplayHint")}
+                </p>
+              ) : (
+                <p className="text-[11px] leading-relaxed text-muted-foreground">
+                  {t("accounts.testTurnStatePingHint")}
+                </p>
+              )}
+            </div>
+          </div>
+        )}
 
         {diagnostics && (
           <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">

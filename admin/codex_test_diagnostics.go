@@ -65,19 +65,22 @@ type codexTestDiagnostics struct {
 	// 安全缓冲:上游可能为额外审查而扣住输出;enabled 只说明该模型开着这项能力,
 	// faster_model 是官方 CLI "Retry with a faster model" 的切换目标,buffered
 	// 才表示本轮真的被缓冲过(事件级 safety_buffering=true)。
-	SafetyBufferingEnabled     *bool             `json:"safety_buffering_enabled,omitempty"`
-	SafetyBufferingFasterModel string            `json:"safety_buffering_faster_model,omitempty"`
-	SafetyBuffered             bool              `json:"safety_buffered,omitempty"`
-	ResponseStatus             string            `json:"response_status,omitempty"`
-	IncompleteReason           string            `json:"incomplete_reason,omitempty"`
-	ErrorType                  string            `json:"error_type,omitempty"`
-	ErrorCode                  string            `json:"error_code,omitempty"`
-	PrimaryWindow              *codexTestWindow  `json:"primary_window,omitempty"`
-	SecondaryWindow            *codexTestWindow  `json:"secondary_window,omitempty"`
-	Usage                      *codexTestUsage   `json:"usage,omitempty"`
-	ResponseHeaders            []codexTestHeader `json:"response_headers,omitempty"`
-	ResponseBody               string            `json:"response_body,omitempty"`
-	BodyTruncated              bool              `json:"body_truncated,omitempty"`
+	SafetyBufferingEnabled     *bool            `json:"safety_buffering_enabled,omitempty"`
+	SafetyBufferingFasterModel string           `json:"safety_buffering_faster_model,omitempty"`
+	SafetyBuffered             bool             `json:"safety_buffered,omitempty"`
+	ResponseStatus             string           `json:"response_status,omitempty"`
+	IncompleteReason           string           `json:"incomplete_reason,omitempty"`
+	ErrorType                  string           `json:"error_type,omitempty"`
+	ErrorCode                  string           `json:"error_code,omitempty"`
+	PrimaryWindow              *codexTestWindow `json:"primary_window,omitempty"`
+	SecondaryWindow            *codexTestWindow `json:"secondary_window,omitempty"`
+	Usage                      *codexTestUsage  `json:"usage,omitempty"`
+	// TurnState 是上游铸造的 x-codex-turn-state sticky-routing token。HTTP 响应头
+	// 与 WS 的 codex.response.metadata 帧都会写入这里，方便测连弹窗单独复制/回填。
+	TurnState       string            `json:"turn_state,omitempty"`
+	ResponseHeaders []codexTestHeader `json:"response_headers,omitempty"`
+	ResponseBody    string            `json:"response_body,omitempty"`
+	BodyTruncated   bool              `json:"body_truncated,omitempty"`
 }
 
 // codexTestCapture 旁路留存上游正文预览;超限只打截断标记,绝不截断真正被
@@ -255,6 +258,9 @@ func (r *codexTestRecorder) appendHeaders(header http.Header) {
 			continue
 		}
 		value := r.safeValue(strings.Join(header[key], ", "))
+		if name == "x-codex-turn-state" && value != "" {
+			r.details.TurnState = value
+		}
 		replaced := false
 		for i := range r.details.ResponseHeaders {
 			if r.details.ResponseHeaders[i].Name == name {

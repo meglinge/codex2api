@@ -393,6 +393,9 @@ func TestCodexTestRecorderDetectsWebsocketTransportAndMetadataFrames(t *testing.
 	if names["x-codex-turn-state"] != "turn-1" || names["x-request-id"] != "req_ws" {
 		t.Fatalf("metadata headers not merged: %+v", r.details.ResponseHeaders)
 	}
+	if r.details.TurnState != "turn-1" {
+		t.Fatalf("turn_state = %q, want turn-1 from websocket metadata", r.details.TurnState)
+	}
 	if _, leaked := names["set-cookie"]; leaked {
 		t.Fatalf("metadata cookie must be filtered: %+v", r.details.ResponseHeaders)
 	}
@@ -403,6 +406,17 @@ func TestCodexTestRecorderDetectsWebsocketTransportAndMetadataFrames(t *testing.
 	plain := newCodexTestRecorder(&http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, "gpt-5.4", nil, time.Now())
 	if plain.details.Transport != "http" {
 		t.Fatalf("transport = %q, want http", plain.details.Transport)
+	}
+}
+
+func TestCodexTestRecorderCapturesTurnStateFromHTTPHeaders(t *testing.T) {
+	headers := make(http.Header)
+	headers.Set("x-codex-turn-state", "turn-http")
+	headers.Set("x-request-id", "req_http")
+	resp := &http.Response{StatusCode: 200, Header: headers, Body: io.NopCloser(strings.NewReader(""))}
+	r := newCodexTestRecorder(resp, "gpt-5.4", nil, time.Now())
+	if r.details.TurnState != "turn-http" {
+		t.Fatalf("turn_state = %q, want turn-http", r.details.TurnState)
 	}
 }
 

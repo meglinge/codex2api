@@ -33,6 +33,37 @@ func newAntigravityConnectionTestAccount() *auth.Account {
 	}
 }
 
+func TestConnectionTestTurnStateHeaders(t *testing.T) {
+	headers, err := connectionTestTurnStateHeaders("  turn-abc  ")
+	if err != nil {
+		t.Fatalf("connectionTestTurnStateHeaders() error = %v", err)
+	}
+	if got := headers.Get("X-Codex-Turn-State"); got != "turn-abc" {
+		t.Fatalf("X-Codex-Turn-State = %q, want turn-abc", got)
+	}
+	empty, err := connectionTestTurnStateHeaders("   ")
+	if err != nil || empty != nil {
+		t.Fatalf("blank turn_state = (%v, %v), want (nil, nil)", empty, err)
+	}
+	if _, err := connectionTestTurnStateHeaders(strings.Repeat("x", maxConnectionTestTurnStateLen+1)); err == nil {
+		t.Fatal("overlong turn_state must be rejected")
+	}
+}
+
+func TestConnectionTestProxyURLUsesQueryOverride(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := &Handler{store: auth.NewStore(nil, nil, nil)}
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/admin/accounts/1/test?proxy_url=socks5://127.0.0.1:1080", nil)
+	got, err := handler.connectionTestProxyURL(c, &auth.Account{ProxyURL: "http://bound:8080"})
+	if err != nil {
+		t.Fatalf("connectionTestProxyURL() error = %v", err)
+	}
+	if got != "socks5://127.0.0.1:1080" {
+		t.Fatalf("proxy override = %q, want query value", got)
+	}
+}
+
 func TestConnectionAntigravityUsesNativeExecutorAndStreamsContent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	store := auth.NewStore(nil, nil, nil)

@@ -38,9 +38,21 @@ export interface CodexTestDiagnostics {
   primary_window?: CodexTestWindow;
   secondary_window?: CodexTestWindow;
   usage?: CodexTestUsage;
+  turn_state?: string;
   response_headers?: Array<{ name: string; value: string }>;
   response_body?: string;
   body_truncated?: boolean;
+}
+
+export const CODEX_TURN_STATE_HEADER = "x-codex-turn-state";
+
+export function extractCodexTurnState(diagnostics?: CodexTestDiagnostics | null): string {
+  const fromField = diagnostics?.turn_state?.trim();
+  if (fromField) return fromField;
+  const header = diagnostics?.response_headers?.find(
+    (item) => item.name.trim().toLowerCase() === CODEX_TURN_STATE_HEADER,
+  );
+  return header?.value.trim() ?? "";
 }
 
 export type CodexTestWindowKind = "5h" | "7d" | "short" | "unknown";

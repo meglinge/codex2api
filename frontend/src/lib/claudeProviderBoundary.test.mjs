@@ -52,6 +52,15 @@ test("shared connection test modal selects Claude native models", () => {
   assert.match(testModal, /claude-opus-4-5|claude-sonnet-4-5/);
 });
 
+test("shared connection test modal waits for a manual start", () => {
+  assert.match(testModal, /"idle" \| "connecting" \| "streaming" \| "success" \| "error"/);
+  assert.match(testModal, />\("idle"\)/);
+  assert.doesNotMatch(testModal, /setAttempt\(\(value\) => value \+ 1\)/);
+  assert.match(testModal, /runConnectionTest\(\)/);
+  assert.match(testModal, /accounts\.testPing/);
+  assert.match(testModal, /accounts\.testTurnStateByModel/);
+});
+
 test("shared account detail sheet keeps Claude out of Codex-only actions", () => {
   assert.match(detailSheet, /claude_api/);
   assert.match(detailSheet, /isClaude/);

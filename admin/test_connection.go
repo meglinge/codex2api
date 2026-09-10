@@ -16,10 +16,13 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/proxy"
+	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+const maxConnectionTestTurnStateLen = 8192
 
 var batchTestAccountTimeout = 30 * time.Second
 var batchTestWhamTimeout = 5 * time.Second
@@ -131,6 +134,16 @@ func (h *Handler) TestConnection(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	proxyURL, err := h.connectionTestProxyURL(c, account)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	extraHeaders, err := connectionTestTurnStateHeaders(c.Query("turn_state"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	// 设置 SSE 响应头
 	c.Header("Content-Type", "text/event-stream")
@@ -164,13 +177,13 @@ func (h *Handler) TestConnection(c *gin.Context) {
 	var resp *http.Response
 	var reqErr error
 	if isClaudeAccount {
-		resp, reqErr = proxy.ExecuteClaudeMessagesRequest(c.Request.Context(), account, payload, h.store.ResolveProxyForAccount(account), c.Request.Header.Clone(), claudeFingerprintMode, claudeSecurityCfg)
+		resp, reqErr = proxy.ExecuteClaudeMessagesRequest(c.Request.Context(), account, payload, proxyURL, c.Request.Header.Clone(), claudeFingerprintMode, claudeSecurityCfg)
 	} else if isAntigravityAccount {
-		resp, reqErr = h.executeAntigravityConnectionTest(c.Request.Context(), account, testModel, payload, h.store.ResolveProxyForAccount(account), !isTransient)
+		resp, reqErr = h.executeAntigravityConnectionTest(c.Request.Context(), account, testModel, payload, proxyURL, !isTransient)
 	} else if isOpenAIResponsesAccount {
-		resp, reqErr = proxy.ExecuteRelayStyleRequest(c.Request.Context(), account, payload, h.store.ResolveProxyForAccount(account), nil)
+		resp, reqErr = proxy.ExecuteRelayStyleRequest(c.Request.Context(), account, payload, proxyURL, extraHeaders)
 	} else {
-		resp, reqErr = proxy.ExecuteRequest(c.Request.Context(), account, payload, "", h.store.ResolveProxyForAccount(account), "", nil, nil)
+		resp, reqErr = proxy.ExecuteRequest(c.Request.Context(), account, payload, "", proxyURL, "", nil, extraHeaders)
 	}
 	if reqErr != nil {
 		event := testEvent{Type: "error", Error: fmt.Sprintf("请求失败: %s", reqErr.Error())}
@@ -859,6 +872,40 @@ func formatUpstreamEventDetail(message string, data []byte) string {
 		}
 	}
 	return message + "\n\n上游事件:\n" + truncate(detail, 3000)
+}
+
+// connectionTestProxyURL 解析本次测连要用的出口代理。query 里带了 proxy_url
+// 就覆盖账号绑定/组代理/全局代理，方便在新 IP 上 ping 拿 turn-state；留空则沿用
+// ResolveProxyForAccount。本次测连不写回账号绑定。
+func (h *Handler) connectionTestProxyURL(c *gin.Context, account *auth.Account) (string, error) {
+	raw := strings.TrimSpace(c.Query("proxy_url"))
+	if raw == "" {
+		if h == nil || h.store == nil {
+			return "", nil
+		}
+		return h.store.ResolveProxyForAccount(account), nil
+	}
+	raw = security.SanitizeInput(raw)
+	if err := security.ValidateProxyURL(raw); err != nil {
+		return "", fmt.Errorf("无效的代理地址")
+	}
+	return raw, nil
+}
+
+// connectionTestTurnStateHeaders 把测连 query 里的 turn_state 转成上游请求头。
+// Codex 官方客户端在同一回合的后续请求回放 x-codex-turn-state；ping 不带头，
+// 后续测连才带头，用来观察这个值有没有被上游换掉。
+func connectionTestTurnStateHeaders(raw string) (http.Header, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil, nil
+	}
+	if len(value) > maxConnectionTestTurnStateLen {
+		return nil, fmt.Errorf("turn_state 过长")
+	}
+	headers := make(http.Header, 1)
+	headers.Set("X-Codex-Turn-State", value)
+	return headers, nil
 }
 
 func isSupportedConnectionTestModel(model string) bool {
