@@ -608,7 +608,7 @@ func TestExecuteCompactRequestConvergesBodyAndHeaders(t *testing.T) {
 	SetResinConfig(&ResinConfig{BaseURL: server.URL, PlatformName: "test"})
 	clientPool.Delete(fmt.Sprintf("resin|%d", account.ID()))
 
-	body := []byte(`{"model":"gpt-5.6-codex","client_metadata":{"x-codex-installation-id":"client-install","session_id":"client-session","thread_id":"client-thread","x-codex-window-id":"client-window:0"}}`)
+	body := []byte(`{"model":"gpt-5.6-codex","user":"alice@corp.example","client_metadata":{"x-codex-installation-id":"client-install","session_id":"client-session","thread_id":"client-thread","x-codex-window-id":"client-window:0","user_email":"alice@corp.example"}}`)
 	resp, err := ExecuteCompactRequest(context.Background(), account, body, "", "", "api-key-1", nil, downstream)
 	if err != nil {
 		t.Fatalf("ExecuteCompactRequest: %v", err)
@@ -631,6 +631,9 @@ func TestExecuteCompactRequestConvergesBodyAndHeaders(t *testing.T) {
 	}
 	if got := gjson.GetBytes(capturedBody, "client_metadata.x-codex-installation-id").String(); got != capturedHeader.Get(codexInstallationIDHeader) {
 		t.Fatalf("header/body installation id disagree: body=%q header=%q", got, capturedHeader.Get(codexInstallationIDHeader))
+	}
+	if gjson.GetBytes(capturedBody, "user").Exists() || gjson.GetBytes(capturedBody, "client_metadata.user_email").Exists() {
+		t.Fatalf("compact outbound must apply the body allowlist: %s", capturedBody)
 	}
 }
 

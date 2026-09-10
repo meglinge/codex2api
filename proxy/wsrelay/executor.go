@@ -311,6 +311,9 @@ func (e *Executor) prepareWebsocketBody(body []byte, sessionID string) []byte {
 	wsBody, _ = sjson.SetBytes(wsBody, "type", "response.create")
 	wsBody, _ = sjson.SetBytes(wsBody, "stream", true)
 
+	// 5. 顶层字段白名单收口：与 HTTP 路径同一份名单，只放真实客户端会发的键出去。
+	wsBody = proxy.ApplyCodexOutboundBodyAllowlist(wsBody)
+
 	return wsBody
 }
 
@@ -361,7 +364,9 @@ func (e *Executor) prepareWebsocketHeaders(ctx context.Context, accessToken stri
 	}
 	// X-Oai-Attestation（DeviceCheck 设备认证，上游 openai/codex#20619）与 HTTP 路径
 	// 一样不透传：它把下游真实设备与号池账号绑定，且无法与生成的 UA 画像自洽。
-	for _, name := range []string{"X-Codex-Turn-State", "X-Codex-Turn-Metadata", "X-Client-Request-Id", "X-Codex-Window-Id", "X-Responsesapi-Include-Timing-Metrics"} {
+	// 源码 build_websocket_headers 握手不发 turn-state（turn_state=None），
+	// 该 token 只出现在 response.create 帧的 client_metadata 里。
+	for _, name := range []string{"X-Codex-Turn-Metadata", "X-Client-Request-Id", "X-Codex-Window-Id", "X-Codex-Parent-Thread-Id", "X-Openai-Subagent", "X-Responsesapi-Include-Timing-Metrics"} {
 		if value := strings.TrimSpace(ginHeaders.Get(name)); value != "" {
 			headers.Set(name, value)
 		}
@@ -385,12 +390,17 @@ func (e *Executor) prepareWebsocketHeaders(ctx context.Context, accessToken stri
 		// 只在握手带会话（显式会话）时覆盖；stateless 连接的身份只在帧体里。
 		proxy.ApplyCodexOutboundIdentityHeaders(headers, ctx)
 	}
-	for name, value := range account.GetCustomHeaders() {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
+	// 与 HTTP 路径同一收口：turn metadata JSON 里的未知键不出境。
+	// 无会话的 stateless 握手也会拷贝下游 turn metadata，必须在自定义头之前裁。
+	proxy.ApplyCodexOutboundHeaderAllowlists(headers)
+	if account != nil {
+		for name, value := range account.GetCustomHeaders() {
+			name = strings.TrimSpace(name)
+			if name == "" || !proxy.IsAllowedCodexCustomHeader(name) {
+				continue
+			}
+			headers.Set(name, value)
 		}
-		headers.Set(name, value)
 	}
 
 	// routing hint 由网关按最终 WS 帧体合成，在账号自定义头之后设置。

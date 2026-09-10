@@ -11,10 +11,14 @@ import "strings"
 // 出站 Session_id 头由 resolveUpstreamSessionID 独立决定，收敛不参与，
 // 因此 prompt cache 隔离行为和 isolate_requests_by_default 设置不受影响。
 const (
-	// CodexFingerprintModeOff 不做任何收敛，客户端标识原样透传（默认）。
+	// CodexFingerprintModeOff 默认隔离：下游自报的 session / thread / window /
+	// installation 一律换成网关签发的值，不再原样出境。
 	CodexFingerprintModeOff = "off"
+	// CodexFingerprintModePassthrough 显式例外：真实客户端自报的标识原样出境。
+	// 旧版 off 的行为；完全隔离部署不要开。
+	CodexFingerprintModePassthrough = "passthrough"
 	// CodexFingerprintModeDevice 仅把 installation_id 收敛为账号级恒定值。
-	// 上游看到 1 台设备 + 每个下游用户各自的会话。
+	// 上游看到 1 台设备；会话 / 线程仍走网关身份，不再透传下游 UUID。
 	CodexFingerprintModeDevice = "device"
 	// CodexFingerprintModeSession 收敛 installation_id + session_id，并按客户端
 	// 原始会话标识确定性派生 thread_id：每个真实 Codex 会话得到一个独立线程。
@@ -32,6 +36,8 @@ const CodexFingerprintModeCredentialKey = "codex_fingerprint_mode"
 // 保证既有账号在升级后出站行为完全不变，必须显式配置才启用收敛。
 func NormalizeCodexFingerprintMode(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
+	case CodexFingerprintModePassthrough:
+		return CodexFingerprintModePassthrough
 	case CodexFingerprintModeDevice:
 		return CodexFingerprintModeDevice
 	case CodexFingerprintModeSession:
@@ -43,10 +49,10 @@ func NormalizeCodexFingerprintMode(value string) string {
 	}
 }
 
-// IsValidCodexFingerprintMode 报告取值是否为四个已知档位之一。
+// IsValidCodexFingerprintMode 报告取值是否为已知档位之一。
 func IsValidCodexFingerprintMode(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case CodexFingerprintModeOff, CodexFingerprintModeDevice, CodexFingerprintModeSession, CodexFingerprintModeFull:
+	case CodexFingerprintModeOff, CodexFingerprintModePassthrough, CodexFingerprintModeDevice, CodexFingerprintModeSession, CodexFingerprintModeFull:
 		return true
 	default:
 		return false

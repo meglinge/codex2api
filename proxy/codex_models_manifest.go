@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 // CodexModelsManifestHandler 向 Codex 客户端提供模型清单。
@@ -44,13 +46,9 @@ func (h *Handler) CodexModelsManifestHandler(c *gin.Context) {
 	}
 	restrictManifest := codexManifestNeedsFiltering(row, account)
 	extraModels := h.extraRelayManifestModels(c.Request.Context(), row)
-	ifNoneMatch := c.GetHeader("If-None-Match")
-	if restrictManifest || len(extraModels) > 0 {
-		// Restricted responses use a gateway ETag derived from the filtered
-		// or locally merged representation. It is not an upstream validator, and
-		// forwarding it can produce a body-less 304 that cannot be rebuilt safely.
-		ifNoneMatch = ""
-	}
+	// 不把下游 If-None-Match 转给上游：那是网关 ETag，转发会变成账号间的第二条
+	// 身份通道，换号后还可能 304 出别人的清单。
+	ifNoneMatch := ""
 
 	manifest, err := FetchCodexModelsManifest(
 		c.Request.Context(),
@@ -91,10 +89,9 @@ func (h *Handler) CodexModelsManifestHandler(c *gin.Context) {
 	}
 
 	if manifest.NotModified {
-		if manifest.ETag != "" {
-			c.Header("ETag", manifest.ETag)
+		if !h.serveScopedCodexManifest(c, row) {
+			api.SendError(c, api.ErrServiceUnavailable)
 		}
-		c.Status(http.StatusNotModified)
 		return
 	}
 	// 顺手把清单里注册表不认识的新模型学习进注册表（只增不改不删），
@@ -163,10 +160,86 @@ func (h *Handler) extraRelayManifestModels(ctx context.Context, row *database.AP
 	return extras
 }
 
-func (h *Handler) writeCodexManifest(c *gin.Context, body []byte, etag string) {
-	if etag == "" {
-		etag = scopedCodexManifestETag(body)
+var codexManifestTopLevelAllowlist = map[string]struct{}{
+	"models": {},
+}
+
+// codexManifestModelAllowlist 是 ModelInfo 的字段全集（protocol/src/openai_models.rs），
+// 外加旧清单里的兼容键。不在表上的键（email / account / plan）丢掉。
+var codexManifestModelAllowlist = map[string]struct{}{
+	"slug":                                 {},
+	"display_name":                         {},
+	"description":                          {},
+	"default_reasoning_level":              {},
+	"supported_reasoning_levels":           {},
+	"shell_type":                           {},
+	"visibility":                           {},
+	"supported_in_api":                     {},
+	"priority":                             {},
+	"additional_speed_tiers":               {},
+	"service_tiers":                        {},
+	"default_service_tier":                 {},
+	"availability_nux":                     {},
+	"upgrade":                              {},
+	"model_messages":                       {},
+	"include_skills_usage_instructions":    {},
+	"include_plugin_usage_instructions":    {},
+	"include_apps_usage_instructions":      {},
+	"supports_reasoning_summary_parameter": {},
+	"default_reasoning_summary":            {},
+	"support_verbosity":                    {},
+	"default_verbosity":                    {},
+	"apply_patch_tool_type":                {},
+	"web_search_tool_type":                 {},
+	"truncation_policy":                    {},
+	"supports_image_detail_original":       {},
+	"context_window":                       {},
+	"max_context_window":                   {},
+	"auto_compact_token_limit":             {},
+	"comp_hash":                            {},
+	"effective_context_window_percent":     {},
+	"experimental_supported_tools":         {},
+	"input_modalities":                     {},
+	"supports_search_tool":                 {},
+	"supports_experimental_context":        {},
+	"use_responses_lite":                   {},
+	"node_repl_auto_review_required":       {},
+	"node_repl_disabled":                   {},
+	"auto_review_model_override":           {},
+	"model_specialty":                      {},
+	"tool_mode":                            {},
+	"multi_agent_version":                  {},
+	"multi_agent_reasoning_effort":         {},
+	"guardian":                             {},
+	"hidden":                               {},
+	"availability":                         {},
+	"prefer_websockets":                    {},
+	"base_instructions":                    {},
+	"supports_reasoning_summaries":         {},
+	"supports_parallel_tool_calls":         {},
+}
+
+func sanitizeCodexManifestBody(body []byte) []byte {
+	if !gjson.ValidBytes(body) || !gjson.ParseBytes(body).IsObject() {
+		return body
 	}
+	out := dropDisallowedObjectKeysAt(body, "", codexManifestTopLevelAllowlist)
+	models := gjson.GetBytes(out, "models")
+	if !models.IsArray() {
+		return out
+	}
+	i := 0
+	models.ForEach(func(_, _ gjson.Result) bool {
+		out = dropDisallowedObjectKeysAt(out, "models."+strconv.Itoa(i), codexManifestModelAllowlist)
+		i++
+		return true
+	})
+	return out
+}
+
+func (h *Handler) writeCodexManifest(c *gin.Context, body []byte, etag string) {
+	body = sanitizeCodexManifestBody(body)
+	etag = scopedCodexManifestETag(body)
 	c.Header("ETag", etag)
 	if etagHeaderMatches(c.GetHeader("If-None-Match"), etag) {
 		c.Status(http.StatusNotModified)

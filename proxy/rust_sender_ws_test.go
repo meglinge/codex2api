@@ -18,18 +18,18 @@ import (
 func TestRustSenderWebsocketDialRewritesOnlyInRustMode(t *testing.T) {
 	headers := http.Header{"Authorization": []string{"Bearer t"}}
 	t.Setenv("CODEX_TRANSPORT_MODE", "")
-	if url, _, ok := RustSenderWebsocketDial("wss://chatgpt.com/backend-api/codex/responses", headers, "socks5h://p:1080"); ok || url != "wss://chatgpt.com/backend-api/codex/responses" {
+	if url, _, ok := RustSenderWebsocketDial("wss://chatgpt.com/backend-api/codex/responses", headers, "socks5h://p:1080", "acct-7"); ok || url != "wss://chatgpt.com/backend-api/codex/responses" {
 		t.Fatalf("non-rust mode must not rewrite: %q %v", url, ok)
 	}
 
 	t.Setenv("CODEX_TRANSPORT_MODE", "rust")
 	t.Setenv(rustSenderURLEnv, "http://127.0.0.1:8799/")
 	t.Setenv(rustSenderTokenEnv, "tok")
-	url, out, ok := RustSenderWebsocketDial("wss://chatgpt.com/backend-api/codex/responses", headers, "socks5h://p:1080")
+	url, out, ok := RustSenderWebsocketDial("wss://chatgpt.com/backend-api/codex/responses", headers, "socks5h://p:1080", "acct-7")
 	if !ok || url != "ws://127.0.0.1:8799/ws" {
 		t.Fatalf("rewritten url = %q ok=%v", url, ok)
 	}
-	if out.Get(rustSenderControlURL) != "wss://chatgpt.com/backend-api/codex/responses" || out.Get(rustSenderControlProxy) != "socks5h://p:1080" || out.Get(rustSenderControlToken) != "tok" || out.Get("Authorization") != "Bearer t" {
+	if out.Get(rustSenderControlURL) != "wss://chatgpt.com/backend-api/codex/responses" || out.Get(rustSenderControlProxy) != "socks5h://p:1080" || out.Get(rustSenderControlToken) != "tok" || out.Get(rustSenderControlPool) != "acct-7" || out.Get("Authorization") != "Bearer t" {
 		t.Fatalf("control headers wrong: %v", out)
 	}
 	if headers.Get(rustSenderControlURL) != "" {
@@ -106,7 +106,7 @@ func TestRustSenderWebsocketEndToEnd(t *testing.T) {
 		"Openai-Beta":           []string{"responses_websockets=2026-02-06"},
 		"X-Codex-Beta-Features": []string{"remote_compaction_v2"},
 	}
-	dialURL, dialHeaders, ok := RustSenderWebsocketDial(wsURL, headers, "")
+	dialURL, dialHeaders, ok := RustSenderWebsocketDial(wsURL, headers, "", "acct-7")
 	if !ok {
 		t.Fatal("expected rust mode rewrite")
 	}
@@ -142,7 +142,7 @@ func TestRustSenderWebsocketEndToEnd(t *testing.T) {
 			t.Fatalf("upstream handshake missing %s: %v", name, seenHeaders)
 		}
 	}
-	for _, name := range []string{"X-C2a-Url", "X-C2a-Token", "X-C2a-Proxy"} {
+	for _, name := range []string{"X-C2a-Url", "X-C2a-Token", "X-C2a-Proxy", "X-C2a-Pool"} {
 		if seenHeaders.Get(name) != "" {
 			t.Fatalf("control header %s leaked upstream", name)
 		}

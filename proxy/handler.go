@@ -1209,6 +1209,7 @@ func (h *Handler) SetRuntimeCache(tc cache.TokenCache) {
 		return
 	}
 	h.cache = tc
+	SetCodexIDIsolationCache(tc)
 	if h.authCache != nil {
 		h.authCache.close()
 		h.authCache = nil
@@ -5427,6 +5428,10 @@ func (h *Handler) Responses(c *gin.Context) {
 			seenImageOutputs := make(map[string]struct{})
 			emptyIncomplete := &emptyIncompleteTracker{}
 			readErr = readSSEStreamWithContinuousRetryKeepalive(c.Request.Context(), resp.Body, func(sseEvent string, data []byte) bool {
+				// 标识隔离：与流式路径同一位置换 response.id（codex_id_isolation.go）。
+				// 必须在收集之前换：completedResponseData 会成为响应上下文缓存的内容，
+				// 而下游续链回带的是网关 id，缓存里存上游 id 就再也命中不了。
+				data = rewriteDownstreamResponseID(data)
 				if continuousRetryBuffersAttempts(continuousRetryPolicy) {
 					compactionProvenancePayloads = append(compactionProvenancePayloads, bytes.Clone(data))
 				} else {
@@ -5845,6 +5850,8 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	// 准备上游请求体（previous_response_id 缓存按下游 API Key 隔离）
 	bodyPreparation := prepareCompactResponsesBodyForOwnerDetailed(rawBody, responseCacheOwner(apiKeyID))
 	codexBody := bodyPreparation.Body
+	// 下行身份隔离：compact 成功体此前原文下发，response.id / 回显字段会漏到下游。
+	downstreamIdentity := newDownstreamIdentityContext(rawBody, nil)
 	continuationStatus, continuationReason, continuationUnavailable := responseCachePreparationFailure(bodyPreparation)
 	// strip 策略：剥离图片工具能力声明后作为普通文本请求继续（issue #411）。
 	codexBody = applyImageGenerationStripPolicy(c, codexBody)
@@ -6216,6 +6223,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			if contentType == "" {
 				contentType = "application/json"
 			}
+			respBody = sanitizeDownstreamResponseIdentity(respBody, downstreamIdentity.withAccount(account))
 			c.Data(http.StatusOK, contentType, respBody)
 			h.recordCompactionProvenanceFromPayload(context.Background(), account, respBody)
 			return
@@ -6352,7 +6360,8 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			return
 		}
 
-		// 成功：直接透传响应体（body-signal 兼容模式先把 SSE 聚合成一次性 JSON）
+		// 成功：读出响应体（body-signal 兼容模式先把 SSE 聚合成一次性 JSON），
+		// 写出前走与 /v1/responses 相同的身份清洗。
 		var respBody []byte
 		var readErr error
 		var compactFailedPayload []byte
@@ -6584,6 +6593,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 
 		h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)
 		h.store.ReleaseForSessionWithGuard(account, affinityKey, affinityGuard)
+		respBody = sanitizeDownstreamResponseIdentity(respBody, downstreamIdentity.withAccount(account))
 		c.Data(http.StatusOK, "application/json", respBody)
 		h.recordCompactionProvenanceFromPayload(context.Background(), account, respBody)
 		return

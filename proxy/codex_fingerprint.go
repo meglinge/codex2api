@@ -21,9 +21,8 @@ import (
 // 档位语义见 auth/codex_fingerprint_mode.go。
 //
 // 收敛面严格限定在两个载体：
-//   - X-Codex-Turn-Metadata 请求头里的 JSON（本项目按白名单原样透传，见
-//     codexAllowedForwardHeaders，客户端真实标识由此泄漏）
-//   - 请求体 client_metadata（Codex 官方路径同样原样透传）
+//   - X-Codex-Turn-Metadata 请求头里的 JSON
+//   - 请求体 client_metadata
 //
 // 明确不改写的部分：
 //   - 出站 Session_id 头：由 resolveUpstreamSessionID 独立决定（默认隔离模式下每请求
@@ -168,7 +167,7 @@ func resolveCodexFingerprintIDs(account *auth.Account, downstreamHeaders http.He
 		return nil
 	}
 	mode := account.EffectiveCodexFingerprintMode()
-	if mode == auth.CodexFingerprintModeOff {
+	if mode == auth.CodexFingerprintModeOff || mode == auth.CodexFingerprintModePassthrough {
 		return nil
 	}
 	accountID := account.ID()
@@ -305,8 +304,7 @@ func ApplyCodexFingerprintHeaders(outbound http.Header, account *auth.Account, d
 }
 
 // overrideExistingHeader 仅在下游确实发过该头时，用收敛值覆盖出站取值。
-// 判定读下游头而非出站头：这两个标识头都不在 codexAllowedForwardHeaders 里，
-// 下游即使发了，到这一步出站请求上也没有。
+// 判定读下游头：白名单可能已经把原值拷到出站请求上，这里再换成映射值。
 func overrideExistingHeader(outbound, downstreamHeaders http.Header, name, value string) {
 	if value == "" || downstreamHeaders == nil {
 		return

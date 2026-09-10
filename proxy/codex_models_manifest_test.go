@@ -13,6 +13,7 @@ import (
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 // TestListModelsOrManifest_DispatchesByClientVersion 验证 /models 分发:
@@ -165,6 +166,23 @@ func TestAntigravityManifestDoesNotInferReasoningFromNonGeminiNames(t *testing.T
 		if len(model.SupportedReasoningLevels) != 0 {
 			t.Fatalf("%s unexpectedly advertises reasoning levels: %v", model.Slug, model.SupportedReasoningLevels)
 		}
+	}
+}
+
+func TestSanitizeCodexManifestBodyDropsIdentityFields(t *testing.T) {
+	raw := []byte(`{"object":"list","account":"acc-secret","plan":"pro","models":[{"slug":"gpt-5.6-sol","display_name":"Sol","email":"user@x","supported_in_api":true,"use_responses_lite":true,"supports_search_tool":true,"comp_hash":"abc"}]}`)
+	out := sanitizeCodexManifestBody(raw)
+	if gjson.GetBytes(out, "account").Exists() || gjson.GetBytes(out, "plan").Exists() || gjson.GetBytes(out, "object").Exists() {
+		t.Fatalf("top-level identity fields must be dropped: %s", out)
+	}
+	if gjson.GetBytes(out, "models.0.slug").String() != "gpt-5.6-sol" || !gjson.GetBytes(out, "models.0.supported_in_api").Bool() {
+		t.Fatalf("capability fields must survive: %s", out)
+	}
+	if !gjson.GetBytes(out, "models.0.use_responses_lite").Bool() || !gjson.GetBytes(out, "models.0.supports_search_tool").Bool() || gjson.GetBytes(out, "models.0.comp_hash").String() != "abc" {
+		t.Fatalf("ModelInfo capability fields must survive: %s", out)
+	}
+	if gjson.GetBytes(out, "models.0.email").Exists() {
+		t.Fatalf("per-model identity fields must be dropped: %s", out)
 	}
 }
 

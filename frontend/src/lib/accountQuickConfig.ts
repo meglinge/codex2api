@@ -65,6 +65,7 @@ export function normalizeCodexFingerprintMode(
 ): CodexFingerprintMode {
   if (
     value === "off" ||
+    value === "passthrough" ||
     value === "device" ||
     value === "session" ||
     value === "full"

@@ -265,12 +265,18 @@ func newCodexStandardTransport(proxyURL string) http.RoundTripper {
 }
 
 func newCodexTransport(proxyURL string) http.RoundTripper {
+	return newCodexTransportForAccount(proxyURL, nil)
+}
+
+// newCodexTransportForAccount 与 newCodexTransport 相同，但把账号透传给 rust 发送器作为
+// 隔离池标识。账号为 nil 时（维护类旁路请求）落到默认池。
+func newCodexTransportForAccount(proxyURL string, account *auth.Account) http.RoundTripper {
 	switch codexTransportModeFromEnv() {
 	case codexTransportModeUTLSChrome:
 		return NewUTLSTransport(proxyURL)
 	case codexTransportModeRust:
 		// 出站交给 sender/（c2a-sender），TLS / HTTP2 / 头序与真实 Codex 客户端同源。
-		return newRustSenderTransport(proxyURL)
+		return newRustSenderTransport(proxyURL, CodexSenderPoolID(account))
 	default:
 		return newCodexStandardTransport(proxyURL)
 	}
@@ -330,7 +336,7 @@ func getPooledClient(account *auth.Account, proxyURL string) *http.Client {
 		return entry.client
 	}
 
-	transport := newCodexTransport(proxyURL)
+	transport := newCodexTransportForAccount(proxyURL, account)
 
 	entry := &poolEntry{
 		createdAt: time.Now().UnixNano(),
@@ -385,6 +391,9 @@ var codexAllowedForwardHeaders = []string{
 	"X-Codex-Window-Id",
 	"X-Codex-Beta-Features",
 	codexResponsesLiteHeader,
+	// compatibility_headers：子代理 / 父线程。parent-thread-id 的值随后由指纹/身份层改写。
+	"X-Codex-Parent-Thread-Id",
+	"X-Openai-Subagent",
 }
 
 func codexResponsesLiteRequested(requestBody []byte, headers http.Header) bool {
@@ -543,6 +552,8 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	defer func() { encryptedAttempt.observeResponse(upstreamResponse, requestBody) }()
 	// 标识隔离：下游回带的 turn-state token 换回上游 blob（跨账号或未知则删除），见 codex_id_isolation.go。
 	requestBody, headers = resolveCodexTurnStateEcho(account, requestBody, headers)
+	requestBody = mapUpstreamItemIDsInRequest(requestBody, account)
+	requestBody = mapClientMetadataParentResponseID(requestBody)
 
 	// Payload 规则改写：在 WS/HTTP 分叉前统一应用，两条上游路径共享改写结果。
 	// 生图请求跳过——其 instructions/工具由网关自行构造，改写会破坏桥接协议。
@@ -706,6 +717,11 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	}
 
 	endpoint := CodexBaseURL + "/responses"
+
+	// 顶层字段白名单：所有改写与注入都做完之后收口，只放真实客户端会发的键出去
+	// （codex_body_allowlist.go）。放在压缩之前，压缩之后就只剩字节了。
+	requestBody = scrubCodexInputNestedIdentity(requestBody, account != nil && !account.IsRelayStyle())
+	requestBody = ApplyCodexOutboundBodyAllowlist(requestBody)
 
 	// 出站字节在选客户端之前定稿：send() 会因 Agent Identity 401 重注册而重放，
 	// 两次重放必须发同一份字节。routing hint 等需要读字段的改写点继续用明文
@@ -999,6 +1015,8 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	defer func() { encryptedAttempt.observeResponse(upstreamResponse, requestBody) }()
 	// 标识隔离：下游回带的 turn-state token 换回上游 blob（跨账号或未知则删除），见 codex_id_isolation.go。
 	requestBody, headers = resolveCodexTurnStateEcho(account, requestBody, headers)
+	requestBody = mapUpstreamItemIDsInRequest(requestBody, account)
+	requestBody = mapClientMetadataParentResponseID(requestBody)
 	responsesLite := gateResponsesLiteForAccount(codexResponsesLiteRequested(requestBody, headers), requestBody, account)
 
 	account.Mu().RLock()
@@ -1047,6 +1065,11 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 		cacheKey = sessionID
 		requestBody, _ = sjson.SetBytes(requestBody, "prompt_cache_key", cacheKey)
 	}
+
+	// 顶层 + 嵌套白名单：与 ExecuteRequest 同一收口。compact 此前只删了几个
+	// 已知字段，未知顶层键和 client_metadata 里的私货会原样出境。
+	requestBody = scrubCodexInputNestedIdentity(requestBody, account != nil && !account.IsRelayStyle())
+	requestBody = ApplyCodexOutboundBodyAllowlist(requestBody)
 
 	// compact 端点
 	endpoint := CodexBaseURL + "/responses/compact"
@@ -1261,19 +1284,6 @@ func applyCodexAllowedForwardHeaders(req *http.Request, downstreamHeaders http.H
 	}
 }
 
-func applyAccountCustomHeaders(req *http.Request, account *auth.Account) {
-	if req == nil || account == nil {
-		return
-	}
-	for name, value := range account.GetCustomHeaders() {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		req.Header.Set(name, value)
-	}
-}
-
 func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessToken, cacheKey, apiKey string, deviceCfg *DeviceProfileConfig, downstreamHeaders http.Header) {
 	if req == nil {
 		return
@@ -1340,7 +1350,8 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 	// 出站身份统一：会话 / 线程 / 窗口标识与 turn metadata 头在此定稿，与请求体同源
 	// （见 codex_outbound_identity.go）。仍在账号自定义头之前，保持运维覆盖优先。
 	ApplyCodexOutboundIdentityHeaders(req.Header, req.Context())
-	applyAccountCustomHeaders(req, account)
+	ApplyCodexOutboundHeaderAllowlists(req.Header)
+	applyCodexAccountCustomHeaders(req, account)
 	RecordUpstreamUserAgent(req.Context(), req.Header.Get("User-Agent"))
 }
 

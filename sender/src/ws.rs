@@ -49,6 +49,7 @@ use tracing::warn;
 use crate::AppState;
 use crate::CONTROL_METHOD;
 use crate::CONTROL_PROXY;
+use crate::CONTROL_POOL;
 use crate::CONTROL_TOKEN;
 use crate::CONTROL_URL;
 use crate::error_response;
@@ -99,6 +100,7 @@ const WS_DROPPED: &[&str] = &[
     CONTROL_METHOD,
     CONTROL_PROXY,
     CONTROL_TOKEN,
+    CONTROL_POOL,
 ];
 
 /// Same extension configuration as `codex-api/src/endpoint/responses_websocket.rs::websocket_config`.
@@ -306,7 +308,7 @@ pub(crate) async fn ws_bridge(State(state): State<Arc<AppState>>, mut req: Reque
         .unwrap_or("")
         .trim()
         .to_string();
-    let tls_config = match state.ws_tls_config() {
+    let tls_config = match state.ws_tls_config(&crate::pool_of(&headers)) {
         Ok(config) => config,
         Err(err) => return error_response(StatusCode::BAD_GATEWAY, format!("tls: {err}")),
     };

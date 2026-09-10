@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/codex2api/auth"
 )
 
 func TestRustSenderTransportForwardsThroughSender(t *testing.T) {
@@ -24,7 +26,7 @@ func TestRustSenderTransportForwardsThroughSender(t *testing.T) {
 	t.Setenv(rustSenderURLEnv, sender.URL+"/")
 	t.Setenv(rustSenderTokenEnv, "secret")
 
-	transport := newRustSenderTransport("socks5h://127.0.0.1:1080")
+	transport := newRustSenderTransport("socks5h://127.0.0.1:1080", "acct-7")
 	req, _ := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", bytes.NewReader([]byte(`{"model":"gpt-5.5"}`)))
 	req.Header.Set("Authorization", "Bearer t")
 	req.Header.Set("User-Agent", "codex-tui/0.153.4 (Ubuntu 22.4.0; x86_64) unknown (codex-tui; 0.153.4)")
@@ -44,6 +46,7 @@ func TestRustSenderTransportForwardsThroughSender(t *testing.T) {
 		rustSenderControlMethod: http.MethodPost,
 		rustSenderControlProxy:  "socks5h://127.0.0.1:1080",
 		rustSenderControlToken:  "secret",
+		rustSenderControlPool:   "acct-7",
 		"Authorization":         "Bearer t",
 		"Accept":                "text/event-stream",
 	} {
@@ -79,7 +82,7 @@ func TestRustSenderTransportSurfacesSenderErrors(t *testing.T) {
 	t.Setenv(rustSenderURLEnv, sender.URL)
 	t.Setenv(rustSenderTokenEnv, "")
 
-	transport := newRustSenderTransport("")
+	transport := newRustSenderTransport("", "acct-7")
 	req, _ := http.NewRequest(http.MethodGet, "https://chatgpt.com/backend-api/codex/usage", nil)
 	if _, err := transport.RoundTrip(req); err == nil || !strings.Contains(err.Error(), "connect timeout") {
 		t.Fatalf("expected sender error to surface as transport error, got %v", err)
@@ -94,5 +97,22 @@ func TestCodexTransportModeFromEnvAcceptsRust(t *testing.T) {
 	t.Setenv("CODEX_TRANSPORT_MODE", "")
 	if got := codexTransportModeFromEnv(); got != codexTransportModeStandard {
 		t.Fatalf("default mode = %q", got)
+	}
+}
+
+// TestCodexSenderPoolIDSeparatesAccounts 锁定隔离池标识按账号取值：发送器拿它分开
+// HTTP 客户端、Cloudflare cookie 罐与 rustls 配置，两个账号取到同一个值就等于共用传输状态。
+func TestCodexSenderPoolIDSeparatesAccounts(t *testing.T) {
+	a := &auth.Account{DBID: 7}
+	b := &auth.Account{DBID: 8}
+	if got := CodexSenderPoolID(a); got != "acct-7" {
+		t.Fatalf("pool id = %q, want acct-7", got)
+	}
+	if CodexSenderPoolID(a) == CodexSenderPoolID(b) {
+		t.Fatalf("two accounts must not share a sender pool")
+	}
+	// 账号缺失（维护类旁路请求）落到默认池，而不是伪造一个。
+	if got := CodexSenderPoolID(nil); got != "" {
+		t.Fatalf("nil account pool id = %q, want empty", got)
 	}
 }

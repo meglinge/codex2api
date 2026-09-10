@@ -64,6 +64,8 @@ Codex2API 采用三层配置架构：
 | `CODEX_TRANSPORT_MODE` | 否 | `standard` | Codex HTTP transport：默认标准 Go TLS；`utls_chrome` 可回滚旧 Chrome uTLS 行为；`rust` 把全部 HTTP 与 WebSocket 出站交给 `sender/` 的 c2a-sender（HTTP 用 codex 源码同一套 reqwest / hyper / 平台 TLS，WebSocket 用同一套 tungstenite 分叉 + rustls；TLS 与 HTTP/2 指纹、握手头序与真实 Codex CLI 同源；见 `sender/README.md`） |
 | `CODEX_RUST_SENDER_URL` | 否 | `http://127.0.0.1:8799` | `rust` 模式下 c2a-sender 的回环地址 |
 | `CODEX_RUST_SENDER_TOKEN` | 否 | 空 | `rust` 模式下发给 c2a-sender 的共享密钥（对应其 `C2A_SENDER_TOKEN`） |
+| `CODEX_BODY_ALLOWLIST` | 否 | `on` | 出站 Codex 请求体默认拒绝：顶层只保留真实客户端会发的字段（名单取自 `ResponsesApiRequest` / `ResponseCreateWsRequest`），`client_metadata` 与内嵌 / 请求头里的 turn metadata JSON 再各自按真实客户端键集合裁剪。HTTP、WebSocket 与 compact 三条路径共用。未知键一律不出境。设为 `off` 回到旧的「只按名字删」行为 |
+| `CODEX_METADATA_HEADER_PASSTHROUGH` | 否 | `false` | WebSocket 传输路径的 `codex.response.metadata` 事件默认只把 `x-codex-turn-state`（已换成网关 token）下发给客户端，其余上游握手响应头一律裁掉，与 HTTP 路径「一个上游响应头都不转发」保持一致。设为 `true` 恢复整块透传，仅用于排障对照 |
 | `CODEX_WS_SEND_USER_AGENT` | 否 | `true` | WS 握手是否发送 Codex `User-Agent`/`Version`；设为 `false` 可关闭 |
 | `CODEX_SESSION_AFFINITY_TTL` | 否 | `1h` | Codex 会话到账号/代理的黏性 TTL，支持 `1h`、`90m` 或秒数 |
 | `CODEX_COMPACTION_AFFINITY_TTL` | 否 | `168h` | 加密压缩状态的来源亲和 TTL。缓存仅保存密文的 SHA-256 摘要、来源账号和兼容域；已知状态不会跨 Codex 官方、不同 Responses 中转或 Grok 上游流转 |
@@ -77,7 +79,9 @@ Codex2API 采用三层配置架构：
 
 > 系统设置「Codex 客户端兼容」新增 `force_platform`（三端强制模拟）档：与 `force` 一样始终使用服务端模拟 UA，但模拟 UA 的平台段会与下游用户的操作系统对齐。网关从请求体 `<environment_context>`（`cwd` 路径形状、`shell`）识别 Windows / macOS / Linux，没有时退回下游 UA 的平台段；画像只替换 `(OS 版本; 架构)` 与不兼容的终端标记，客户端名、版本、末尾构建号与 `Originator` 不变。同一账号对每个家族各有一套固定画像，WebSocket 连接池也按家族分开复用；Desktop 形态遇到 Linux 用户时整体切换为 TUI 形态（桌面端没有 Linux 版）。`preserve` / `auto` / `force` 的行为不变。所有模式下，turn metadata 里若带 `codex_version`，会改写成与出站 `Version` 头一致的值。
 
-> 出站 Codex 身份在请求发出前统一：`session-id` 头、`prompt_cache_key`、`client_metadata.session_id` 与 turn metadata 的 `session_id` 恒为同一个值，`thread-id` / `x-client-request-id` / `thread_id` 同源，`x-codex-window-id` 与 `window_id` 同源。指纹收敛档位（session / full）以收敛值为准；off / device 档以真实 Codex 客户端自报的标识为准（此时 `prompt_cache_key` 即客户端自己的 session_id，不再按 API Key 派生）；没有自报身份的 SDK 请求以网关的上游会话键为准。反方向，上游签发的标识不再原样到达下游：`x-codex-turn-state` 换成网关签发的 `c2a.<随机>` token（HTTP 响应头与 WS 传输路径的 `codex.response.metadata` 事件都处理），客户端回带时只对铸造它的账号换回上游 blob，否则丢弃；`response.id` 换成网关签发的 `resp_<随机>`，本地缓存、续链与日志以它为键，WS 续链出站前按映射换回上游 id。上游回显的 `prompt_cache_key` / `safety_identifier` 换回客户端自己发的值（没发则删除），`client_metadata` 回显删除。输出项 id（`msg_*` / `rs_*` / `fc_*`）保持原样，加密推理内容需要随原 id 回传。两张映射表为进程内存、带 TTL（turn-state 1 小时、response id 24 小时）。`X-Oai-Attestation`（DeviceCheck）在所有模式下都不再透传。
+> 默认指纹档 `off` 隔离下游身份：客户端自报的 session / thread / window / installation 换成网关签发值。需要旧的原样透传时，账号指纹档显式设为 `passthrough`。`device` 只收敛 installation，会话仍走网关身份。
+
+> 出站 Codex 身份在请求发出前统一：`session-id` 头、`prompt_cache_key`、`client_metadata.session_id` 与 turn metadata 的 `session_id` 恒为同一个值，`thread-id` / `x-client-request-id` / `thread_id` 同源，`x-codex-window-id` 与 `window_id` 同源。指纹收敛档位（session / full）以收敛值为准；默认 off 与 device 的会话走网关签发值；只有显式 `passthrough` 才用客户端自报标识。没有自报身份的 SDK 请求以网关的上游会话键为准。反方向，上游签发的标识不再原样到达下游：`x-codex-turn-state` 换成网关签发的 `c2a.<随机>` token（HTTP 响应头与 WS 传输路径的 `codex.response.metadata` 事件都处理），客户端回带时只对铸造它的账号换回上游 blob，否则丢弃；`response.id` 换成网关签发的 `resp_<随机>`，本地缓存、续链、compact 结果与日志以它为键，WS 续链出站前按映射换回上游 id。上游回显的 `prompt_cache_key` / `safety_identifier` 换回客户端自己发的值（没发则删除），`client_metadata` 回显删除。输出项 id（`msg_*` / `ws_*` / `ig_*` / `cmp_*` 等源码 `id_prefix` 全表）换成 `{prefix}_{UUIDv7}`，加密推理内容原样；客户端回带时换回上游 id。`client_metadata.parent_response_id` 与 `response.id` 同一张映射表。模型清单按 `ModelInfo` 全字段白名单，只丢掉账号/邮箱类键。映射表 L1 为进程内存、L2 为运行态缓存（Redis/Memory），TTL 与原先一致（turn-state 1 小时、response / item id 24 小时）。`X-Oai-Attestation`（DeviceCheck）在所有模式下都不再透传。
 
 > `CODEX_UPSTREAM_TRANSPORT` 只控制 HTTP 入站请求转发到 Codex 上游时使用 `http` 还是 `ws`。客户端侧 WebSocket 入口独立可用：使用 `GET ws://<host>/v1/responses` 建连，首帧发送 `response.create` JSON，服务端会通过 Codex 上游 WS 返回 Responses 事件帧。
 

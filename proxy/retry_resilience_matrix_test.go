@@ -878,8 +878,15 @@ func TestResponsesCompactContinuousRetryCyclesSingleAccountAfter503(t *testing.T
 		t.Fatalf("downstream status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
 	}
 	body := recorder.Body.String()
-	if !strings.Contains(body, `"id":"resp_compact_retried"`) || strings.Contains(body, "temporarily unavailable") {
+	if strings.Contains(body, "temporarily unavailable") {
 		t.Fatalf("compact retry was not transparent: %s", body)
+	}
+	id := gjson.GetBytes(recorder.Body.Bytes(), "id").String()
+	if id == "" || id == "resp_compact_retried" {
+		t.Fatalf("compact response id must be mapped, not leaked: %s", body)
+	}
+	if upstream, ok := upstreamCodexResponseID(id); !ok || upstream != "resp_compact_retried" {
+		t.Fatalf("mapped compact id %q must resolve back to resp_compact_retried", id)
 	}
 }
 
@@ -947,7 +954,14 @@ func TestResponsesCompactContinuousRetrySelectsResponseFailedEvent(t *testing.T)
 		t.Fatalf("downstream status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
 	}
 	body := recorder.Body.String()
-	if !strings.Contains(body, `"id":"resp_compact_recovered"`) || strings.Contains(body, "temporary compact failure") {
+	if strings.Contains(body, "temporary compact failure") {
 		t.Fatalf("compact body-signal retry was not transparent: %s", body)
+	}
+	id := gjson.GetBytes(recorder.Body.Bytes(), "id").String()
+	if id == "" || id == "resp_compact_recovered" {
+		t.Fatalf("compact response id must be mapped, not leaked: %s", body)
+	}
+	if upstream, ok := upstreamCodexResponseID(id); !ok || upstream != "resp_compact_recovered" {
+		t.Fatalf("mapped compact id %q must resolve back to resp_compact_recovered", id)
 	}
 }

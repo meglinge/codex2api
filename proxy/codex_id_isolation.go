@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"sync"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/cache"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -37,7 +40,15 @@ const (
 	codexTurnStateTokenTTL    = time.Hour
 	codexResponseIDPrefix     = "resp_"
 	codexResponseIDMapTTL     = 24 * time.Hour
+	codexItemIDMapTTL         = 24 * time.Hour
 	codexIDMapSweepEvery      = 256
+	codexIDMapRedisTimeout    = 200 * time.Millisecond
+
+	codexIDMapNSTurnState = "c2a-id-ts"
+	codexIDMapNSRespUp    = "c2a-id-resp-up"
+	codexIDMapNSRespDown  = "c2a-id-resp-down"
+	codexIDMapNSItemUp    = "c2a-id-item-up"
+	codexIDMapNSItemDown  = "c2a-id-item-down"
 )
 
 type codexTurnStateEntry struct {
@@ -57,8 +68,55 @@ var (
 	codexResponseIDDownToUp   sync.Map // downstream id -> *codexResponseIDEntry(upstream)
 	codexResponseIDUpToDown   sync.Map // upstream id -> *codexResponseIDEntry(downstream)
 	codexResponseIDWrites     atomic.Uint64
+	codexItemIDDownToUp       sync.Map
+	codexItemIDUpToDown       sync.Map
+	codexItemIDWrites         atomic.Uint64
 	codexIDIsolationNow       = time.Now
+	codexIDIsolationCache     cache.TokenCache
 )
+
+type codexIDMapRecord struct {
+	AccountID int64  `json:"a,omitempty"`
+	Value     string `json:"v"`
+}
+
+// SetCodexIDIsolationCache 把 Redis/Memory 运行态缓存接到标识映射表。
+// L1 仍是进程内 sync.Map；L2 让多实例续链与 turn-state 回带能互相认。
+func SetCodexIDIsolationCache(tc cache.TokenCache) {
+	codexIDIsolationCache = tc
+}
+
+func persistCodexIDMap(ns, key string, rec codexIDMapRecord, ttl time.Duration) {
+	c := codexIDIsolationCache
+	if c == nil || strings.TrimSpace(key) == "" || rec.Value == "" {
+		return
+	}
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), codexIDMapRedisTimeout)
+	defer cancel()
+	_ = c.SetRuntime(ctx, ns, key, raw, ttl)
+}
+
+func loadCodexIDMap(ns, key string) (codexIDMapRecord, bool) {
+	c := codexIDIsolationCache
+	if c == nil || strings.TrimSpace(key) == "" {
+		return codexIDMapRecord{}, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), codexIDMapRedisTimeout)
+	defer cancel()
+	raw, ok, err := c.GetRuntime(ctx, ns, key)
+	if err != nil || !ok || len(raw) == 0 {
+		return codexIDMapRecord{}, false
+	}
+	var rec codexIDMapRecord
+	if json.Unmarshal(raw, &rec) != nil || rec.Value == "" {
+		return codexIDMapRecord{}, false
+	}
+	return rec, true
+}
 
 func codexRandomHex(bytes int) string {
 	buf := make([]byte, bytes)
@@ -105,25 +163,40 @@ func mintCodexTurnStateToken(account *auth.Account, upstream string) string {
 		return ""
 	}
 	token := codexTurnStateTokenPrefix + codexRandomHex(24)
-	codexTurnStateTokens.Store(token, &codexTurnStateEntry{
+	entry := &codexTurnStateEntry{
 		accountID: account.ID(),
 		upstream:  upstream,
 		expiresAt: codexIDIsolationNow().Add(codexTurnStateTokenTTL),
-	})
+	}
+	codexTurnStateTokens.Store(token, entry)
 	sweepCodexIDMap(&codexTurnStateTokens, &codexTurnStateTokenWrites)
+	persistCodexIDMap(codexIDMapNSTurnState, token, codexIDMapRecord{AccountID: entry.accountID, Value: upstream}, codexTurnStateTokenTTL)
 	return token
 }
 
 // resolveCodexTurnStateToken 把下游回带的 token 换回上游 blob；未知、过期或账号不符
 // 都返回 ok=false。
 func resolveCodexTurnStateToken(token string, account *auth.Account) (string, bool) {
-	raw, found := codexTurnStateTokens.Load(strings.TrimSpace(token))
+	token = strings.TrimSpace(token)
+	raw, found := codexTurnStateTokens.Load(token)
 	if !found {
-		return "", false
+		rec, ok := loadCodexIDMap(codexIDMapNSTurnState, token)
+		if !ok {
+			return "", false
+		}
+		codexTurnStateTokens.Store(token, &codexTurnStateEntry{
+			accountID: rec.AccountID,
+			upstream:  rec.Value,
+			expiresAt: codexIDIsolationNow().Add(codexTurnStateTokenTTL),
+		})
+		if account == nil || rec.AccountID != account.ID() {
+			return "", false
+		}
+		return rec.Value, true
 	}
 	entry, ok := raw.(*codexTurnStateEntry)
 	if !ok || codexIDIsolationNow().After(entry.expiresAt) {
-		codexTurnStateTokens.Delete(strings.TrimSpace(token))
+		codexTurnStateTokens.Delete(token)
 		return "", false
 	}
 	if account == nil || entry.accountID != account.ID() {
@@ -194,20 +267,36 @@ func downstreamCodexResponseID(upstream string) string {
 			return entry.value
 		}
 	}
+	if rec, ok := loadCodexIDMap(codexIDMapNSRespUp, upstream); ok {
+		expires := now.Add(codexResponseIDMapTTL)
+		codexResponseIDUpToDown.Store(upstream, &codexResponseIDEntry{value: rec.Value, expiresAt: expires})
+		codexResponseIDDownToUp.Store(rec.Value, &codexResponseIDEntry{value: upstream, expiresAt: expires})
+		return rec.Value
+	}
 	downstream := codexResponseIDPrefix + codexRandomHex(25)
 	expires := now.Add(codexResponseIDMapTTL)
 	codexResponseIDUpToDown.Store(upstream, &codexResponseIDEntry{value: downstream, expiresAt: expires})
 	codexResponseIDDownToUp.Store(downstream, &codexResponseIDEntry{value: upstream, expiresAt: expires})
 	sweepCodexIDMap(&codexResponseIDUpToDown, &codexResponseIDWrites)
 	sweepCodexIDMap(&codexResponseIDDownToUp, &codexResponseIDWrites)
+	persistCodexIDMap(codexIDMapNSRespUp, upstream, codexIDMapRecord{Value: downstream}, codexResponseIDMapTTL)
+	persistCodexIDMap(codexIDMapNSRespDown, downstream, codexIDMapRecord{Value: upstream}, codexResponseIDMapTTL)
 	return downstream
 }
 
 // upstreamCodexResponseID 把下游 id 换回上游 id；未知时返回 ok=false。
 func upstreamCodexResponseID(downstream string) (string, bool) {
-	raw, ok := codexResponseIDDownToUp.Load(strings.TrimSpace(downstream))
+	downstream = strings.TrimSpace(downstream)
+	raw, ok := codexResponseIDDownToUp.Load(downstream)
 	if !ok {
-		return "", false
+		rec, found := loadCodexIDMap(codexIDMapNSRespDown, downstream)
+		if !found {
+			return "", false
+		}
+		expires := codexIDIsolationNow().Add(codexResponseIDMapTTL)
+		codexResponseIDDownToUp.Store(downstream, &codexResponseIDEntry{value: rec.Value, expiresAt: expires})
+		codexResponseIDUpToDown.Store(rec.Value, &codexResponseIDEntry{value: downstream, expiresAt: expires})
+		return rec.Value, true
 	}
 	entry, ok := raw.(*codexResponseIDEntry)
 	if !ok || codexIDIsolationNow().After(entry.expiresAt) {
@@ -217,21 +306,27 @@ func upstreamCodexResponseID(downstream string) (string, bool) {
 }
 
 // rewriteDownstreamResponseID 把发往下游的 Responses 载荷里的 response id 换成网关 id：
-// SSE 事件的 response.id，或裸 response 对象的顶层 id。其余字段不动。
+// SSE 事件的 response.id、裸 response 对象的顶层 id、compact 结果（有 output 但可能
+// 没有 object 字段），以及错误信封的 error.response_id。其余字段不动。
 func rewriteDownstreamResponseID(payload []byte) []byte {
 	trimmed := strings.TrimSpace(string(payload))
 	if trimmed == "" || trimmed[0] != '{' || !gjson.ValidBytes(payload) {
 		return payload
 	}
-	path := ""
-	switch {
-	case gjson.GetBytes(payload, "response.id").Type == gjson.String:
-		path = "response.id"
-	case gjson.GetBytes(payload, "object").String() == "response" && gjson.GetBytes(payload, "id").Type == gjson.String:
-		path = "id"
-	default:
-		return payload
+	out := payload
+	if gjson.GetBytes(out, "response.id").Type == gjson.String {
+		out = rewriteDownstreamIDAt(out, "response.id")
 	}
+	if gjson.GetBytes(out, "id").Type == gjson.String && (strings.HasPrefix(gjson.GetBytes(out, "object").String(), "response") || gjson.GetBytes(out, "output").Exists()) {
+		out = rewriteDownstreamIDAt(out, "id")
+	}
+	if gjson.GetBytes(out, "error.response_id").Type == gjson.String {
+		out = rewriteDownstreamIDAt(out, "error.response_id")
+	}
+	return out
+}
+
+func rewriteDownstreamIDAt(payload []byte, path string) []byte {
 	upstream := gjson.GetBytes(payload, path).String()
 	if upstream == "" || strings.HasPrefix(upstream, codexResponseIDPrefix) && upstreamKnownDownstream(upstream) {
 		return payload
@@ -255,7 +350,17 @@ func upstreamKnownDownstream(id string) bool {
 // mapPreviousResponseIDToUpstream 把请求体里下游回带的 previous_response_id 换回上游 id。
 // 未知的 id（升级前签发、或来自别处的上游 id）保持原样，交给上游裁决。
 func mapPreviousResponseIDToUpstream(body []byte) []byte {
-	field := gjson.GetBytes(body, "previous_response_id")
+	return mapUpstreamResponseIDAt(body, "previous_response_id")
+}
+
+// mapClientMetadataParentResponseID 把 Guardian 放在 client_metadata 里的
+// parent_response_id 换回上游 id（core/src/client.rs set_guardian_metadata）。
+func mapClientMetadataParentResponseID(body []byte) []byte {
+	return mapUpstreamResponseIDAt(body, "client_metadata.parent_response_id")
+}
+
+func mapUpstreamResponseIDAt(body []byte, path string) []byte {
+	field := gjson.GetBytes(body, path)
 	if field.Type != gjson.String || field.String() == "" {
 		return body
 	}
@@ -263,7 +368,7 @@ func mapPreviousResponseIDToUpstream(body []byte) []byte {
 	if !ok || upstream == field.String() {
 		return body
 	}
-	if updated, err := sjson.SetBytes(body, "previous_response_id", upstream); err == nil {
+	if updated, err := sjson.SetBytes(body, path, upstream); err == nil {
 		return updated
 	}
 	return body

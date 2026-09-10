@@ -1128,7 +1128,7 @@ func (m *Manager) createConnection(
 	// rust 模式：握手改拨 c2a-sender 的回环 /ws，代理由发送器按控制头去连，
 	// TLS / 握手头序与真实 Codex 客户端同源；连接池 key 与 wc.URL 仍按上游地址记。
 	dialURL, dialHeaders := wsURL, headers
-	if senderURL, senderHeaders, viaSender := proxy.RustSenderWebsocketDial(wsURL, headers, proxyURL); viaSender && !proxy.IsResinEnabled() {
+	if senderURL, senderHeaders, viaSender := proxy.RustSenderWebsocketDial(wsURL, headers, proxyURL, proxy.CodexSenderPoolID(account)); viaSender && !proxy.IsResinEnabled() {
 		dialURL, dialHeaders = senderURL, senderHeaders
 		dialer.Proxy = nil
 	} else if !proxy.IsResinEnabled() && proxyURL != "" {

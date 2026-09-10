@@ -79,7 +79,7 @@ func TestRustSenderEndToEnd(t *testing.T) {
 
 	t.Setenv(rustSenderURLEnv, "http://"+addr)
 	t.Setenv(rustSenderTokenEnv, "e2e")
-	transport := newRustSenderTransport("")
+	transport := newRustSenderTransport("", "acct-7")
 	client := &http.Client{Transport: transport}
 	req, _ := http.NewRequest(http.MethodPost, upstream.URL+"/backend-api/codex/responses", bytes.NewReader([]byte(`{"model":"gpt-5.5","stream":true}`)))
 	req.Header.Set("Authorization", "Bearer t")

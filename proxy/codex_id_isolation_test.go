@@ -2,10 +2,14 @@ package proxy
 
 import (
 	"net/http"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/cache"
+	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )
 
@@ -90,6 +94,20 @@ func TestDownstreamResponseIDMapping(t *testing.T) {
 	if got := rewriteDownstreamResponseID(delta); string(got) != string(delta) {
 		t.Fatalf("delta changed: %s", got)
 	}
+	// compact 结果可能没有 object 字段，只靠 output 识别；也可能是 response.compaction。
+	compact := rewriteDownstreamResponseID([]byte(`{"id":"resp_upstream_abc","output":[]}`))
+	if gjson.GetBytes(compact, "id").String() != downstream {
+		t.Fatalf("compact-like body must map the top-level id: %s", compact)
+	}
+	compaction := rewriteDownstreamResponseID([]byte(`{"id":"resp_upstream_abc","object":"response.compaction"}`))
+	if gjson.GetBytes(compaction, "id").String() != downstream {
+		t.Fatalf("response.compaction object must map the top-level id: %s", compaction)
+	}
+	// 错误信封里的 response_id 同样换掉。
+	failed := rewriteDownstreamResponseID([]byte(`{"type":"error","error":{"message":"bad","response_id":"resp_upstream_abc"}}`))
+	if gjson.GetBytes(failed, "error.response_id").String() != downstream {
+		t.Fatalf("error.response_id must be mapped: %s", failed)
+	}
 
 	// 续链：下游 id 换回上游 id；未知 id 保持原样。
 	body := []byte(`{"model":"gpt-5.5","previous_response_id":"` + downstream + `","input":[]}`)
@@ -99,6 +117,69 @@ func TestDownstreamResponseIDMapping(t *testing.T) {
 	foreign := []byte(`{"previous_response_id":"resp_from_elsewhere"}`)
 	if got := gjson.GetBytes(mapPreviousResponseIDToUpstream(foreign), "previous_response_id").String(); got != "resp_from_elsewhere" {
 		t.Fatalf("unknown previous_response_id must be kept: %q", got)
+	}
+}
+
+func TestCodexIDIsolationCacheRoundTrip(t *testing.T) {
+	SetCodexIDIsolationCache(cache.NewMemory(8))
+	t.Cleanup(func() { SetCodexIDIsolationCache(nil) })
+
+	account := &auth.Account{DBID: 9, AccountID: "9"}
+	token := mintCodexTurnStateToken(account, "upstream-blob")
+	codexTurnStateTokens = sync.Map{}
+	got, ok := resolveCodexTurnStateToken(token, account)
+	if !ok || got != "upstream-blob" {
+		t.Fatalf("turn-state L2 resolve = %q ok=%v", got, ok)
+	}
+
+	down := downstreamCodexResponseID("resp_shared_up")
+	codexResponseIDDownToUp = sync.Map{}
+	codexResponseIDUpToDown = sync.Map{}
+	up, ok := upstreamCodexResponseID(down)
+	if !ok || up != "resp_shared_up" {
+		t.Fatalf("response id L2 resolve = %q ok=%v", up, ok)
+	}
+}
+
+func TestRewriteDownstreamItemIDsAndRoundTrip(t *testing.T) {
+	payload := []byte(`{"type":"response.output_item.done","item":{"id":"msg_upstream","type":"message","call_id":"call_up"},"item_id":"msg_upstream"}`)
+	out := rewriteDownstreamItemIDs(payload)
+	downMsg := gjson.GetBytes(out, "item.id").String()
+	downCall := gjson.GetBytes(out, "item.call_id").String()
+	if downMsg == "msg_upstream" || !strings.HasPrefix(downMsg, "msg_") {
+		t.Fatalf("message id must be mapped: %s", out)
+	}
+	if _, err := uuid.Parse(strings.TrimPrefix(downMsg, "msg_")); err != nil {
+		t.Fatalf("mapped message id must be prefix + UUIDv7: %s", downMsg)
+	}
+	if downCall == "call_up" || !strings.HasPrefix(downCall, "call_") {
+		t.Fatalf("call_id must be mapped: %s", out)
+	}
+	if gjson.GetBytes(out, "item_id").String() != downMsg {
+		t.Fatalf("item_id and item.id must share the mapped value: %s", out)
+	}
+	if again := rewriteDownstreamItemIDs(out); string(again) != string(out) {
+		t.Fatalf("item rewrite must be idempotent")
+	}
+
+	echo := []byte(`{"input":[{"type":"function_call_output","call_id":"` + downCall + `","output":"ok"}]}`)
+	back := mapUpstreamItemIDsInRequest(echo, nil)
+	if gjson.GetBytes(back, "input.0.call_id").String() != "call_up" {
+		t.Fatalf("echoed call_id must resolve to upstream: %s", back)
+	}
+
+	search := rewriteDownstreamItemIDs([]byte(`{"item":{"id":"ws_upstream_search","type":"web_search_call"}}`))
+	if got := gjson.GetBytes(search, "item.id").String(); got == "ws_upstream_search" || !strings.HasPrefix(got, "ws_") {
+		t.Fatalf("web_search_call id must be mapped: %s", search)
+	}
+}
+
+func TestMapClientMetadataParentResponseID(t *testing.T) {
+	down := downstreamCodexResponseID("resp_guardian_up")
+	body := []byte(`{"model":"gpt-5.5","client_metadata":{"parent_response_id":"` + down + `","guardian_credits_requested":"true"}}`)
+	out := mapClientMetadataParentResponseID(body)
+	if got := gjson.GetBytes(out, "client_metadata.parent_response_id").String(); got != "resp_guardian_up" {
+		t.Fatalf("parent_response_id = %q, want upstream id", got)
 	}
 }
 

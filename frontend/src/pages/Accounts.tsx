@@ -592,6 +592,7 @@ function codexFingerprintModeOptions(
 ): { value: CodexFingerprintMode; label: string }[] {
   return [
     { value: "off", label: t("accounts.codexFingerprintModeOff") },
+    { value: "passthrough", label: t("accounts.codexFingerprintModePassthrough") },
     { value: "device", label: t("accounts.codexFingerprintModeDevice") },
     { value: "session", label: t("accounts.codexFingerprintModeSession") },
     { value: "full", label: t("accounts.codexFingerprintModeFull") },
@@ -603,6 +604,8 @@ function codexFingerprintModeDetail(
   mode: CodexFingerprintMode,
 ): string {
   switch (mode) {
+    case "passthrough":
+      return t("accounts.codexFingerprintModePassthroughDetail");
     case "device":
       return t("accounts.codexFingerprintModeDeviceDetail");
     case "session":

@@ -2088,6 +2088,7 @@ export default function Settings() {
   ]
   const codexFingerprintDefaultModeOptions = [
     { label: t('accounts.codexFingerprintModeOff'), value: 'off' },
+    { label: t('accounts.codexFingerprintModePassthrough'), value: 'passthrough' },
     { label: t('accounts.codexFingerprintModeDevice'), value: 'device' },
     { label: t('accounts.codexFingerprintModeSession'), value: 'session' },
     { label: t('accounts.codexFingerprintModeFull'), value: 'full' },

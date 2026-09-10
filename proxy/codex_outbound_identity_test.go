@@ -11,8 +11,8 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestResolveCodexOutboundIdentityFollowsRealClientInOffMode(t *testing.T) {
-	account := &auth.Account{DBID: 42, AccountID: "42"}
+func TestResolveCodexOutboundIdentityFollowsRealClientInPassthroughMode(t *testing.T) {
+	account := &auth.Account{DBID: 42, AccountID: "42", CodexFingerprintMode: auth.CodexFingerprintModePassthrough}
 	meta := `{"installation_id":"inst-1","session_id":"sess-1","thread_id":"thread-2","turn_id":"turn-9","window_id":"thread-2:3","request_kind":"turn"}`
 	headers := http.Header{
 		"Session-Id":            []string{"sess-1"},
@@ -24,7 +24,7 @@ func TestResolveCodexOutboundIdentityFollowsRealClientInOffMode(t *testing.T) {
 
 	id := resolveCodexOutboundIdentity(account, "derived-key", headers, body)
 	if id.sessionID != "sess-1" || id.threadID != "thread-2" || id.windowID != "thread-2:3" || id.installationID != "inst-1" || id.turnID != "turn-9" {
-		t.Fatalf("identity must follow the real client in off mode: %+v", id)
+		t.Fatalf("identity must follow the real client in passthrough mode: %+v", id)
 	}
 	if id.synthesized || id.converged {
 		t.Fatalf("unexpected flags: %+v", id)
@@ -148,8 +148,29 @@ func TestSynthesizedSandboxTagsFollowOutboundUAPlatform(t *testing.T) {
 	}
 }
 
-func TestUnifyCodexOutboundIdentityRealignsSessionKey(t *testing.T) {
+func TestResolveCodexOutboundIdentityIsolatesClientInOffMode(t *testing.T) {
 	account := &auth.Account{DBID: 42, AccountID: "42"}
+	headers := http.Header{
+		"Session-Id":            []string{"sess-1"},
+		"Thread-Id":             []string{"thread-2"},
+		"X-Codex-Turn-Metadata": []string{`{"installation_id":"inst-1","session_id":"sess-1","thread_id":"thread-2","window_id":"thread-2:3"}`},
+	}
+	body := []byte(`{"model":"gpt-5.5","prompt_cache_key":"derived-key","client_metadata":{"session_id":"sess-1","thread_id":"thread-2","x-codex-window-id":"thread-2:3","x-codex-installation-id":"inst-1"}}`)
+
+	id := resolveCodexOutboundIdentity(account, "derived-key", headers, body)
+	if id.sessionID != "derived-key" {
+		t.Fatalf("off mode must use the gateway session, got %q", id.sessionID)
+	}
+	if id.sessionID == "sess-1" || id.threadID == "thread-2" || id.installationID == "inst-1" {
+		t.Fatalf("off mode must not passthrough client identity: %+v", id)
+	}
+	if id.installationID == "" {
+		t.Fatal("off mode must still derive an installation id")
+	}
+}
+
+func TestUnifyCodexOutboundIdentityRealignsSessionKey(t *testing.T) {
+	account := &auth.Account{DBID: 42, AccountID: "42", CodexFingerprintMode: auth.CodexFingerprintModePassthrough}
 	headers := http.Header{
 		"Session-Id":            []string{"sess-1"},
 		"X-Codex-Turn-Metadata": []string{`{"installation_id":"inst-1","session_id":"sess-1","thread_id":"sess-1","window_id":"sess-1:0"}`},

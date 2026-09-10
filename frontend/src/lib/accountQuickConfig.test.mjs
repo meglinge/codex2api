@@ -50,6 +50,7 @@ test("formStateFromAccount keeps full fingerprint mode instead of falling back t
 test("missing fingerprint mode normalizes to off", () => {
   assert.equal(normalizeCodexFingerprintMode(undefined), "off");
   assert.equal(normalizeCodexFingerprintMode("converge"), "off");
+  assert.equal(normalizeCodexFingerprintMode("passthrough"), "passthrough");
   const form = formStateFromAccount({ id: 7 });
   assert.equal(form.fingerprintMode, "off");
   assert.equal(form.customHeadersText, "");

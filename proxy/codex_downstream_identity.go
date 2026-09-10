@@ -62,6 +62,13 @@ func sanitizeDownstreamResponseIdentity(payload []byte, ctx downstreamIdentityCo
 		return payload
 	}
 	out := rewriteCodexTurnStateInEvent(payload, ctx.account)
+	// turn-state 换成网关 token 之后再裁剪 headers，token 才留得住。
+	out = scrubCodexMetadataHeadersInEvent(out)
+	// response.id 映射放在这个统一出口上：流式与 WS 路径在更早处已经改过一次
+	// （rewriteDownstreamResponseID 对已签发的下游 id 幂等），非流式 JSON 路径
+	// 曾经整条漏掉，靠这里兜住，新增的下行写点也不必各自记得调用。
+	out = rewriteDownstreamResponseID(out)
+	out = rewriteDownstreamItemIDs(out)
 	prefix := ""
 	if gjson.GetBytes(out, "response").IsObject() {
 		prefix = "response."

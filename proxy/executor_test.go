@@ -474,14 +474,14 @@ func TestApplyCodexRequestHeadersAppliesAccountCustomHeadersLast(t *testing.T) {
 
 	applyCodexRequestHeaders(req, acc, "token-123", "cache-key-1", "api-key-1", nil, http.Header{})
 
-	if got := req.Header.Get("Authorization"); got != "Bearer upstream-override" {
-		t.Fatalf("Authorization = %q", got)
+	if got := req.Header.Get("Authorization"); got != "Bearer token-123" {
+		t.Fatalf("Authorization = %q, want the gateway token (custom Authorization is denied)", got)
 	}
 	if got := req.Header.Get("Chatgpt-Account-Id"); got != "acct-override" {
 		t.Fatalf("Chatgpt-Account-Id = %q", got)
 	}
-	if got := req.Header.Get("X-Custom-Header"); got != "custom-value" {
-		t.Fatalf("X-Custom-Header = %q", got)
+	if got := req.Header.Get("X-Custom-Header"); got != "" {
+		t.Fatalf("X-Custom-Header = %q, want empty (not on the Codex custom-header allowlist)", got)
 	}
 }
 
@@ -980,12 +980,14 @@ func TestApplyCodexRequestHeadersPreservesOfficialClientHeaders(t *testing.T) {
 	}
 	acc := &auth.Account{DBID: 42, AccountID: "acct-42"}
 	downstreamHeaders := http.Header{
-		"User-Agent":            []string{"codex_vscode/1.2.3"},
-		"Originator":            []string{"codex_vscode"},
-		"Version":               []string{"1.2.3"},
-		"X-Codex-Turn-State":    []string{"turn-state"},
-		"X-Codex-Turn-Metadata": []string{"turn-metadata"},
-		"X-Client-Request-Id":   []string{"req-123"},
+		"User-Agent":               []string{"codex_vscode/1.2.3"},
+		"Originator":               []string{"codex_vscode"},
+		"Version":                  []string{"1.2.3"},
+		"X-Codex-Turn-State":       []string{"turn-state"},
+		"X-Codex-Turn-Metadata":    []string{"turn-metadata"},
+		"X-Client-Request-Id":      []string{"req-123"},
+		"X-Openai-Subagent":        []string{"compact"},
+		"X-Codex-Parent-Thread-Id": []string{"parent-thread"},
 	}
 
 	applyCodexRequestHeaders(req, acc, "token-123", "cache-key-1", "api-key-1", nil, downstreamHeaders)
@@ -999,10 +1001,13 @@ func TestApplyCodexRequestHeadersPreservesOfficialClientHeaders(t *testing.T) {
 	if got := req.Header.Get("Version"); got != "1.2.3" {
 		t.Fatalf("Version = %q", got)
 	}
-	for _, name := range []string{"X-Codex-Turn-State", "X-Codex-Turn-Metadata", "X-Client-Request-Id"} {
+	for _, name := range []string{"X-Codex-Turn-State", "X-Codex-Turn-Metadata", "X-Client-Request-Id", "X-Openai-Subagent"} {
 		if got := req.Header.Get(name); got != downstreamHeaders.Get(name) {
 			t.Fatalf("%s = %q, want %q", name, got, downstreamHeaders.Get(name))
 		}
+	}
+	if got := req.Header.Get("X-Codex-Parent-Thread-Id"); got == "" {
+		t.Fatal("X-Codex-Parent-Thread-Id must be forwarded")
 	}
 }
 

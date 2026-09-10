@@ -135,6 +135,10 @@ func resolveCodexOutboundIdentity(account *auth.Account, upstreamSessionID strin
 		synthesized: !client.hasTurnMetadata && !client.hasClientMetadata,
 	}
 	ids := resolveCodexFingerprintIDs(account, headers)
+	mode := auth.CodexFingerprintModeOff
+	if account != nil {
+		mode = account.EffectiveCodexFingerprintMode()
+	}
 	if ids != nil && ids.sessionID != "" {
 		// session / full 档：metadata 用收敛值，传输身份保持网关的每会话键。
 		// 收敛的 session id 是账号级常量（resolveCodexFingerprintIDs 只按 accountID
@@ -158,10 +162,10 @@ func resolveCodexOutboundIdentity(account *auth.Account, upstreamSessionID strin
 		return identity
 	}
 
-	if client.sessionID != "" {
-		// off / device 档的契约是客户端标识原样透传：真实 Codex 客户端自报的
-		// session / thread / window 就是出站身份，会话头与 prompt_cache_key 跟着它走，
-		// 而不是让 metadata 去迁就网关派生的会话键。
+	passthrough := mode == auth.CodexFingerprintModePassthrough
+	if passthrough && client.sessionID != "" {
+		// passthrough 是显式例外：真实客户端自报的 session / thread / window
+		// 就是出站身份。默认 off 不再走这条路。
 		identity.sessionID = client.sessionID
 		identity.threadID = firstNonEmptyString(client.threadID, client.sessionID)
 		identity.windowID = client.windowID
@@ -184,12 +188,12 @@ func resolveCodexOutboundIdentity(account *auth.Account, upstreamSessionID strin
 
 	switch {
 	case ids != nil && ids.installationID != "":
-		// device 档：installation 已收敛，其余保持客户端语义。
+		// device 档：installation 已收敛；会话 / 线程走网关身份。
 		identity.installationID = ids.installationID
-	case client.installationID != "":
+	case passthrough && client.installationID != "":
 		identity.installationID = client.installationID
 	case account != nil && account.ID() > 0:
-		// SDK 客户端没有安装标识，按账号恒定派生（与收敛档位同一种子，切换档位不漂移）。
+		// 默认隔离与 SDK：按账号恒定派生（与收敛档位同一种子，切换档位不漂移）。
 		identity.installationID = deriveStableCodexUUID(fmt.Sprintf("codex2api:codex-install-id:v1:%d", account.ID()))
 	}
 	// 未收敛：metadata 与传输身份同源，四处载体报同一组值。
@@ -292,8 +296,8 @@ func ApplyCodexOutboundIdentityHeaders(outbound http.Header, ctx context.Context
 // unifyCodexOutboundIdentity 是 ExecuteRequest / ExecuteCompactRequest 的接线点：
 // 从原始下游请求解析出站身份，改写请求体，并把身份挂到 ctx 供头装配末尾使用。
 // 返回的 sessionID 是网关后续用作 prompt_cache_key / 会话头 / WS 通道键的传输身份：
-// 真实客户端自报会话时改用其自报值（off / device 档的透传契约），收敛档位下保持
-// 网关的每会话键不变。WS stateless 的连接标识不是会话，保持原样。
+// passthrough 档真实客户端自报会话时改用其自报值；默认 off 与收敛档位都保持
+// 网关的每会话键。WS stateless 的连接标识不是会话，保持原样。
 func unifyCodexOutboundIdentity(ctx context.Context, account *auth.Account, body []byte, headers http.Header, sessionID, apiKey string, deviceCfg *DeviceProfileConfig) ([]byte, context.Context, string) {
 	upstreamKey := strings.TrimSpace(sessionID)
 	if upstreamKey == "" || IsStatelessWebsocketSessionID(upstreamKey) {

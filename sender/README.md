@@ -42,7 +42,7 @@ rustup automatically.
 | --- | --- | --- |
 | `--listen` / `C2A_SENDER_LISTEN` | `127.0.0.1:8799` | loopback address only; non-loopback addresses are rejected |
 | `--token` / `C2A_SENDER_TOKEN` | empty | shared secret required in `x-c2a-token`; empty disables the check |
-| `--client-idle-secs` / `C2A_SENDER_CLIENT_IDLE_SECS` | `600` | per-proxy reqwest clients are dropped after this idle time |
+| `--client-idle-secs` / `C2A_SENDER_CLIENT_IDLE_SECS` | `600` | per-(pool, proxy) reqwest clients are dropped after this idle time |
 | `--log-filter` / `C2A_SENDER_LOG` | `info` | tracing filter (`RUST_LOG` overrides) |
 
 `CODEX_CA_CERTIFICATE` / `SSL_CERT_FILE` are honoured exactly as in the CLI.
@@ -65,6 +65,7 @@ POST /forward
   x-c2a-method: GET | POST | ...                                  (default POST)
   x-c2a-proxy:  http:// | socks5:// | socks5h:// URL              (optional; empty = direct)
   x-c2a-token:  shared secret                                      (when configured)
+  x-c2a-pool:   isolation pool, e.g. acct-51                       (optional; empty = default pool)
   <every other header is sent upstream, re-ordered into the CLI's canonical order>
   <body sent upstream verbatim>
 → upstream status, upstream headers, upstream body streamed as-is
@@ -73,10 +74,24 @@ GET /healthz → 200 ok
 ```
 
 Hop-by-hop headers, `accept-encoding` and the `x-c2a-*` control headers never reach
-upstream. Header order is rebuilt from the CLI sources (`core/src/client.rs`,
+upstream — `x-c2a-pool` included, so the pool name stays on the loopback leg. Header order is rebuilt from the CLI sources (`core/src/client.rs`,
 `codex-api/src/endpoint/responses.rs`, `http-client/src/request.rs`,
 `codex-api/src/auth.rs`) with `user-agent` trailing, as reqwest appends default headers
 after request headers.
+
+## Isolation pools
+
+A real CLI is one process per account, so its connection pool, its Cloudflare cookie jar and
+its TLS session tickets all belong to that one account. This binary serves a whole pool, so
+that separation has to be reconstructed: `x-c2a-pool` names the isolation pool and everything
+cached per caller is keyed by `(pool, proxy)` — the `reqwest` client (hence its connections),
+a **per-pool** Cloudflare cookie jar, and the rustls `ClientConfig` used by the WebSocket path
+(rustls keeps its session-resumption cache inside the config).
+
+Without it, one account's `__cf_bm` would be presented on behalf of every other account and the
+edge could resume account A's TLS session for account B — two strong cross-account correlators.
+codex2api sets the header to `acct-<id>`; an empty or absent value means the default pool, which
+is what single-tenant use and the gateway's maintenance requests get.
 
 ## Scope
 

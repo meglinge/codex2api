@@ -76,6 +76,16 @@
     }
   },
   "accounts": {
+    "codexFingerprintModeOff": "隔離（預設）",
+    "codexFingerprintModePassthrough": "透傳",
+    "codexFingerprintModeDevice": "僅裝置",
+    "codexFingerprintModeSession": "裝置 + 工作階段",
+    "codexFingerprintModeFull": "全部收斂",
+    "codexFingerprintModeOffDetail": "下游自報的 session / thread / window / installation 換成閘道簽發的值，不再原樣出境。",
+    "codexFingerprintModePassthroughDetail": "明示例外：真實用戶端自報的識別原樣出境。完全隔離部署不要開。",
+    "codexFingerprintModeDeviceDetail": "只收斂安裝識別：上游看到 1 台裝置；工作階段與執行緒仍走閘道身分。",
+    "codexFingerprintModeSessionDetail": "收斂安裝識別與工作階段識別，並依用戶端工作階段派生獨立執行緒。",
+    "codexFingerprintModeFullDetail": "執行緒識別也等於工作階段識別：上游看到 1 台裝置、1 個工作階段、1 條執行緒。",
     "todayStats": "今日統計",
     "todayStatsHint": "今日(0 點起)經由本閘道的請求數、Token 與成本",
     "largePoolSortDisabled": "後台正在聚合查詢中，請稍後再試",

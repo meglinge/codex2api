@@ -4,12 +4,13 @@ import "testing"
 
 func TestNormalizeCodexFingerprintMode(t *testing.T) {
 	cases := map[string]string{
-		"":          CodexFingerprintModeOff,
-		"off":       CodexFingerprintModeOff,
-		"unknown":   CodexFingerprintModeOff,
-		"DEVICE":    CodexFingerprintModeDevice,
-		" session ": CodexFingerprintModeSession,
-		"Full":      CodexFingerprintModeFull,
+		"":            CodexFingerprintModeOff,
+		"off":         CodexFingerprintModeOff,
+		"unknown":     CodexFingerprintModeOff,
+		"DEVICE":      CodexFingerprintModeDevice,
+		" session ":   CodexFingerprintModeSession,
+		"Full":        CodexFingerprintModeFull,
+		"passthrough": CodexFingerprintModePassthrough,
 	}
 	for input, want := range cases {
 		if got := NormalizeCodexFingerprintMode(input); got != want {
@@ -19,7 +20,7 @@ func TestNormalizeCodexFingerprintMode(t *testing.T) {
 }
 
 func TestIsValidCodexFingerprintMode(t *testing.T) {
-	for _, value := range []string{CodexFingerprintModeOff, CodexFingerprintModeDevice, CodexFingerprintModeSession, CodexFingerprintModeFull, " FULL "} {
+	for _, value := range []string{CodexFingerprintModeOff, CodexFingerprintModePassthrough, CodexFingerprintModeDevice, CodexFingerprintModeSession, CodexFingerprintModeFull, " FULL "} {
 		if !IsValidCodexFingerprintMode(value) {
 			t.Errorf("IsValidCodexFingerprintMode(%q) = false, want true", value)
 		}
@@ -36,7 +37,7 @@ func TestEffectiveCodexFingerprintMode(t *testing.T) {
 		t.Errorf("nil account mode = %q, want %q", got, CodexFingerprintModeOff)
 	}
 
-	// 未配置的既有账号必须保持 off，升级不改变出站行为。
+	// 未配置的既有账号保持 off：默认隔离，不再透传下游标识。
 	if got := (&Account{DBID: 1}).EffectiveCodexFingerprintMode(); got != CodexFingerprintModeOff {
 		t.Errorf("unconfigured account mode = %q, want %q", got, CodexFingerprintModeOff)
 	}

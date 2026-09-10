@@ -147,7 +147,7 @@ export type CodexClientMetadataMode = 'auto' | 'always' | 'off'
 /** OpenAI Responses 中转账号的 Codex 身份透传档位，默认 off（不透传）。 */
 export type CodexPassthroughMode = 'off' | 'auto' | 'always'
 /** Codex 官方出站请求的设备指纹收敛档位，默认 off（不收敛）。 */
-export type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full'
+export type CodexFingerprintMode = 'off' | 'passthrough' | 'device' | 'session' | 'full'
 export type ModelCooldownMode = 'off' | 'fixed' | 'adaptive'
 
 export type ResponseCacheWritePolicy = 'always' | 'on_demand'

@@ -178,6 +178,7 @@ export default function AccountQuickConfigSheet({
 
   const fingerprintOptions: { value: CodexFingerprintMode; label: string }[] = [
     { value: "off", label: t("accounts.codexFingerprintModeOff") },
+    { value: "passthrough", label: t("accounts.codexFingerprintModePassthrough") },
     { value: "device", label: t("accounts.codexFingerprintModeDevice") },
     { value: "session", label: t("accounts.codexFingerprintModeSession") },
     { value: "full", label: t("accounts.codexFingerprintModeFull") },
@@ -185,6 +186,7 @@ export default function AccountQuickConfigSheet({
 
   const fingerprintDetails: Record<CodexFingerprintMode, string> = {
     off: t("accounts.codexFingerprintModeOffDetail"),
+    passthrough: t("accounts.codexFingerprintModePassthroughDetail"),
     device: t("accounts.codexFingerprintModeDeviceDetail"),
     session: t("accounts.codexFingerprintModeSessionDetail"),
     full: t("accounts.codexFingerprintModeFullDetail"),

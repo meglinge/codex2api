@@ -10,6 +10,7 @@ import (
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 // standalone 搜索透传：请求体、上游状态码与响应体原样带回，OAuth 凭据注入。
@@ -57,11 +58,17 @@ func TestCodexAlphaSearchHandler_PassesThroughRequestAndResponse(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	if string(seenBody) != searchBody {
-		t.Errorf("upstream body = %s, want verbatim passthrough", seenBody)
+	if gjson.GetBytes(seenBody, "model").String() != "gpt-5.6-sol" || !gjson.GetBytes(seenBody, "commands.search_query").Exists() {
+		t.Errorf("upstream body = %s, want search schema fields", seenBody)
 	}
-	if rec.Body.String() != upstreamResult {
-		t.Errorf("response body = %s, want verbatim upstream result", rec.Body.String())
+	if gjson.GetBytes(seenBody, "id").String() == "srch_1" {
+		t.Errorf("client search id must not reach upstream: %s", seenBody)
+	}
+	if gjson.GetBytes(rec.Body.Bytes(), "id").String() != "srch_1" {
+		t.Errorf("client search id must be restored: %s", rec.Body.String())
+	}
+	if !gjson.GetBytes(rec.Body.Bytes(), "encrypted_output").Exists() || !gjson.GetBytes(rec.Body.Bytes(), "output").Exists() {
+		t.Errorf("search result payload must survive: %s", rec.Body.String())
 	}
 }
 

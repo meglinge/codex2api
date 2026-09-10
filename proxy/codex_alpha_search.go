@@ -28,26 +28,70 @@ var codexAlphaSearchURLForTest = ""
 // 搜索请求与结果均为结构化 JSON，正常远小于该值，仅作读取护栏。
 const codexAlphaSearchBodyLimit int64 = 4 << 20
 
-// codexAlphaSearchUnsupportedFields 是 standalone 搜索端点不接受、转发前需剥离的字段。
-// 新版 codex 客户端会把 Responses 风格的会话/缓存字段也塞进搜索体，而上游
-// /alpha/search 的 schema 更窄，会以 400 "Unknown parameter" 拒绝（issue #433）：
-// 同批 /responses 请求接受 prompt_cache_key，唯独搜索端点拒绝。这些字段对一次检索
-// 调用无意义，剥离不改变搜索语义。
-var codexAlphaSearchUnsupportedFields = []string{"prompt_cache_key"}
+// codexSearchOutboundAllowlist 取自 codex-api/src/search.rs SearchRequest。
+// 未知顶层键（含 prompt_cache_key / user / metadata / client_metadata）不出境。
+var codexSearchOutboundAllowlist = map[string]struct{}{
+	"id":                {},
+	"model":             {},
+	"reasoning":         {},
+	"input":             {},
+	"commands":          {},
+	"settings":          {},
+	"max_output_tokens": {},
+}
 
-// sanitizeCodexAlphaSearchBody 在转发前移除搜索端点不支持的字段，避免上游 400。
-// 只删已知不兼容字段，其余请求体保持原样透传。
+var codexSearchResponseAllowlist = map[string]struct{}{
+	"id":               {},
+	"model":            {},
+	"output":           {},
+	"encrypted_output": {},
+	"usage":            {},
+	"error":            {},
+	"status":           {},
+}
+
+// sanitizeCodexAlphaSearchBody 按真实客户端 schema 收口出站搜索体。
 func sanitizeCodexAlphaSearchBody(rawBody []byte) []byte {
-	sanitized := rawBody
-	for _, field := range codexAlphaSearchUnsupportedFields {
-		if !gjson.GetBytes(sanitized, field).Exists() {
-			continue
-		}
-		if next, err := sjson.DeleteBytes(sanitized, field); err == nil {
-			sanitized = next
-		}
+	if !gjson.ValidBytes(rawBody) || !gjson.ParseBytes(rawBody).IsObject() {
+		return rawBody
 	}
-	return sanitized
+	return dropDisallowedObjectKeysAt(rawBody, "", codexSearchOutboundAllowlist)
+}
+
+func mintOutboundSearchID(clientID string) string {
+	clientID = strings.TrimSpace(clientID)
+	if clientID == "" {
+		return "srch_" + codexRandomHex(16)
+	}
+	if upstream, ok := upstreamCodexItemID(clientID); ok {
+		return upstream
+	}
+	upstream := "srch_" + codexRandomHex(16)
+	now := codexIDIsolationNow()
+	expires := now.Add(codexItemIDMapTTL)
+	codexItemIDDownToUp.Store(clientID, &codexResponseIDEntry{value: upstream, expiresAt: expires})
+	codexItemIDUpToDown.Store(upstream, &codexResponseIDEntry{value: clientID, expiresAt: expires})
+	persistCodexIDMap(codexIDMapNSItemDown, clientID, codexIDMapRecord{Value: upstream}, codexItemIDMapTTL)
+	persistCodexIDMap(codexIDMapNSItemUp, upstream, codexIDMapRecord{Value: clientID}, codexItemIDMapTTL)
+	return upstream
+}
+
+func sanitizeCodexAlphaSearchResponse(body []byte, clientID string) []byte {
+	if !gjson.ValidBytes(body) || !gjson.ParseBytes(body).IsObject() {
+		return body
+	}
+	out := dropDisallowedObjectKeysAt(body, "", codexSearchResponseAllowlist)
+	out = rewriteDownstreamItemIDs(out)
+	if clientID != "" {
+		if updated, err := sjson.SetBytes(out, "id", clientID); err == nil {
+			out = updated
+		}
+		return out
+	}
+	if gjson.GetBytes(out, "id").Type == gjson.String {
+		out = rewriteDownstreamIDAt(out, "id")
+	}
+	return out
 }
 
 // CodexAlphaSearchHandler 透传 Codex CLI 的 standalone 联网搜索（issue #359）。
@@ -79,6 +123,7 @@ func (h *Handler) CodexAlphaSearchHandler(c *gin.Context) {
 	defer h.store.Release(account)
 
 	apiKey := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
+	clientSearchID := strings.TrimSpace(gjson.GetBytes(rawBody, "id").String())
 	resp, err := ForwardCodexAlphaSearch(
 		c.Request.Context(),
 		account,
@@ -102,7 +147,11 @@ func (h *Handler) CodexAlphaSearchHandler(c *gin.Context) {
 	if contentType == "" {
 		contentType = "application/json"
 	}
-	c.Data(resp.StatusCode, contentType, resp.Body)
+	body := resp.Body
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		body = sanitizeCodexAlphaSearchResponse(body, clientSearchID)
+	}
+	c.Data(resp.StatusCode, contentType, body)
 }
 
 // CodexAlphaSearchResponse 承载上游搜索响应原文，供 handler 原样透传。
@@ -124,8 +173,14 @@ func ForwardCodexAlphaSearch(ctx context.Context, account *auth.Account, proxyUR
 		return nil, fmt.Errorf("account has no access token")
 	}
 
-	// 剥离搜索端点不支持的字段（如客户端塞进来的 prompt_cache_key），否则上游 400（issue #433）。
 	rawBody = sanitizeCodexAlphaSearchBody(rawBody)
+	if id := strings.TrimSpace(gjson.GetBytes(rawBody, "id").String()); id != "" {
+		if outbound := mintOutboundSearchID(id); outbound != "" && outbound != id {
+			if updated, err := sjson.SetBytes(rawBody, "id", outbound); err == nil {
+				rawBody = updated
+			}
+		}
+	}
 
 	endpoint := codexAlphaSearchURL
 	if codexAlphaSearchURLForTest != "" {

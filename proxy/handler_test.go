@@ -2456,8 +2456,12 @@ func TestResponsesCompactUsesOpenAIResponsesAPIAccount(t *testing.T) {
 	if model := gjson.GetBytes(seenBody, "model").String(); model != "gpt-4.1-direct" {
 		t.Fatalf("upstream model = %q, want gpt-4.1-direct; body=%s", model, seenBody)
 	}
-	if id := gjson.GetBytes(recorder.Body.Bytes(), "id").String(); id != "resp_compact_test" {
-		t.Fatalf("response id = %q, want resp_compact_test; body=%s", id, recorder.Body.String())
+	id := gjson.GetBytes(recorder.Body.Bytes(), "id").String()
+	if id == "" || id == "resp_compact_test" {
+		t.Fatalf("compact response id must not reach the client verbatim: %s", recorder.Body.String())
+	}
+	if upstream, ok := upstreamCodexResponseID(id); !ok || upstream != "resp_compact_test" {
+		t.Fatalf("mapped compact id %q must resolve back to resp_compact_test", id)
 	}
 }
 

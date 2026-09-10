@@ -110,14 +110,14 @@ func TestPrepareWebsocketHeadersAppliesAccountCustomHeadersLast(t *testing.T) {
 
 	headers := exec.prepareWebsocketHeaders(context.Background(), "token-123", account, "42", "session-123", "api-key-1", nil, http.Header{}, nil)
 
-	if got := headers.Get("Authorization"); got != "Bearer websocket-override" {
-		t.Fatalf("Authorization = %q", got)
+	if got := headers.Get("Authorization"); got != "Bearer token-123" {
+		t.Fatalf("Authorization = %q, want the gateway token (custom Authorization is denied)", got)
 	}
 	if got := headers.Get("Chatgpt-Account-Id"); got != "acct-override" {
 		t.Fatalf("Chatgpt-Account-Id = %q", got)
 	}
-	if got := headers.Get("X-Custom-Header"); got != "custom-value" {
-		t.Fatalf("X-Custom-Header = %q", got)
+	if got := headers.Get("X-Custom-Header"); got != "" {
+		t.Fatalf("X-Custom-Header = %q, want empty (not on the Codex custom-header allowlist)", got)
 	}
 }
 
@@ -165,7 +165,10 @@ func TestPrepareWebsocketHeadersSendsUserAgentByDefault(t *testing.T) {
 	if got := headers.Get("OpenAI-Beta"); got != responsesWebsocketBetaHeader {
 		t.Fatalf("OpenAI-Beta = %q", got)
 	}
-	for _, name := range []string{"X-Codex-Turn-State", "X-Codex-Turn-Metadata", "X-Client-Request-Id", "X-Responsesapi-Include-Timing-Metrics"} {
+	if got := headers.Get("X-Codex-Turn-State"); got != "" {
+		t.Fatalf("WS handshake must not send X-Codex-Turn-State, got %q", got)
+	}
+	for _, name := range []string{"X-Codex-Turn-Metadata", "X-Client-Request-Id", "X-Responsesapi-Include-Timing-Metrics"} {
 		if got := headers.Get(name); got != ginHeaders.Get(name) {
 			t.Fatalf("%s = %q, want %q", name, got, ginHeaders.Get(name))
 		}
