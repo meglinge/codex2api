@@ -1381,6 +1381,7 @@
     "testProxyOverrideHint": "Applies only to this test and does not change the account binding. A first request from a new IP is more likely to return an unthrottled X-Codex-Turn-State.",
     "testTurnStatePing": "X-Codex-Turn-State from this Ping",
     "testTurnStateEmpty": "No value yet. Ping the current model without sending the header.",
+    "testTurnStateSavedIdle": "This model already has a saved value below. Ping again only if you need a fresh unthrottled value from a new IP.",
     "testTurnStateApply": "Fill current model",
     "testTurnStateByModel": "X-Codex-Turn-State by model",
     "testTurnStatePlaceholder": "Paste this model's X-Codex-Turn-State",

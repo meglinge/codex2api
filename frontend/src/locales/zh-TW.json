@@ -148,6 +148,7 @@
     "testProxyOverrideHint": "只影響這次測連，不會改帳號綁定。新 IP 第一次請求更容易拿到未降智的 X-Codex-Turn-State。",
     "testTurnStatePing": "本次 Ping 的 X-Codex-Turn-State",
     "testTurnStateEmpty": "還沒有值。點 Ping 向目前模型發一次不帶標頭的請求。",
+    "testTurnStateSavedIdle": "目前模型已有保存值，見下方。需要換新 IP 再拿未降智值時再 Ping。",
     "testTurnStateApply": "填到目前模型",
     "testTurnStateByModel": "依模型填寫 X-Codex-Turn-State",
     "testTurnStatePlaceholder": "貼上該模型的 X-Codex-Turn-State",

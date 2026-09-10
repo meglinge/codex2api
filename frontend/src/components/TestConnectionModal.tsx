@@ -787,7 +787,10 @@ export default function TestConnectionModal({
                 className="max-h-20 overflow-auto rounded-md border border-border/70 bg-background px-2.5 py-2 text-[11px] leading-relaxed whitespace-pre-wrap break-all"
                 style={monoStyle}
               >
-                {pingTurnState || t("accounts.testTurnStateEmpty")}
+                {pingTurnState ||
+                  (selectedTurnState.trim()
+                    ? t("accounts.testTurnStateSavedIdle")
+                    : t("accounts.testTurnStateEmpty"))}
               </pre>
               {turnStateChanged ? (
                 <p className="text-[11px] leading-relaxed text-amber-600 dark:text-amber-400">

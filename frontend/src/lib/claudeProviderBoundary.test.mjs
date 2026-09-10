@@ -59,6 +59,7 @@ test("shared connection test modal waits for a manual start", () => {
   assert.match(testModal, /runConnectionTest\(\)/);
   assert.match(testModal, /accounts\.testPing/);
   assert.match(testModal, /accounts\.testTurnStateByModel/);
+  assert.match(testModal, /accounts\.testTurnStateSavedIdle/);
   assert.match(testModal, /updateAccountCodexTurnStates/);
   assert.match(testModal, /persistTurnState\(selectedModel, observedTurnState\)/);
 });
