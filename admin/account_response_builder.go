@@ -173,6 +173,7 @@ func (h *Handler) buildAccountResponse(
 	}
 	modelMapping := ""
 	var customHeaders map[string]string
+	var codexTurnStates map[string]string
 	var allowedAPIKeyIDs []int64
 	claudeUserAgent := ""
 	// 工作区 ID 不是密钥:Team/K12 徽章悬停要显示空间 ID。当前页
@@ -205,6 +206,9 @@ func (h *Handler) buildAccountResponse(
 			}
 		} else {
 			customHeaders = headers
+		}
+		if !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isClaudeAccount {
+			codexTurnStates = row.GetCredentialStringMap(auth.CodexTurnStatesCredentialKey)
 		}
 		allowedAPIKeyIDs = row.GetCredentialInt64Slice("allowed_api_key_ids")
 	}
@@ -262,6 +266,7 @@ func (h *Handler) buildAccountResponse(
 		ClaudeClientVersionOverride:  claudeClientVersionOverride,
 		Timezone:                     accountTimezone,
 		CustomHeaders:                customHeaders,
+		CodexTurnStates:              codexTurnStates,
 		UpstreamRequestIDHeader:      row.GetCredential(auth.UpstreamRequestIDHeaderCredentialKey),
 		ProxyURL:                     row.ProxyURL,
 		Enabled:                      row.Enabled,
@@ -503,6 +508,7 @@ func stripAccountDetailFields(resp *accountResponse) {
 	resp.CodexClientMetadataMode = ""
 	resp.CodexPassthroughMode = ""
 	resp.CustomHeaders = nil
+	resp.CodexTurnStates = nil
 	resp.AllowedAPIKeyIDs = nil
 	resp.Usage5hDetail = nil
 	resp.Usage7dDetail = nil

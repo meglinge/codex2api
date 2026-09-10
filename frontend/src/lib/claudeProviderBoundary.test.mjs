@@ -59,6 +59,8 @@ test("shared connection test modal waits for a manual start", () => {
   assert.match(testModal, /runConnectionTest\(\)/);
   assert.match(testModal, /accounts\.testPing/);
   assert.match(testModal, /accounts\.testTurnStateByModel/);
+  assert.match(testModal, /updateAccountCodexTurnStates/);
+  assert.match(testModal, /persistTurnState\(selectedModel, observedTurnState\)/);
 });
 
 test("shared account detail sheet keeps Claude out of Codex-only actions", () => {

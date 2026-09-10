@@ -300,6 +300,8 @@ export interface AccountRow {
   claude_usage_windows_probed?: boolean
   timezone?: string
   custom_headers?: Record<string, string> | null
+  /** Codex 按模型保存的上游 X-Codex-Turn-State，后续用户请求回放。 */
+  codex_turn_states?: Record<string, string> | null
   health_tier?: string
   scheduler_score?: number
   dispatch_score?: number

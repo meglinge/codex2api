@@ -835,6 +835,11 @@ export const api = {
     request<MessageResponse>(`/accounts/${id}`, { method: 'DELETE' }),
   updateAccountNote: (id: number, note: string) =>
     request<MessageResponse>(`/accounts/${id}/note`, { method: 'PATCH', body: JSON.stringify({ note }) }),
+  updateAccountCodexTurnStates: (id: number, turnStates: Record<string, string>) =>
+    request<MessageResponse>(`/accounts/${id}/codex-turn-states`, {
+      method: 'PUT',
+      body: JSON.stringify({ turn_states: turnStates }),
+    }),
   getRecycleBinAccounts: () =>
     request<RecycleBinAccountsResponse>('/accounts/recycle-bin'),
   restoreAccount: (id: number) =>

@@ -151,9 +151,10 @@
     "testTurnStateApply": "填到目前模型",
     "testTurnStateByModel": "依模型填寫 X-Codex-Turn-State",
     "testTurnStatePlaceholder": "貼上該模型的 X-Codex-Turn-State",
-    "testTurnStatePingHint": "Ping 不帶標頭。拿到值後填到對應模型，再點重新測試才會回放。",
-    "testTurnStateReplayHint": "重新測試會把目前模型填好的值放到請求標頭 X-Codex-Turn-State。",
+    "testTurnStatePingHint": "Ping 不帶標頭，拿到值會填到目前模型並保存。之後該模型的使用者請求都會帶這個標頭。",
+    "testTurnStateReplayHint": "重新測試會把目前模型已保存的值放到請求標頭。之後該模型的使用者請求也會帶這個標頭。",
     "testTurnStateChanged": "上游回傳了不同的 X-Codex-Turn-State，目前值已失效。換新 IP 後再 Ping。",
+    "testTurnStateSaveFailed": "保存 X-Codex-Turn-State 失敗",
     "testDiagPending": "等待上游回應…",
     "openDetail": "查看詳情",
     "pendingReview": {

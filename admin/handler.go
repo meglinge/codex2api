@@ -1156,6 +1156,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/accounts/invite/plan", h.GetInviteGuidePlan)
 	api.POST("/accounts/invite/plan/probe", h.ProbeInviteGuidePlan)
 	api.GET("/accounts/:id/test", h.TestConnection)
+	api.PUT("/accounts/:id/codex-turn-states", h.UpdateAccountCodexTurnStates)
 	api.GET("/accounts/:id/usage", h.GetAccountUsage)
 	api.POST("/accounts/:id/usage/refresh", h.RefreshAccountUsage)
 	api.GET("/accounts/:id/auth-json", h.GetAccountAuthJSON)
@@ -1634,6 +1635,7 @@ type accountResponse struct {
 	ClaudeClientVersionOverride   string                      `json:"claude_client_version_override,omitempty"`
 	Timezone                      string                      `json:"timezone,omitempty"`
 	CustomHeaders                 map[string]string           `json:"custom_headers,omitempty"`
+	CodexTurnStates               map[string]string           `json:"codex_turn_states,omitempty"`
 	HealthTier                    string                      `json:"health_tier"`
 	SchedulerScore                float64                     `json:"scheduler_score"`
 	DispatchScore                 float64                     `json:"dispatch_score"`

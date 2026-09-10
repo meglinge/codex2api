@@ -48,6 +48,20 @@ test("token metrics scale bars against the largest observed count", () => {
   assert.equal(codexTestTokenMetrics(undefined).every((m) => m.value === null), true);
 });
 
+test("connection test modal persists ping turn-state onto the current model", async () => {
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("../components/TestConnectionModal.tsx", import.meta.url), "utf8");
+  if (!source.includes("if (!replayTurnState)")) {
+    throw new Error("ping path must persist without replaying the header");
+  }
+  if (!source.includes("persistTurnState(selectedModel, observedTurnState)")) {
+    throw new Error("ping must fill the current model");
+  }
+  if (!source.includes("replayTurnState: isCodexAccount")) {
+    throw new Error("retry must replay the filled turn-state");
+  }
+});
+
 test("turn-state prefers the dedicated field then the response header", () => {
   assert.equal(extractCodexTurnState({ model: "gpt-5.4", turn_state: "turn-field" }), "turn-field");
   assert.equal(

@@ -112,9 +112,14 @@ export default function TestConnectionModal({
   const [rawOpen, setRawOpen] = useState(false);
   const [proxyUrl, setProxyUrl] = useState(account.proxy_url ?? "");
   const [proxyPool, setProxyPool] = useState<ProxyRow[]>([]);
-  const [turnStates, setTurnStates] = useState<Record<string, string>>({});
+  const [turnStates, setTurnStates] = useState<Record<string, string>>(
+    () => ({ ...(account.codex_turn_states ?? {}) }),
+  );
   const [pingTurnState, setPingTurnState] = useState("");
   const [turnStateChanged, setTurnStateChanged] = useState(false);
+  const persistTurnStatesRef = useRef(turnStates);
+  persistTurnStatesRef.current = turnStates;
+  const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const outputEndRef = useRef<HTMLDivElement>(null);
   const settledRef = useRef(false);
@@ -138,6 +143,38 @@ export default function TestConnectionModal({
   );
   const isCodexAccount =
     !isClaudeAccount && !isAntigravityAccount && !isOpenAIResponsesAccount;
+  const canPersistTurnStates = isCodexAccount && account.status !== "deleted";
+
+  const persistTurnStates = useCallback(
+    (next: Record<string, string>, immediate = false) => {
+      setTurnStates(next);
+      persistTurnStatesRef.current = next;
+      if (!canPersistTurnStates) return;
+      const save = () => {
+        void api.updateAccountCodexTurnStates(account.id, next).catch(() => {
+          showToast(t("accounts.testTurnStateSaveFailed"), "error");
+        });
+      };
+      if (persistTimerRef.current) {
+        clearTimeout(persistTimerRef.current);
+        persistTimerRef.current = null;
+      }
+      if (immediate) {
+        save();
+        return;
+      }
+      persistTimerRef.current = setTimeout(save, 400);
+    },
+    [account.id, canPersistTurnStates, showToast, t],
+  );
+
+  const persistTurnState = useCallback(
+    (model: string, value: string, immediate = true) => {
+      if (!model) return;
+      persistTurnStates({ ...persistTurnStatesRef.current, [model]: value }, immediate);
+    },
+    [persistTurnStates],
+  );
 
   const modelSelectOptions = useMemo(
     () =>
@@ -151,7 +188,8 @@ export default function TestConnectionModal({
 
   useEffect(() => {
     setProxyUrl(account.proxy_url ?? "");
-  }, [account.id, account.proxy_url]);
+    setTurnStates({ ...(account.codex_turn_states ?? {}) });
+  }, [account.id, account.proxy_url, account.codex_turn_states]);
 
   useEffect(() => {
     if (!isCodexAccount) return;
@@ -429,7 +467,9 @@ export default function TestConnectionModal({
         const observedTurnState = extractCodexTurnState(latestDiagnostics);
         if (observedTurnState) {
           setPingTurnState(observedTurnState);
-          if (sentTurnState && sentTurnState !== observedTurnState) {
+          if (!replayTurnState) {
+            persistTurnState(selectedModel, observedTurnState);
+          } else if (sentTurnState && sentTurnState !== observedTurnState) {
             setTurnStateChanged(true);
           }
         }
@@ -455,6 +495,7 @@ export default function TestConnectionModal({
     [
       account.id,
       markSettled,
+      persistTurnState,
       proxyUrl,
       restoreOnSuccess,
       selectedModel,
@@ -466,6 +507,9 @@ export default function TestConnectionModal({
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
+      if (persistTimerRef.current) {
+        clearTimeout(persistTimerRef.current);
+      }
     };
   }, []);
 
@@ -509,7 +553,7 @@ export default function TestConnectionModal({
   const selectedTurnState = turnStates[selectedModel] ?? "";
   const applyPingTurnState = () => {
     if (!pingTurnState || !selectedModel) return;
-    setTurnStates((prev) => ({ ...prev, [selectedModel]: pingTurnState }));
+    persistTurnState(selectedModel, pingTurnState);
   };
   const handleCopyTurnState = async (value: string) => {
     try {
@@ -764,8 +808,7 @@ export default function TestConnectionModal({
                     <Input
                       value={turnStates[option.value] ?? ""}
                       onChange={(event) => {
-                        const value = event.target.value;
-                        setTurnStates((prev) => ({ ...prev, [option.value]: value }));
+                        persistTurnState(option.value, event.target.value, false);
                       }}
                       placeholder={t("accounts.testTurnStatePlaceholder")}
                       disabled={running}

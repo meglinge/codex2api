@@ -620,6 +620,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	// sessionID，WS stateless 为刚写入帧体的 prompt_cache_key。真实客户端自报身份时
 	// 以它为准，网关的会话键随之改用同一个值。
 	requestBody, ctx, sessionID = unifyCodexOutboundIdentity(ctx, account, requestBody, headers, sessionID, apiKey, deviceCfg)
+	// 下游没回带时，把账号为该模型保存的未降智 blob 填进请求头 / client_metadata。
+	// 放在身份统一之后，合成出的 client_metadata 也能带上这个字段。
+	requestBody, headers = injectStoredCodexTurnState(ctx, account, requestBody, headers)
 	if wantWebsocket && WebsocketExecuteFunc != nil {
 		requestBody, headers = prepareCodexResponsesLiteTransport(requestBody, headers, true, responsesLite)
 		if responsesLite {
@@ -1040,6 +1043,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 		requestBody, headers = alignCodexTurnMetadataVersion(requestBody, headers, outboundVersion)
 	}
 	requestBody, ctx, sessionID = unifyCodexOutboundIdentity(ctx, account, requestBody, headers, sessionID, apiKey, deviceCfg)
+	requestBody, headers = injectStoredCodexTurnState(ctx, account, requestBody, headers)
 
 	existingCacheKey := strings.TrimSpace(gjson.GetBytes(requestBody, "prompt_cache_key").String())
 	cacheKey := existingCacheKey

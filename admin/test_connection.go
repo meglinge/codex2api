@@ -183,7 +183,12 @@ func (h *Handler) TestConnection(c *gin.Context) {
 	} else if isOpenAIResponsesAccount {
 		resp, reqErr = proxy.ExecuteRelayStyleRequest(c.Request.Context(), account, payload, proxyURL, extraHeaders)
 	} else {
-		resp, reqErr = proxy.ExecuteRequest(c.Request.Context(), account, payload, "", proxyURL, "", nil, extraHeaders)
+		execCtx := c.Request.Context()
+		if extraHeaders == nil {
+			// Ping 不带头，也不能把账号里已保存的 turn-state 悄悄填回去。
+			execCtx = proxy.WithSkipStoredCodexTurnState(execCtx)
+		}
+		resp, reqErr = proxy.ExecuteRequest(execCtx, account, payload, "", proxyURL, "", nil, extraHeaders)
 	}
 	if reqErr != nil {
 		event := testEvent{Type: "error", Error: fmt.Sprintf("请求失败: %s", reqErr.Error())}
