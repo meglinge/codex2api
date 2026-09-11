@@ -18,6 +18,13 @@ export interface ChannelTestSettingsResponse {
   model_choices?: Partial<Record<'antigravity' | 'claude', string[]>>
 }
 
+export interface CodexTurnStateCacheSettings {
+  ipv6_proxy_url: string
+  models: string[]
+  ttl_minutes: number
+  model_choices?: string[]
+}
+
 export interface AntigravityRedirectChoice {
   model: string
   default_level: string

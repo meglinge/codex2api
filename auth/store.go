@@ -175,6 +175,8 @@ type Account struct {
 	// CodexTurnStates 按模型保存的上游 X-Codex-Turn-State。新 IP 第一次请求
 	// 拿到未降智的 blob 后，后续该模型的用户请求回放它。
 	CodexTurnStates map[string]string
+	// CodexTurnStateCapturedAtMap 每个模型最近一次写入 turn-state 的时间，用于 TTL。
+	CodexTurnStateCapturedAtMap map[string]time.Time
 	// ClaudeFingerprintMode 见 claude_fingerprint_mode.go:Claude Code 出站身份头
 	// 收敛模式(preserve/force;空=跟随全局默认)。
 	ClaudeFingerprintMode string
@@ -5298,6 +5300,7 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		ProxyURL:                     strings.TrimSpace(row.ProxyURL),
 		CustomHeaders:                row.GetCredentialStringMap("custom_headers"),
 		CodexTurnStates:              row.GetCredentialStringMap(CodexTurnStatesCredentialKey),
+		CodexTurnStateCapturedAtMap:  capturedAtFromCredentialRow(row),
 		UpstreamRequestIDHeader:      row.GetCredential(UpstreamRequestIDHeaderCredentialKey),
 		HealthTier:                   HealthTierWarm,
 		AddedAt:                      row.CreatedAt.UnixNano(),

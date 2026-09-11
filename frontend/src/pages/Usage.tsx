@@ -1028,14 +1028,17 @@ function TurnStateCell({ log, mobile = false }: { log: UsageLog; mobile?: boolea
   const outbound = log.outbound_codex_turn_state?.trim() || ''
   const inbound = log.inbound_codex_turn_state?.trim() || ''
   const hasAudit = Boolean(outbound || inbound)
-  const changed = hasAudit && outbound !== inbound
+  const changed = Boolean(outbound) && Boolean(inbound) && outbound !== inbound
+  const missingReturn = Boolean(outbound) && !inbound
   const outboundLabel = outbound || (hasAudit ? t('usage.turnStateNotSent') : '-')
-  const inboundLabel = inbound || (hasAudit ? t('usage.turnStateNotSent') : '-')
+  const inboundLabel = inbound || (hasAudit ? t('usage.turnStateNotReturned') : '-')
   const statusLabel = !hasAudit
     ? t('usage.turnStateNotRecorded')
     : changed
       ? t('usage.turnStateChanged')
-      : t('usage.turnStateUnchanged')
+      : missingReturn
+        ? t('usage.turnStateNotReturned')
+        : t('usage.turnStateUnchanged')
 
   if (!hasAudit) {
     return (
@@ -1051,7 +1054,9 @@ function TurnStateCell({ log, mobile = false }: { log: UsageLog; mobile?: boolea
       className={`ml-auto shrink-0 border-transparent px-1.5 py-0 text-[10px] font-semibold ${
         changed
           ? 'bg-amber-500/12 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300'
-          : 'bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300'
+          : missingReturn
+            ? 'bg-muted text-muted-foreground'
+            : 'bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300'
       }`}
     >
       {statusLabel}

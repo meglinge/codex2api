@@ -162,12 +162,11 @@ func resolveCodexTurnStateEcho(account *auth.Account, body []byte, headers http.
 // rewriteCodexTurnStateInEvent 把 WS 传输路径元数据事件（codex.response.metadata 等）
 // headers 里的上游 blob 换成下游 token。没有该字段或无法签发时原样返回。
 func rewriteCodexTurnStateInEvent(payload []byte, account *auth.Account) []byte {
-	const path = "headers.x-codex-turn-state"
-	field := gjson.GetBytes(payload, path)
-	if field.Type != gjson.String || field.String() == "" || isCodexTurnStateToken(field.String()) {
+	path, field := extractCodexTurnStateFromEvent(payload)
+	if path == "" || isCodexTurnStateToken(field) {
 		return payload
 	}
-	token := mintCodexTurnStateToken(account, field.String())
+	token := mintCodexTurnStateToken(account, field)
 	if token == "" {
 		if updated, err := sjson.DeleteBytes(payload, path); err == nil {
 			return updated

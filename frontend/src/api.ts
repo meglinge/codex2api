@@ -149,6 +149,7 @@ import type {
   VisibleChannelsSettings,
   ChannelTestSettings,
   ChannelTestSettingsResponse,
+  CodexTurnStateCacheSettings,
   AntigravitySettingsResponse,
 } from './types'
 
@@ -1001,6 +1002,12 @@ export const api = {
   getChannelTestSettings: () => request<ChannelTestSettingsResponse>('/settings/channel-tests'),
   updateChannelTestSettings: (patch: Partial<Record<'antigravity' | 'claude', Partial<ChannelTestSettings>>>) =>
     request<ChannelTestSettingsResponse>('/settings/channel-tests', {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    }),
+  getCodexTurnStateCacheSettings: () => request<CodexTurnStateCacheSettings>('/settings/codex-turn-state-cache'),
+  updateCodexTurnStateCacheSettings: (patch: Partial<Pick<CodexTurnStateCacheSettings, 'ipv6_proxy_url' | 'models' | 'ttl_minutes'>>) =>
+    request<CodexTurnStateCacheSettings>('/settings/codex-turn-state-cache', {
       method: 'PUT',
       body: JSON.stringify(patch),
     }),

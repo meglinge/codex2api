@@ -54,6 +54,12 @@ func TestUpdateAccountCodexTurnStatesPersistsAndAppliesRuntime(t *testing.T) {
 	if acc.GetCodexTurnState("gpt-5.6-sol") != "blob-1" {
 		t.Fatalf("runtime turn-state = %q", acc.GetCodexTurnState("gpt-5.6-sol"))
 	}
+	if acc.CodexTurnStateCapturedAt("gpt-5.6-sol").IsZero() {
+		t.Fatal("captured-at must be stored")
+	}
+	if got := row.GetCredentialInt64Map(auth.CodexTurnStateCapturedAtCredentialKey)["gpt-5.6-sol"]; got <= 0 {
+		t.Fatalf("persisted captured-at = %d", got)
+	}
 
 	resp := handler.buildAccountResponse(row, acc, nil, nil, nil, true)
 	if resp.CodexTurnStates["gpt-5.6-sol"] != "blob-1" {

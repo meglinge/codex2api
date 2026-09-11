@@ -1222,6 +1222,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.PUT("/settings/visible-channels", h.UpdateVisibleChannelsSettings)
 	api.GET("/settings/channel-tests", h.GetChannelTestSettings)
 	api.PUT("/settings/channel-tests", h.UpdateChannelTestSettings)
+	api.GET("/settings/codex-turn-state-cache", h.GetCodexTurnStateCacheSettings)
+	api.PUT("/settings/codex-turn-state-cache", h.UpdateCodexTurnStateCacheSettings)
 	api.GET("/settings/antigravity", h.GetAntigravitySettings)
 	api.PUT("/settings/antigravity", h.UpdateAntigravitySettings)
 	api.POST("/settings/background-upload", h.UploadBackgroundAsset)

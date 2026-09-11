@@ -1203,6 +1203,20 @@ func NewHandler(store *auth.Store, db *database.DB, cfg *config.Config, deviceCf
 	return handler
 }
 
+// InstallCodexTurnStateCache 从数据库加载配置并安装进程级自动缓存。
+func InstallCodexTurnStateCache(db *database.DB, store *auth.Store) {
+	cfg := database.CodexTurnStateCacheConfig{TTLMinutes: database.DefaultCodexTurnStateCacheTTLMinutes}
+	if db != nil {
+		loaded, err := db.LoadCodexTurnStateCacheConfig(context.Background())
+		if err != nil {
+			log.Printf("读取 X-Codex-Turn-State 缓存设置失败，按默认处理: %v", err)
+		} else {
+			cfg = loaded
+		}
+	}
+	SetCodexTurnStateCache(newCodexTurnStateCache(db, store, cfg, nil))
+}
+
 // SetRuntimeCache wires Redis/Memory runtime cache for hot auth metadata.
 func (h *Handler) SetRuntimeCache(tc cache.TokenCache) {
 	if h == nil {

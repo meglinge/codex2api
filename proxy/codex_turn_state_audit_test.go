@@ -52,6 +52,20 @@ func TestRecordInboundCodexTurnStateFromMetadataEvent(t *testing.T) {
 	}
 }
 
+func TestExtractCodexTurnStateFromEventIsCaseInsensitive(t *testing.T) {
+	path, value := extractCodexTurnStateFromEvent([]byte(`{"type":"response.metadata","headers":{"X-Codex-Turn-State":"mixed-case"}}`))
+	if path != "headers.X-Codex-Turn-State" || value != "mixed-case" {
+		t.Fatalf("path=%q value=%q", path, value)
+	}
+	path, value = extractCodexTurnStateFromEvent([]byte(`{"type":"response.completed","response":{"headers":{"x-codex-turn-state":"nested"}}}`))
+	if path != "response.headers.x-codex-turn-state" || value != "nested" {
+		t.Fatalf("nested path=%q value=%q", path, value)
+	}
+	if _, value := extractCodexTurnStateFromEvent([]byte(`{"type":"response.output_text.delta","delta":"hi"}`)); value != "" {
+		t.Fatalf("delta event leaked turn-state %q", value)
+	}
+}
+
 func httptestRequestWithContext(ctx context.Context) *gin.Context {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

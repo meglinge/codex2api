@@ -7,7 +7,7 @@ import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
-import type { AntigravityOAuthClientSetting, AntigravitySettingsResponse, ChannelTestSettings, CodexUserAgentCatalog, CodexUserAgentPreview, HealthResponse, ModelInfo, SiteBranding, SystemSettings, UpstreamChannel } from '../types'
+import type { AntigravityOAuthClientSetting, AntigravitySettingsResponse, ChannelTestSettings, CodexTurnStateCacheSettings, CodexUserAgentCatalog, CodexUserAgentPreview, HealthResponse, ModelInfo, SiteBranding, SystemSettings, UpstreamChannel } from '../types'
 import { ANTIGRAVITY_DEFAULT_MODELS } from '../lib/antigravityModels'
 import { countPayloadRules } from './PayloadRules'
 import { getErrorMessage } from '../utils/error'
@@ -744,6 +744,119 @@ const SETTINGS_CARD_GRID_2 = 'grid gap-4 lg:grid-cols-2 lg:items-stretch'
 // Claude / Antigravity 渠道的连通性测试卡片:独立于全局 test_model/test_content(那是
 // Codex 语义),按渠道保存默认探测模型与测活内容;留空模型 = 按账号目录自动选。
 const CLAUDE_TEST_MODEL_CHOICES = ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5', 'claude-opus-4-5', 'claude-sonnet-4-5']
+
+function CodexTurnStateCacheCard() {
+  const { t } = useTranslation()
+  const { showToast } = useToast()
+  const [settings, setSettings] = useState<CodexTurnStateCacheSettings | null>(null)
+  const [proxyDraft, setProxyDraft] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    void api.getCodexTurnStateCacheSettings().then((response) => {
+      if (!active) return
+      setSettings(response)
+      setProxyDraft(response.ipv6_proxy_url)
+    }).catch((error) => {
+      if (!active) return
+      showToast(getErrorMessage(error), 'error')
+    })
+    return () => {
+      active = false
+    }
+  }, [showToast])
+
+  const save = useCallback(async (patch: Partial<Pick<CodexTurnStateCacheSettings, 'ipv6_proxy_url' | 'models' | 'ttl_minutes'>>) => {
+    setSaving(true)
+    try {
+      const response = await api.updateCodexTurnStateCacheSettings(patch)
+      setSettings(response)
+      setProxyDraft(response.ipv6_proxy_url)
+      showToast(t('settings.codexTurnStateCache.saved'), 'success')
+    } catch (error) {
+      showToast(getErrorMessage(error), 'error')
+    } finally {
+      setSaving(false)
+    }
+  }, [showToast, t])
+
+  const selected = new Set((settings?.models ?? []).map((model) => model.toLowerCase()))
+  const choices = useMemo(() => {
+    const base = settings?.model_choices ?? []
+    const extra = (settings?.models ?? []).filter((model) => !base.includes(model))
+    return [...extra, ...base]
+  }, [settings?.model_choices, settings?.models])
+
+  const toggleModel = (model: string, enabled: boolean) => {
+    const next = new Set(settings?.models ?? [])
+    if (enabled) next.add(model)
+    else {
+      for (const current of Array.from(next)) {
+        if (current.toLowerCase() === model.toLowerCase()) next.delete(current)
+      }
+    }
+    void save({ models: Array.from(next) })
+  }
+
+  return (
+    <SettingsCard
+      title={t('settings.codexTurnStateCache.title')}
+      description={t('settings.codexTurnStateCache.desc')}
+      icon={<Shuffle className="size-4" />}
+    >
+      <div className="space-y-4">
+        <div className={SETTINGS_FIELD_GRID}>
+          <SettingField label={t('settings.codexTurnStateCache.proxy')} description={t('settings.codexTurnStateCache.proxyDesc')}>
+            <Input
+              value={proxyDraft}
+              placeholder="socks5://[::1]:1080"
+              disabled={settings === null || saving}
+              onChange={(e) => setProxyDraft(e.target.value)}
+              onBlur={() => {
+                const next = proxyDraft.trim()
+                if (next !== (settings?.ipv6_proxy_url ?? '')) void save({ ipv6_proxy_url: next })
+              }}
+            />
+          </SettingField>
+          <SettingField
+            label={t('settings.codexTurnStateCache.ttl')}
+            description={t('settings.codexTurnStateCache.ttlDesc')}
+            suffix={t('settings.unit.min')}
+          >
+            <DraftNumberInput
+              min={1}
+              max={1440}
+              value={settings?.ttl_minutes ?? 43}
+              disabled={settings === null || saving}
+              onValueChange={(value) => {
+                if (value !== (settings?.ttl_minutes ?? 43)) void save({ ttl_minutes: value })
+              }}
+            />
+          </SettingField>
+        </div>
+        <SettingField label={t('settings.codexTurnStateCache.models')} description={t('settings.codexTurnStateCache.modelsDesc')}>
+          <div className="max-h-56 space-y-2 overflow-y-auto rounded-md border border-border/70 px-3 py-2">
+            {choices.length === 0 ? (
+              <p className="text-xs text-muted-foreground">{t('settings.codexTurnStateCache.noModels')}</p>
+            ) : choices.map((model) => (
+              <label key={model} className="flex cursor-pointer items-center gap-2 text-sm text-foreground">
+                <input
+                  type="checkbox"
+                  className="size-3.5"
+                  checked={selected.has(model.toLowerCase())}
+                  disabled={settings === null || saving}
+                  onChange={(e) => toggleModel(model, e.target.checked)}
+                />
+                <span className="font-mono text-xs">{model}</span>
+              </label>
+            ))}
+          </div>
+        </SettingField>
+      </div>
+    </SettingsCard>
+  )
+}
 
 function ChannelConnectivityTestCard({ channel }: { channel: 'antigravity' | 'claude' }) {
   const { t } = useTranslation()
@@ -3591,6 +3704,7 @@ export default function Settings() {
               </SettingsSection>
 
               <SettingsSection id="settings-codex-transport" title={t('settings.nav.codexTransport')} description={t('settings.nav.codexTransportDesc')} icon={<Wifi className="size-4" />}>
+              <CodexTurnStateCacheCard />
               <SettingsCard title={t('settings.codexWebsocket')} description={t('settings.codexWebsocketDesc')} icon={<Wifi className="size-4" />}>
                 <div className="space-y-4">
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">

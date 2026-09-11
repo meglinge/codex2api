@@ -543,6 +543,11 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	defer func() { encryptedAttempt.observeResponse(upstreamResponse, requestBody) }()
 	// 标识隔离：下游回带的 turn-state token 换回上游 blob（跨账号或未知则删除），见 codex_id_isolation.go。
 	requestBody, headers = resolveCodexTurnStateEcho(account, requestBody, headers)
+	var readyErr error
+	ctx, readyErr = ensureCodexTurnStateReady(ctx, account, requestBody)
+	if readyErr != nil {
+		return nil, readyErr
+	}
 
 	// Payload 规则改写：在 WS/HTTP 分叉前统一应用，两条上游路径共享改写结果。
 	// 生图请求跳过——其 instructions/工具由网关自行构造，改写会破坏桥接协议。
@@ -1004,6 +1009,11 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	defer func() { encryptedAttempt.observeResponse(upstreamResponse, requestBody) }()
 	// 标识隔离：下游回带的 turn-state token 换回上游 blob（跨账号或未知则删除），见 codex_id_isolation.go。
 	requestBody, headers = resolveCodexTurnStateEcho(account, requestBody, headers)
+	var readyErr error
+	ctx, readyErr = ensureCodexTurnStateReady(ctx, account, requestBody)
+	if readyErr != nil {
+		return nil, readyErr
+	}
 	responsesLite := gateResponsesLiteForAccount(codexResponsesLiteRequested(requestBody, headers), requestBody, account)
 
 	account.Mu().RLock()

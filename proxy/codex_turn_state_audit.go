@@ -77,6 +77,7 @@ func RecordInboundCodexTurnState(ctx context.Context, value string) {
 		audit.inbound = value
 		audit.mu.Unlock()
 	}
+	observeCodexTurnStateInbound(ctx, value)
 }
 
 func recordInboundCodexTurnStateFromHeaders(ctx context.Context, headers http.Header) {
@@ -87,11 +88,36 @@ func recordInboundCodexTurnStateFromHeaders(ctx context.Context, headers http.He
 }
 
 func recordInboundCodexTurnStateFromEvent(ctx context.Context, payload []byte) {
-	field := gjson.GetBytes(payload, "headers.x-codex-turn-state")
-	if field.Type != gjson.String {
-		return
+	_, value := extractCodexTurnStateFromEvent(payload)
+	RecordInboundCodexTurnState(ctx, value)
+}
+
+// extractCodexTurnStateFromEvent 从 Responses 事件里取出上游 turn-state。
+// Codex 客户端只认 type=response.metadata 的顶层 headers，且头名大小写不敏感；
+// 实测 WS 还会发 codex.response.metadata，HTTP 偶发把同一头挂在 response.headers。
+func extractCodexTurnStateFromEvent(payload []byte) (path, value string) {
+	for _, prefix := range []string{"headers", "response.headers"} {
+		headers := gjson.GetBytes(payload, prefix)
+		if !headers.IsObject() {
+			continue
+		}
+		var foundPath, foundValue string
+		headers.ForEach(func(key, val gjson.Result) bool {
+			if !strings.EqualFold(key.String(), "x-codex-turn-state") || val.Type != gjson.String {
+				return true
+			}
+			foundValue = strings.TrimSpace(val.String())
+			if foundValue == "" {
+				return true
+			}
+			foundPath = prefix + "." + key.String()
+			return false
+		})
+		if foundPath != "" {
+			return foundPath, foundValue
+		}
 	}
-	RecordInboundCodexTurnState(ctx, field.String())
+	return "", ""
 }
 
 func populateCodexTurnStateMetaFromRequest(c *gin.Context, input *database.UsageLogInput) {

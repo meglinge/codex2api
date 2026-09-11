@@ -55,14 +55,29 @@ func (h *Handler) UpdateAccountCodexTurnStates(c *gin.Context) {
 		return
 	}
 
+	now := time.Now()
+	capturedUnix := make(map[string]int64, len(normalized))
+	capturedAt := make(map[string]time.Time, len(normalized))
+	existing := auth.NormalizeCodexTurnStateCapturedAt(row.GetCredentialInt64Map(auth.CodexTurnStateCapturedAtCredentialKey), normalized)
+	existingStates := row.GetCredentialStringMap(auth.CodexTurnStatesCredentialKey)
+	for model, value := range normalized {
+		if ts := existing[model]; ts > 0 && existingStates[model] == value {
+			capturedUnix[model] = ts
+			capturedAt[model] = time.Unix(ts, 0)
+			continue
+		}
+		capturedUnix[model] = now.Unix()
+		capturedAt[model] = now
+	}
 	if err := h.db.UpdateCredentials(ctx, id, map[string]interface{}{
-		auth.CodexTurnStatesCredentialKey: normalized,
+		auth.CodexTurnStatesCredentialKey:          normalized,
+		auth.CodexTurnStateCapturedAtCredentialKey: capturedUnix,
 	}); err != nil {
 		writeError(c, http.StatusInternalServerError, "保存 X-Codex-Turn-State 失败: "+err.Error())
 		return
 	}
 	if h.store != nil {
-		h.store.ApplyAccountCodexTurnStates(id, normalized)
+		h.store.ApplyAccountCodexTurnStates(id, normalized, capturedAt)
 	}
 	writeMessage(c, http.StatusOK, "X-Codex-Turn-State 已保存")
 }

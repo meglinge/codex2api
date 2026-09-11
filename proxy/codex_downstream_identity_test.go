@@ -62,4 +62,11 @@ func TestSanitizeDownstreamResponseIdentity(t *testing.T) {
 	if gjson.GetBytes(out, "headers.x-codex-primary-used-percent").String() != "10" {
 		t.Fatalf("other metadata headers must survive: %s", out)
 	}
+
+	mixed := []byte(`{"type":"response.metadata","headers":{"X-Codex-Turn-State":"upstream-blob"}}`)
+	out = sanitizeDownstreamResponseIdentity(mixed, downstreamIdentityContext{account: account})
+	token = gjson.GetBytes(out, "headers.X-Codex-Turn-State").String()
+	if !isCodexTurnStateToken(token) {
+		t.Fatalf("mixed-case turn-state in response.metadata must be tokenised: %s", out)
+	}
 }
