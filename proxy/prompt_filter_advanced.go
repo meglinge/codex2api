@@ -188,7 +188,7 @@ func shouldAccumulatePromptRisk(verdict promptfilter.Verdict) bool {
 }
 
 func promptSessionID(c *gin.Context) string {
-	for _, name := range []string{"X-Session-ID", "OpenAI-Session-ID", "Session-ID"} {
+	for _, name := range []string{"X-Session-ID", "OpenAI-Session-ID", "Session-ID", "X-Amp-Thread-Id"} {
 		if value := strings.TrimSpace(c.GetHeader(name)); value != "" {
 			return value
 		}

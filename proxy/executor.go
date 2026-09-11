@@ -503,7 +503,7 @@ func IsolateCodexSessionID(apiKeyID int64, raw string) string {
 }
 
 // resolveUpstreamSessionID 决定传给上游的会话/缓存身份键。
-//   - 显式会话（用户带了 Session_id/Conversation_id/Idempotency-Key/prompt_cache_key）：
+//   - 显式会话（用户带了 Session_id/Conversation_id/X-Amp-Thread-Id/prompt_cache_key）：
 //     保持 IsolateCodexSessionID 的确定性隔离行为，命中缓存、粘定会话。
 //   - 无显式会话 + 默认隔离(isolated)：HTTP 返回每请求唯一 UUID（隔离上游 prompt_cache_key/
 //     Session_id），WS 返回 ""（交给 ExecuteRequest 的 stateless 路径，连接池键单独稳定）。
@@ -1474,11 +1474,11 @@ type requestSessionIdentity struct {
 // ResolveSessionID 从下游请求提取或生成 session ID
 // 优先级：
 //  1. Header: X-Codex2API-Affinity-Key（仅本地使用，先哈希再参与绑定）
-//  2. Header: Session_id
-//  3. Header: Conversation_id
-//  4. Header: Idempotency-Key
-//  5. Header: X-Session-Id / X-Session-Affinity（opencode 等第三方客户端）
-//  6. Body:   prompt_cache_key
+//  2. Header: Session_id / Conversation_id（官方 Codex 会话）
+//  3. Header: X-Amp-Thread-Id（Amp CLI / 自建 Amp 转发器的稳定会话）
+//  4. Header: X-Session-Id / X-Session-Affinity（opencode 等第三方客户端）
+//  5. Body:   prompt_cache_key
+//  6. Header: Idempotency-Key（仅作兜底；网关常每请求新发，不能压过会话头）
 //  7. Body:   内容派生种子（model+instructions+system+首条 user 消息，见
 //     deriveContentSessionSeed；带 previous_response_id 的续链请求跳过）
 //  8. 基于 Bearer API Key 的确定性 UUID
@@ -1553,10 +1553,16 @@ func ResolveExplicitSessionID(headers http.Header, body []byte) string {
 		// 注意：Codex CLI 发的是连字符头 session-id / conversation-id（HTTP/2 全小写，
 		// 服务端规范化成 Session-Id / Conversation-Id），与旧的下划线写法 Session_id 不同，
 		// 两种都要认，否则取不到显式会话 id、affinity 只能退回内容种子。
-		for _, key := range []string{"Session-Id", "Session_id", "Conversation-Id", "Conversation_id", "Idempotency-Key"} {
+		for _, key := range []string{"Session-Id", "Session_id", "Conversation-Id", "Conversation_id"} {
 			if v := strings.TrimSpace(headers.Get(key)); v != "" {
 				return v
 			}
+		}
+		// Amp CLI 与自建 Amp 转发器（AMPManager）用 x-amp-thread-id 标识同一条对话。
+		// 不认这个头时默认隔离会给每轮发一个新的 prompt_cache_key，上游前缀缓存必然 miss。
+		// x-amp-message-id 是逐条消息，不能当会话键。
+		if v := strings.TrimSpace(headers.Get("X-Amp-Thread-Id")); v != "" {
+			return v
 		}
 		// opencode 等第三方 CLI 客户端用 x-session-id / x-session-affinity 标识会话
 		// （值为 ses_...，非 UUID，出站上由 claudeUpstreamSessionID 等确定性派生为
@@ -1570,6 +1576,13 @@ func ResolveExplicitSessionID(headers http.Header, body []byte) string {
 	// 没有显式会话头时，从 body 的 prompt_cache_key 提取。
 	if v := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()); v != "" {
 		return v
+	}
+	// Idempotency-Key 是单次请求重放令牌。自建 Amp 网关常每轮新发一个 UUID，
+	// 不能压过上面的稳定会话头，否则同一 thread 会被拆成无数上游 cache key。
+	if headers != nil {
+		if v := strings.TrimSpace(headers.Get("Idempotency-Key")); v != "" {
+			return v
+		}
 	}
 
 	return ""

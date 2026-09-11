@@ -1710,6 +1710,58 @@ func TestIsolateCodexSessionIDUsesAPIKeyScope(t *testing.T) {
 	}
 }
 
+func TestResolveExplicitSessionIDUsesAmpThreadID(t *testing.T) {
+	headers := http.Header{
+		"X-Amp-Thread-Id": []string{"T-amp-thread-stable"},
+		"Authorization":   []string{"Bearer sk-test-123"},
+	}
+	body := []byte(`{"model":"gpt-5.4","input":"hello"}`)
+	if got := ResolveExplicitSessionID(headers, body); got != "T-amp-thread-stable" {
+		t.Fatalf("ResolveExplicitSessionID() = %q, want Amp thread id", got)
+	}
+	if got := ResolveSessionID(headers, body); got != "T-amp-thread-stable" {
+		t.Fatalf("ResolveSessionID() = %q, want Amp thread id", got)
+	}
+
+	headers.Set("X-Amp-Message-Id", "msg-per-turn")
+	if got := ResolveExplicitSessionID(headers, body); got != "T-amp-thread-stable" {
+		t.Fatalf("x-amp-message-id must not replace thread id, got %q", got)
+	}
+
+	headers.Set("Idempotency-Key", "per-request-idem-1")
+	if got := ResolveExplicitSessionID(headers, body); got != "T-amp-thread-stable" {
+		t.Fatalf("Idempotency-Key must not replace Amp thread id, got %q", got)
+	}
+
+	headers.Set("Session-Id", "official-session")
+	if got := ResolveExplicitSessionID(headers, body); got != "official-session" {
+		t.Fatalf("official Session-Id must win over Amp thread id, got %q", got)
+	}
+}
+
+func TestResolveUpstreamSessionIDKeepsAmpThreadAcrossIsolatedRequests(t *testing.T) {
+	previous := CurrentRuntimeSettings()
+	t.Cleanup(func() { ApplyRuntimeSettings(previous) })
+	next := previous
+	next.RequestIsolationMode = RequestIsolationModeIsolated
+	ApplyRuntimeSettings(next)
+
+	headers := http.Header{"X-Amp-Thread-Id": []string{"T-amp-thread-stable"}}
+	identity := resolveRequestSessionIdentity(headers, []byte(`{"model":"gpt-5.4","input":"hello"}`))
+	if identity.explicitUpstreamID != "T-amp-thread-stable" {
+		t.Fatalf("explicitUpstreamID = %q, want Amp thread id", identity.explicitUpstreamID)
+	}
+	first := resolveUpstreamSessionID(7, identity.upstreamSeed, identity.explicitUpstreamID, false)
+	second := resolveUpstreamSessionID(7, identity.upstreamSeed, identity.explicitUpstreamID, false)
+	if first == "" || first != second {
+		t.Fatalf("isolated Amp thread cache key drifted: %q vs %q", first, second)
+	}
+	ws := resolveUpstreamSessionID(7, identity.upstreamSeed, identity.explicitUpstreamID, true)
+	if ws != first {
+		t.Fatalf("WS Amp thread cache key = %q, want %q", ws, first)
+	}
+}
+
 func TestResolveSessionIDPrefersContinuityHeaders(t *testing.T) {
 	headers := http.Header{
 		"Session_id":      []string{"session-from-header"},
@@ -1727,9 +1779,19 @@ func TestResolveSessionIDPrefersContinuityHeaders(t *testing.T) {
 	}
 
 	headers.Del("Conversation_id")
+	headers.Set("X-Amp-Thread-Id", "T-amp-thread-stable")
 	headers.Set("Idempotency-Key", "idempotency-key-1")
-	if got := ResolveSessionID(headers, []byte(`{"prompt_cache_key":"body-key"}`)); got != "idempotency-key-1" {
-		t.Fatalf("ResolveSessionID() = %q, want %q", got, "idempotency-key-1")
+	if got := ResolveSessionID(headers, []byte(`{"prompt_cache_key":"body-key"}`)); got != "T-amp-thread-stable" {
+		t.Fatalf("ResolveSessionID() = %q, want Amp thread id over idempotency and body cache key", got)
+	}
+
+	headers.Del("X-Amp-Thread-Id")
+	if got := ResolveSessionID(headers, []byte(`{"prompt_cache_key":"body-key"}`)); got != "body-key" {
+		t.Fatalf("ResolveSessionID() = %q, want body prompt_cache_key over Idempotency-Key", got)
+	}
+
+	if got := ResolveSessionID(headers, []byte(`{}`)); got != "idempotency-key-1" {
+		t.Fatalf("ResolveSessionID() = %q, want Idempotency-Key as last explicit fallback", got)
 	}
 }
 
