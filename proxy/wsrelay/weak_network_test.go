@@ -109,3 +109,42 @@ func TestWeakNetworkModeRetainsHeartbeatForInFlightRequest(t *testing.T) {
 		t.Fatalf("in-flight session heartbeat callbacks = %d, want 1", pings)
 	}
 }
+
+func TestHeartbeatPingIntervalUsesWeakNetworkCadence(t *testing.T) {
+	setWeakNetworkModeForTest(t, false)
+	if got := heartbeatPingInterval(); got != HeartbeatPingInterval {
+		t.Fatalf("normal heartbeat = %s, want %s", got, HeartbeatPingInterval)
+	}
+
+	setWeakNetworkModeForTest(t, true)
+	if got := heartbeatPingInterval(); got != WeakNetworkHeartbeatPingInterval {
+		t.Fatalf("weak-network heartbeat = %s, want %s", got, WeakNetworkHeartbeatPingInterval)
+	}
+	if WeakNetworkHeartbeatPingInterval >= WeakNetworkIdleTimeout {
+		t.Fatalf("in-flight ping %s must beat the %s SOCKS idle window", WeakNetworkHeartbeatPingInterval, WeakNetworkIdleTimeout)
+	}
+}
+
+func TestStartHeartbeatResetsExistingTimerToWeakNetworkCadence(t *testing.T) {
+	setWeakNetworkModeForTest(t, false)
+	session := NewSession(1, nil)
+	session.SetConnected(true)
+	session.StartHeartbeat(func() error { return nil })
+	t.Cleanup(session.StopHeartbeat)
+
+	session.mu.RLock()
+	first := session.heartbeatTimer
+	session.mu.RUnlock()
+	if first == nil {
+		t.Fatal("expected a heartbeat timer")
+	}
+
+	setWeakNetworkModeForTest(t, true)
+	session.StartHeartbeat(func() error { return nil })
+	session.mu.RLock()
+	second := session.heartbeatTimer
+	session.mu.RUnlock()
+	if second == nil || second != first {
+		t.Fatal("StartHeartbeat should reset the existing timer, not replace it")
+	}
+}

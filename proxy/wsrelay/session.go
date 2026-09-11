@@ -15,6 +15,10 @@ const (
 	// 心跳间隔：每 30 秒发送 Ping
 	HeartbeatPingInterval = 30 * time.Second
 
+	// 弱网在途心跳：住宅代理 / SOCKS 常在 15–20s 空闲后掐 TCP。
+	// 30s 心跳赶不上，Astra 等长推理在握手后的静默窗口就会 598。
+	WeakNetworkHeartbeatPingInterval = 8 * time.Second
+
 	// 活跃流存活复核间隔：业务帧静默达到 120 秒时不直接断开，而是先检查
 	// 最近入站活动，再按需发送带唯一 payload 的 Ping 等待匹配 Pong。
 	ReadLivenessCheckInterval = 120 * time.Second
@@ -273,15 +277,24 @@ func (s *Session) DeliverStreamChunk(msg *Message) bool {
 	return false
 }
 
-// StartHeartbeat 启动心跳（防重入）
+func heartbeatPingInterval() time.Duration {
+	if weakNetworkModeEnabled() {
+		return WeakNetworkHeartbeatPingInterval
+	}
+	return HeartbeatPingInterval
+}
+
+// StartHeartbeat 启动心跳。已有 timer 时按当前间隔重置，弱网模式要把
+// 30s 空闲心跳改成 8s 在途心跳，否则 SOCKS 会先掐连接。
 func (s *Session) StartHeartbeat(sendPing func() error) {
 	s.mu.Lock()
-	// 防重入：如果已有 timer 则直接返回
+	interval := heartbeatPingInterval()
 	if s.heartbeatTimer != nil {
+		s.heartbeatTimer.Reset(interval)
 		s.mu.Unlock()
 		return
 	}
-	s.heartbeatTimer = time.AfterFunc(HeartbeatPingInterval, func() {
+	s.heartbeatTimer = time.AfterFunc(interval, func() {
 		s.heartbeatTick(sendPing)
 	})
 	s.mu.Unlock()
@@ -325,7 +338,7 @@ func (s *Session) heartbeatTick(sendPing func() error) {
 
 	// 安全重置计时器
 	if timer != nil {
-		timer.Reset(HeartbeatPingInterval)
+		timer.Reset(heartbeatPingInterval())
 	}
 }
 
