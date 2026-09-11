@@ -18,6 +18,8 @@ type CodexTurnStateCacheConfig struct {
 	IPv6ProxyURL string   `json:"ipv6_proxy_url"`
 	Models       []string `json:"models"`
 	TTLMinutes   int      `json:"ttl_minutes"`
+	Countries    []string `json:"countries"`
+	MaxPingTries int      `json:"max_ping_tries"`
 }
 
 const (
@@ -25,6 +27,11 @@ const (
 	MinCodexTurnStateCacheTTLMinutes     = 1
 	MaxCodexTurnStateCacheTTLMinutes     = 24 * 60
 	MaxCodexTurnStateCacheModels         = 64
+	DefaultCodexTurnStateCacheMaxTries   = 8
+	MinCodexTurnStateCacheMaxTries       = 1
+	MaxCodexTurnStateCacheMaxTries       = 32
+	MaxCodexTurnStateCacheCountries      = 32
+	codexTurnStateRegionPlaceholder      = "{XX}"
 )
 
 // Normalized 去掉空白模型、钳制 TTL，保证落库与回显一致。
@@ -56,11 +63,104 @@ func (c CodexTurnStateCacheConfig) Normalized() CodexTurnStateCacheConfig {
 			break
 		}
 	}
+	tries := c.MaxPingTries
+	if tries <= 0 {
+		tries = DefaultCodexTurnStateCacheMaxTries
+	}
+	if tries < MinCodexTurnStateCacheMaxTries {
+		tries = MinCodexTurnStateCacheMaxTries
+	}
+	if tries > MaxCodexTurnStateCacheMaxTries {
+		tries = MaxCodexTurnStateCacheMaxTries
+	}
 	return CodexTurnStateCacheConfig{
 		IPv6ProxyURL: strings.TrimSpace(c.IPv6ProxyURL),
 		Models:       models,
 		TTLMinutes:   ttl,
+		Countries:    NormalizeCodexTurnStateCacheCountries(c.Countries),
+		MaxPingTries: tries,
 	}
+}
+
+// NormalizeCodexTurnStateCacheCountries 去空白、转大写、去重。
+func NormalizeCodexTurnStateCacheCountries(raw []string) []string {
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, country := range raw {
+		country = strings.ToUpper(strings.TrimSpace(country))
+		if country == "" {
+			continue
+		}
+		if _, ok := seen[country]; ok {
+			continue
+		}
+		seen[country] = struct{}{}
+		out = append(out, country)
+		if len(out) >= MaxCodexTurnStateCacheCountries {
+			break
+		}
+	}
+	return out
+}
+
+// ExpandIPv6ProxyURL 把模板里的 {XX} 换成国家代码。没有占位符时原样返回。
+func ExpandIPv6ProxyURL(template, country string) string {
+	template = strings.TrimSpace(template)
+	country = strings.ToUpper(strings.TrimSpace(country))
+	if template == "" {
+		return ""
+	}
+	if country == "" || !strings.Contains(template, codexTurnStateRegionPlaceholder) {
+		return template
+	}
+	return strings.ReplaceAll(template, codexTurnStateRegionPlaceholder, country)
+}
+
+// PingProxyURLs 按国家列表展开代理 URL，去重后截到最大重试次数。
+func (c CodexTurnStateCacheConfig) PingProxyURLs() []string {
+	normalized := c.Normalized()
+	template := normalized.IPv6ProxyURL
+	if template == "" {
+		return []string{""}
+	}
+	countries := normalized.Countries
+	if !strings.Contains(template, codexTurnStateRegionPlaceholder) || len(countries) == 0 {
+		return []string{template}
+	}
+	seen := make(map[string]struct{}, len(countries))
+	out := make([]string, 0, len(countries))
+	for _, country := range countries {
+		url := ExpandIPv6ProxyURL(template, country)
+		if url == "" {
+			continue
+		}
+		if _, ok := seen[url]; ok {
+			continue
+		}
+		seen[url] = struct{}{}
+		out = append(out, url)
+		if len(out) >= normalized.MaxPingTries {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return []string{template}
+	}
+	return out
+}
+
+// PingProxyAttempts 按最大重试次数循环国家列表。没有 {XX} 时同一代理会重试多次，靠上游轮转 IP。
+func (c CodexTurnStateCacheConfig) PingProxyAttempts() []string {
+	urls := c.PingProxyURLs()
+	max := c.Normalized().MaxPingTries
+	if max < 1 {
+		max = 1
+	}
+	out := make([]string, 0, max)
+	for i := 0; i < max; i++ {
+		out = append(out, urls[i%len(urls)])
+	}
+	return out
 }
 
 // Enabled 勾选了至少一个模型才开启自动缓存。

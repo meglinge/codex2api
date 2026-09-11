@@ -22,6 +22,8 @@ export interface CodexTurnStateCacheSettings {
   ipv6_proxy_url: string
   models: string[]
   ttl_minutes: number
+  countries: string[]
+  max_ping_tries: number
   model_choices?: string[]
 }
 

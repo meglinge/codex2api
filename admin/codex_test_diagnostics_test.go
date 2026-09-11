@@ -77,6 +77,16 @@ func TestCodexTestRecorderCapturesWindowsIdentityAndHeaderWhitelist(t *testing.T
 	}
 }
 
+func TestCodexTestRecorderRedactsProxyURL(t *testing.T) {
+	r := newCodexTestRecorder(nil, "gpt-5.4", nil, time.Now()).withProxyURL("socks5://user:secret@127.0.0.1:1080")
+	if got := r.details.ProxyURL; got != "socks5://[REDACTED]@127.0.0.1:1080" {
+		t.Fatalf("proxy_url = %q", got)
+	}
+	if got := newCodexTestRecorder(nil, "gpt-5.4", nil, time.Now()).withProxyURL("").details.ProxyURL; got != "" {
+		t.Fatalf("empty proxy should stay empty, got %q", got)
+	}
+}
+
 func TestCodexTestRecorderWithoutWindowHeadersLeavesWindowsAbsent(t *testing.T) {
 	resp := &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}
 	r := newCodexTestRecorder(resp, "gpt-5.4", nil, time.Now())

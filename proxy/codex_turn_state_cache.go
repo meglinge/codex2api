@@ -2,9 +2,11 @@ package proxy
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,14 +14,18 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
+	"github.com/codex2api/security"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 const (
-	codexTurnStatePingTimeout    = 45 * time.Second
-	codexTurnStatePingBodyLimit  = 4096
-	codexTurnStateCacheWaiterKey = "|"
+	codexTurnStatePingTimeout         = 45 * time.Second
+	codexTurnStatePingBodyLimit       = 4096
+	codexTurnStateCacheWaiterKey      = "|"
+	codexTurnStateFernetVersion       = 0x80
+	codexTurnStateHealthyCipherLen    = 160
+	codexTurnStateDowngradedCipherLen = 176
 )
 
 type codexTurnStateCache struct {
@@ -231,27 +237,35 @@ func (c *codexTurnStateCache) runRefresh(account *auth.Account, model, key strin
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), codexTurnStatePingTimeout)
-	defer cancel()
-	ctx = WithSkipStoredCodexTurnState(ctx)
-
-	value, err := c.ping(ctx, account, model, c.config().IPv6ProxyURL)
-	if err != nil {
-		waiter.err = fmt.Errorf("刷新 X-Codex-Turn-State 失败: %w", err)
+	var lastErr error
+	for i, proxyURL := range c.config().PingProxyAttempts() {
+		ctx, cancel := context.WithTimeout(context.Background(), codexTurnStatePingTimeout)
+		ctx = WithSkipStoredCodexTurnState(ctx)
+		value, err := c.ping(ctx, account, model, proxyURL)
+		cancel()
+		if err != nil {
+			lastErr = err
+			log.Printf("刷新 X-Codex-Turn-State 失败 account=%d model=%s attempt=%d proxy=%s: %v", account.ID(), model, i+1, security.MaskURLCredentials(proxyURL), err)
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if value == "" {
+			lastErr = fmt.Errorf("上游未返回 X-Codex-Turn-State")
+			continue
+		}
+		capturedAt := time.Now()
+		account.SetCodexTurnState(model, value, capturedAt)
+		if err := persistAccountCodexTurnStates(context.Background(), c.db, account); err != nil {
+			waiter.err = fmt.Errorf("保存 X-Codex-Turn-State 失败: %w", err)
+			return
+		}
+		waiter.value = value
 		return
 	}
-	value = strings.TrimSpace(value)
-	if value == "" {
-		waiter.err = fmt.Errorf("上游未返回 X-Codex-Turn-State")
-		return
+	if lastErr == nil {
+		lastErr = fmt.Errorf("上游未返回 X-Codex-Turn-State")
 	}
-	capturedAt := time.Now()
-	account.SetCodexTurnState(model, value, capturedAt)
-	if err := persistAccountCodexTurnStates(ctx, c.db, account); err != nil {
-		waiter.err = fmt.Errorf("保存 X-Codex-Turn-State 失败: %w", err)
-		return
-	}
-	waiter.value = value
+	waiter.err = fmt.Errorf("刷新 X-Codex-Turn-State 失败: %w", lastErr)
 }
 
 func persistAccountCodexTurnStates(ctx context.Context, db *database.DB, account *auth.Account) error {
@@ -276,11 +290,7 @@ func persistAccountCodexTurnStates(ctx context.Context, db *database.DB, account
 }
 
 func defaultCodexTurnStatePing(ctx context.Context, account *auth.Account, model, proxyURL string) (string, error) {
-	content := auth.DefaultTestContent
-	if cache := currentCodexTurnStateCache(); cache != nil && cache.store != nil {
-		content = cache.store.GetTestContent()
-	}
-	payload := codexTurnStatePingPayload(model, content)
+	payload := CodexTurnStatePingPayload(model)
 	resp, err := ExecuteRequest(ctx, account, payload, "", proxyURL, "", nil, nil, false)
 	if err != nil {
 		return "", err
@@ -293,20 +303,96 @@ func defaultCodexTurnStatePing(ctx context.Context, account *auth.Account, model
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, codexTurnStatePingBodyLimit))
 		return "", fmt.Errorf("上游返回 %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
+	value := collectCodexTurnStatePing(resp)
+	if err := verifyCodexTurnStatePingIntelligence(value); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+func collectCodexTurnStatePing(resp *http.Response) string {
+	if resp == nil {
+		return ""
+	}
 	value := strings.TrimSpace(resp.Header.Get(codexTurnStateHeader))
+	if value != "" {
+		return value
+	}
+	_ = ReadSSEStream(resp.Body, func(data []byte) bool {
+		if _, found := extractCodexTurnStateFromEvent(data); found != "" {
+			value = found
+			return false
+		}
+		return true
+	})
+	return strings.TrimSpace(value)
+}
+
+func verifyCodexTurnStatePingIntelligence(value string) error {
+	info, err := inspectCodexTurnStateToken(value)
+	if err != nil {
+		return err
+	}
+	if info.CipherLen == codexTurnStateDowngradedCipherLen {
+		return fmt.Errorf("智力校验未通过: Fernet 密文 %d 字节（降智）", info.CipherLen)
+	}
+	if info.CipherLen != codexTurnStateHealthyCipherLen {
+		return fmt.Errorf("智力校验未通过: Fernet 密文 %d 字节，期望 %d", info.CipherLen, codexTurnStateHealthyCipherLen)
+	}
+	return nil
+}
+
+type codexTurnStateTokenInfo struct {
+	Version   byte
+	Timestamp int64
+	CipherLen int
+}
+
+func inspectCodexTurnStateToken(value string) (codexTurnStateTokenInfo, error) {
+	value = strings.TrimSpace(value)
 	if value == "" {
-		_ = ReadSSEStream(resp.Body, func(data []byte) bool {
-			if _, found := extractCodexTurnStateFromEvent(data); found != "" {
-				value = found
-				return false
-			}
-			return true
-		})
+		return codexTurnStateTokenInfo{}, fmt.Errorf("上游未返回 X-Codex-Turn-State")
 	}
-	if strings.TrimSpace(value) == "" {
-		return "", fmt.Errorf("上游未返回 X-Codex-Turn-State")
+	raw, err := decodeCodexTurnStateFernet(value)
+	if err != nil {
+		return codexTurnStateTokenInfo{}, fmt.Errorf("X-Codex-Turn-State 不是有效 Fernet: %w", err)
 	}
-	return strings.TrimSpace(value), nil
+	if len(raw) < 1+8+16+32 {
+		return codexTurnStateTokenInfo{}, fmt.Errorf("X-Codex-Turn-State Fernet 过短: %d 字节", len(raw))
+	}
+	if raw[0] != codexTurnStateFernetVersion {
+		return codexTurnStateTokenInfo{}, fmt.Errorf("X-Codex-Turn-State Fernet 版本 0x%02x，期望 0x80", raw[0])
+	}
+	cipherLen := len(raw) - (1 + 8 + 16 + 32)
+	if cipherLen < 0 {
+		return codexTurnStateTokenInfo{}, fmt.Errorf("X-Codex-Turn-State Fernet 密文长度为负")
+	}
+	ts := int64(raw[1])<<56 | int64(raw[2])<<48 | int64(raw[3])<<40 | int64(raw[4])<<32 |
+		int64(raw[5])<<24 | int64(raw[6])<<16 | int64(raw[7])<<8 | int64(raw[8])
+	return codexTurnStateTokenInfo{
+		Version:   raw[0],
+		Timestamp: ts,
+		CipherLen: cipherLen,
+	}, nil
+}
+
+func decodeCodexTurnStateFernet(value string) ([]byte, error) {
+	value = strings.TrimSpace(value)
+	if decoded, err := base64.URLEncoding.DecodeString(value); err == nil {
+		return decoded, nil
+	}
+	if decoded, err := base64.RawURLEncoding.DecodeString(value); err == nil {
+		return decoded, nil
+	}
+	if decoded, err := base64.StdEncoding.DecodeString(value); err == nil {
+		return decoded, nil
+	}
+	return base64.RawStdEncoding.DecodeString(value)
+}
+
+// CodexTurnStatePingPayload 构造发 hi 的 ping 请求体，用返回的 Fernet 密文长度判断是否降智。
+func CodexTurnStatePingPayload(model string) []byte {
+	return codexTurnStatePingPayload(model, auth.DefaultTestContent)
 }
 
 func codexTurnStatePingPayload(model, content string) []byte {

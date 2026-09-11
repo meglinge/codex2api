@@ -2,7 +2,10 @@ package proxy
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -96,6 +99,64 @@ func TestEnsureCodexTurnStateReadyWaitsForPingWhenEmpty(t *testing.T) {
 	if pings.Load() != 1 {
 		t.Fatalf("pings = %d, want 1 shared refresh", pings.Load())
 	}
+}
+
+func TestEnsureCodexTurnStateReadyRotatesCountriesOnPingFailure(t *testing.T) {
+	previous := currentCodexTurnStateCache()
+	t.Cleanup(func() { globalCodexTurnStateCache.Store(previous) })
+
+	account := &auth.Account{DBID: 21}
+	var proxies []string
+	SetCodexTurnStateCache(newCodexTurnStateCache(nil, nil, database.CodexTurnStateCacheConfig{
+		IPv6ProxyURL: "socks5://user-region-{XX}:pass@198.44.167.163:3000",
+		Models:       []string{"gpt-5.6-sol"},
+		TTLMinutes:   43,
+		Countries:    []string{"JP", "SG"},
+		MaxPingTries: 2,
+	}, func(_ context.Context, _ *auth.Account, _, proxyURL string) (string, error) {
+		proxies = append(proxies, proxyURL)
+		if len(proxies) == 1 {
+			return "", fmt.Errorf("智力校验未通过")
+		}
+		return "ok-blob", nil
+	}))
+	if _, err := ensureCodexTurnStateReady(context.Background(), account, []byte(`{"model":"gpt-5.6-sol"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(proxies) != 2 || !strings.Contains(proxies[0], "-region-JP:") || !strings.Contains(proxies[1], "-region-SG:") {
+		t.Fatalf("proxies = %#v", proxies)
+	}
+	if got := account.GetCodexTurnState("gpt-5.6-sol"); got != "ok-blob" {
+		t.Fatalf("stored = %q", got)
+	}
+}
+
+func TestVerifyCodexTurnStatePingIntelligenceByFernetLength(t *testing.T) {
+	if err := verifyCodexTurnStatePingIntelligence(""); err == nil {
+		t.Fatal("empty token must fail")
+	}
+	if err := verifyCodexTurnStatePingIntelligence(fakeCodexTurnStateFernet(176)); err == nil {
+		t.Fatal("176-byte ciphertext must be treated as downgraded")
+	}
+	if err := verifyCodexTurnStatePingIntelligence(fakeCodexTurnStateFernet(160)); err != nil {
+		t.Fatalf("160-byte ciphertext must pass: %v", err)
+	}
+	if err := verifyCodexTurnStatePingIntelligence(fakeCodexTurnStateFernet(144)); err == nil {
+		t.Fatal("unexpected ciphertext length must fail")
+	}
+}
+
+func TestCodexTurnStatePingPayloadUsesHi(t *testing.T) {
+	payload := CodexTurnStatePingPayload("gpt-5.6-sol")
+	if !strings.Contains(string(payload), `"text":"hi"`) {
+		t.Fatalf("payload missing hi: %s", payload)
+	}
+}
+
+func fakeCodexTurnStateFernet(cipherLen int) string {
+	raw := make([]byte, 1+8+16+cipherLen+32)
+	raw[0] = 0x80
+	return base64.URLEncoding.EncodeToString(raw)
 }
 
 func TestEnsureCodexTurnStateReadyRefreshesExpiredTTL(t *testing.T) {

@@ -25,13 +25,15 @@ func (h *Handler) UpdateCodexTurnStateCacheSettings(c *gin.Context) {
 		IPv6ProxyURL *string   `json:"ipv6_proxy_url"`
 		Models       *[]string `json:"models"`
 		TTLMinutes   *int      `json:"ttl_minutes"`
+		Countries    *[]string `json:"countries"`
+		MaxPingTries *int      `json:"max_ping_tries"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error())
 		return
 	}
-	if req.IPv6ProxyURL == nil && req.Models == nil && req.TTLMinutes == nil {
-		writeError(c, http.StatusBadRequest, "缺少 ipv6_proxy_url、models 或 ttl_minutes")
+	if req.IPv6ProxyURL == nil && req.Models == nil && req.TTLMinutes == nil && req.Countries == nil && req.MaxPingTries == nil {
+		writeError(c, http.StatusBadRequest, "缺少 ipv6_proxy_url、models、ttl_minutes、countries 或 max_ping_tries")
 		return
 	}
 	if h.db == nil {
@@ -52,13 +54,19 @@ func (h *Handler) UpdateCodexTurnStateCacheSettings(c *gin.Context) {
 	if req.TTLMinutes != nil {
 		cfg.TTLMinutes = *req.TTLMinutes
 	}
+	if req.Countries != nil {
+		cfg.Countries = *req.Countries
+	}
+	if req.MaxPingTries != nil {
+		cfg.MaxPingTries = *req.MaxPingTries
+	}
 	normalized := cfg.Normalized()
 	if err := h.db.SaveCodexTurnStateCacheConfig(c.Request.Context(), normalized); err != nil {
 		writeError(c, http.StatusInternalServerError, "保存失败: "+err.Error())
 		return
 	}
 	proxy.ApplyCodexTurnStateCacheConfig(normalized)
-	log.Printf("设置已更新: codex_turn_state_cache models=%d ttl=%d", len(normalized.Models), normalized.TTLMinutes)
+	log.Printf("设置已更新: codex_turn_state_cache models=%d ttl=%d countries=%d tries=%d", len(normalized.Models), normalized.TTLMinutes, len(normalized.Countries), normalized.MaxPingTries)
 	c.JSON(http.StatusOK, h.buildCodexTurnStateCacheSettingsResponse(normalized))
 }
 

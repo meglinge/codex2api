@@ -110,7 +110,7 @@ export default function TestConnectionModal({
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [headersOpen, setHeadersOpen] = useState(false);
   const [rawOpen, setRawOpen] = useState(false);
-  const [proxyUrl, setProxyUrl] = useState(account.proxy_url ?? "");
+  const [proxyUrl, setProxyUrl] = useState("");
   const [proxyPool, setProxyPool] = useState<ProxyRow[]>([]);
   const [turnStates, setTurnStates] = useState<Record<string, string>>(
     () => ({ ...(account.codex_turn_states ?? {}) }),
@@ -187,9 +187,8 @@ export default function TestConnectionModal({
   );
 
   useEffect(() => {
-    setProxyUrl(account.proxy_url ?? "");
     setTurnStates({ ...(account.codex_turn_states ?? {}) });
-  }, [account.id, account.proxy_url, account.codex_turn_states]);
+  }, [account.id, account.codex_turn_states]);
 
   useEffect(() => {
     if (!isCodexAccount) return;
@@ -635,6 +634,7 @@ export default function TestConnectionModal({
   })();
   const identityRows: Array<{ label: string; value?: string; hint?: string }> = [
     { label: "X-Codex-Turn-State", value: extractCodexTurnState(diagnostics) || undefined },
+    { label: t("accounts.testDiagProxy"), value: diagnostics ? (diagnostics.proxy_url?.trim() || t("accounts.testDiagProxyDirect")) : undefined },
     { label: t("accounts.testDiagResponseModel"), value: diagnostics?.response_model },
     { label: t("accounts.testDiagTransport"), value: diagnostics?.transport },
     { label: t("accounts.testDiagPlan"), value: diagnostics?.plan_type },
@@ -749,6 +749,7 @@ export default function TestConnectionModal({
               proxies={proxyPool}
               label={t("accounts.testProxyOverride")}
               labelClassName="text-[11px] font-semibold"
+              placeholder={t("accounts.testProxyOverridePlaceholder")}
               disabled={running}
             />
             <p className="text-[11px] leading-relaxed text-muted-foreground">

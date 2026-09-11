@@ -24,6 +24,7 @@ export interface CodexTestDiagnostics {
   model: string;
   response_model?: string;
   transport?: string;
+  proxy_url?: string;
   request_id?: string;
   response_id?: string;
   cf_ray?: string;

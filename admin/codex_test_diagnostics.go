@@ -58,10 +58,13 @@ type codexTestDiagnostics struct {
 	Model          string `json:"model"`
 	ResponseModel  string `json:"response_model,omitempty"`
 	Transport      string `json:"transport,omitempty"`
-	RequestID      string `json:"request_id,omitempty"`
-	ResponseID     string `json:"response_id,omitempty"`
-	CFRay          string `json:"cf_ray,omitempty"`
-	PlanType       string `json:"plan_type,omitempty"`
+	// ProxyURL 是这次测连真正用的出口代理（弹窗覆盖或账号绑定）。空表示直连。
+	// 用户名密码会脱敏，避免诊断详情把代理凭据带进浏览器。
+	ProxyURL   string `json:"proxy_url,omitempty"`
+	RequestID  string `json:"request_id,omitempty"`
+	ResponseID string `json:"response_id,omitempty"`
+	CFRay      string `json:"cf_ray,omitempty"`
+	PlanType   string `json:"plan_type,omitempty"`
 	// 安全缓冲:上游可能为额外审查而扣住输出;enabled 只说明该模型开着这项能力,
 	// faster_model 是官方 CLI "Retry with a faster model" 的切换目标,buffered
 	// 才表示本轮真的被缓冲过(事件级 safety_buffering=true)。
@@ -168,6 +171,22 @@ type codexTestRecorder struct {
 	secrets []string
 	capture codexTestCapture
 	account *auth.Account
+}
+
+func (r *codexTestRecorder) withProxyURL(proxyURL string) *codexTestRecorder {
+	if r == nil || r.details == nil {
+		return r
+	}
+	r.details.ProxyURL = redactCodexTestProxyURL(proxyURL)
+	return r
+}
+
+func redactCodexTestProxyURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	return sanitizeCodexTestText(raw, nil)
 }
 
 func newCodexTestRecorder(resp *http.Response, model string, account *auth.Account, start time.Time) *codexTestRecorder {

@@ -745,11 +745,16 @@ const SETTINGS_CARD_GRID_2 = 'grid gap-4 lg:grid-cols-2 lg:items-stretch'
 // Codex 语义),按渠道保存默认探测模型与测活内容;留空模型 = 按账号目录自动选。
 const CLAUDE_TEST_MODEL_CHOICES = ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5', 'claude-opus-4-5', 'claude-sonnet-4-5']
 
+function parseCountryCodes(raw: string): string[] {
+  return raw.split(/[\s,]+/).map((item) => item.trim().toUpperCase()).filter(Boolean)
+}
+
 function CodexTurnStateCacheCard() {
   const { t } = useTranslation()
   const { showToast } = useToast()
   const [settings, setSettings] = useState<CodexTurnStateCacheSettings | null>(null)
   const [proxyDraft, setProxyDraft] = useState('')
+  const [countriesDraft, setCountriesDraft] = useState('')
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
@@ -758,6 +763,7 @@ function CodexTurnStateCacheCard() {
       if (!active) return
       setSettings(response)
       setProxyDraft(response.ipv6_proxy_url)
+      setCountriesDraft((response.countries ?? []).join(','))
     }).catch((error) => {
       if (!active) return
       showToast(getErrorMessage(error), 'error')
@@ -767,12 +773,13 @@ function CodexTurnStateCacheCard() {
     }
   }, [showToast])
 
-  const save = useCallback(async (patch: Partial<Pick<CodexTurnStateCacheSettings, 'ipv6_proxy_url' | 'models' | 'ttl_minutes'>>) => {
+  const save = useCallback(async (patch: Partial<Pick<CodexTurnStateCacheSettings, 'ipv6_proxy_url' | 'models' | 'ttl_minutes' | 'countries' | 'max_ping_tries'>>) => {
     setSaving(true)
     try {
       const response = await api.updateCodexTurnStateCacheSettings(patch)
       setSettings(response)
       setProxyDraft(response.ipv6_proxy_url)
+      setCountriesDraft((response.countries ?? []).join(','))
       showToast(t('settings.codexTurnStateCache.saved'), 'success')
     } catch (error) {
       showToast(getErrorMessage(error), 'error')
@@ -810,7 +817,7 @@ function CodexTurnStateCacheCard() {
           <SettingField label={t('settings.codexTurnStateCache.proxy')} description={t('settings.codexTurnStateCache.proxyDesc')}>
             <Input
               value={proxyDraft}
-              placeholder="socks5://[::1]:1080"
+              placeholder="socks5://user-region-{XX}:pass@host:3000"
               disabled={settings === null || saving}
               onChange={(e) => setProxyDraft(e.target.value)}
               onBlur={() => {
@@ -831,6 +838,33 @@ function CodexTurnStateCacheCard() {
               disabled={settings === null || saving}
               onValueChange={(value) => {
                 if (value !== (settings?.ttl_minutes ?? 43)) void save({ ttl_minutes: value })
+              }}
+            />
+          </SettingField>
+          <SettingField label={t('settings.codexTurnStateCache.countries')} description={t('settings.codexTurnStateCache.countriesDesc')}>
+            <Input
+              value={countriesDraft}
+              placeholder="JP,SG"
+              disabled={settings === null || saving}
+              onChange={(e) => setCountriesDraft(e.target.value)}
+              onBlur={() => {
+                const next = parseCountryCodes(countriesDraft)
+                const current = (settings?.countries ?? []).join(',')
+                if (next.join(',') !== current) void save({ countries: next })
+              }}
+            />
+          </SettingField>
+          <SettingField
+            label={t('settings.codexTurnStateCache.maxTries')}
+            description={t('settings.codexTurnStateCache.maxTriesDesc')}
+          >
+            <DraftNumberInput
+              min={1}
+              max={32}
+              value={settings?.max_ping_tries ?? 8}
+              disabled={settings === null || saving}
+              onValueChange={(value) => {
+                if (value !== (settings?.max_ping_tries ?? 8)) void save({ max_ping_tries: value })
               }}
             />
           </SettingField>

@@ -196,7 +196,7 @@ func (h *Handler) TestConnection(c *gin.Context) {
 			event.Diagnostics = newClaudeTestRecorder(nil, testModel, claudeFingerprintMode, account.GetAccessToken(), start).finish()
 			event.Error = sanitizeClaudeTestText(event.Error, account.GetAccessToken())
 		} else {
-			failed := newCodexTestRecorder(nil, testModel, account, start)
+			failed := newCodexTestRecorder(nil, testModel, account, start).withProxyURL(proxyURL)
 			event.CodexDiagnostics = failed.finish()
 			event.Error = sanitizeCodexTestText(event.Error, failed.secrets)
 		}
@@ -212,7 +212,7 @@ func (h *Handler) TestConnection(c *gin.Context) {
 	// Codex/Responses 测连诊断:拿到响应头即先推一帧(状态码、用量窗口头),流结束后
 	// 再补最终帧(耗时、终态、usage、正文预览)。最终帧在终止事件之后,客户端要读到
 	// SSE 关闭再刷新账号快照。
-	recorder := newCodexTestRecorder(resp, testModel, account, start)
+	recorder := newCodexTestRecorder(resp, testModel, account, start).withProxyURL(proxyURL)
 	defer func() { sendTestEvent(c, testEvent{Type: "diagnostics", CodexDiagnostics: recorder.finish()}) }()
 	sendTestEvent(c, testEvent{Type: "diagnostics", CodexDiagnostics: recorder.details})
 
@@ -880,21 +880,26 @@ func formatUpstreamEventDetail(message string, data []byte) string {
 }
 
 // connectionTestProxyURL 解析本次测连要用的出口代理。query 里带了 proxy_url
-// 就覆盖账号绑定/组代理/全局代理，方便在新 IP 上 ping 拿 turn-state；留空则沿用
-// ResolveProxyForAccount。本次测连不写回账号绑定。
+// 就覆盖一切（只影响这次测连，不写回账号绑定）。Codex 账号留空时优先用设置里
+// 刷新 X-Codex-Turn-State 的 IPv6 轮转代理；再没有才回落到账号绑定/组/全局代理。
 func (h *Handler) connectionTestProxyURL(c *gin.Context, account *auth.Account) (string, error) {
 	raw := strings.TrimSpace(c.Query("proxy_url"))
-	if raw == "" {
-		if h == nil || h.store == nil {
-			return "", nil
+	if raw != "" {
+		raw = security.SanitizeInput(raw)
+		if err := security.ValidateProxyURL(raw); err != nil {
+			return "", fmt.Errorf("无效的代理地址")
 		}
-		return h.store.ResolveProxyForAccount(account), nil
+		return raw, nil
 	}
-	raw = security.SanitizeInput(raw)
-	if err := security.ValidateProxyURL(raw); err != nil {
-		return "", fmt.Errorf("无效的代理地址")
+	if account != nil && !account.IsRelayStyle() {
+		if ipv6 := strings.TrimSpace(h.codexTurnStateCacheConfig(c.Request.Context()).IPv6ProxyURL); ipv6 != "" {
+			return ipv6, nil
+		}
 	}
-	return raw, nil
+	if h == nil || h.store == nil {
+		return "", nil
+	}
+	return h.store.ResolveProxyForAccount(account), nil
 }
 
 // connectionTestTurnStateHeaders 把测连 query 里的 turn_state 转成上游请求头。
