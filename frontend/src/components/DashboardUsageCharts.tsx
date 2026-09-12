@@ -16,6 +16,7 @@ import {
   YAxis,
 } from 'recharts'
 import { Card, CardContent } from '@/components/ui/card'
+import { cn } from '@/lib/utils'
 import StateShell from './StateShell'
 import type { ChartAggregation } from '../types'
 import { getBucketConfig, type TimeRangeKey } from '../lib/timeRange'
@@ -46,6 +47,33 @@ interface ModelRankingPoint {
   shortModel: string
   requests: number
 }
+
+interface CacheHitSeries {
+  key: string
+  model: string
+  shortModel: string
+  color: string
+}
+
+interface CacheHitPoint {
+  label: string
+  fullLabel: string
+  allModels: number | null
+  [key: string]: string | number | null
+}
+
+const modelLineColors = [
+  'hsl(199 89% 48%)',
+  'hsl(142 71% 45%)',
+  'hsl(36 90% 55%)',
+  'hsl(262 83% 58%)',
+  'hsl(330 81% 60%)',
+  'hsl(173 80% 40%)',
+  'hsl(24 95% 53%)',
+  'hsl(221 83% 53%)',
+  'hsl(84 81% 44%)',
+  'hsl(0 72% 51%)',
+]
 
 const chartMargin = { top: 8, right: 12, left: 8, bottom: 0 }
 const gridColor = 'var(--color-border)'
@@ -80,7 +108,15 @@ export default function DashboardUsageCharts({
 
   // 将服务端聚合数据映射为图表渲染格式（极轻量，无聚合计算）
   const displayData = useMemo(() => {
-    if (!serverData) return { timelineData: [] as TimelinePoint[], modelData: [] as ModelRankingPoint[], sampleCount: 0 }
+    if (!serverData) {
+      return {
+        timelineData: [] as TimelinePoint[],
+        modelData: [] as ModelRankingPoint[],
+        cacheHitData: [] as CacheHitPoint[],
+        cacheHitSeries: [] as CacheHitSeries[],
+        sampleCount: 0,
+      }
+    }
 
     const totalRequests = serverData.timeline.reduce((sum, p) => sum + p.requests, 0)
 
@@ -100,17 +136,40 @@ export default function DashboardUsageCharts({
       }
     })
 
-    const modelData: ModelRankingPoint[] = serverData.models
-      .slice()
-      .sort((a, b) => b.requests - a.requests)
-      .slice(0, 5)
-      .map((m) => ({
-        model: m.model,
-        shortModel: truncateLabel(m.model, 22),
-        requests: m.requests,
-      }))
+    const rankedModels = serverData.models.slice().sort((a, b) => b.requests - a.requests)
+    const modelData: ModelRankingPoint[] = rankedModels.slice(0, 5).map((m) => ({
+      model: m.model,
+      shortModel: truncateLabel(m.model, 22),
+      requests: m.requests,
+    }))
 
-    return { timelineData, modelData, sampleCount: totalRequests }
+    const cacheHitSeries: CacheHitSeries[] = rankedModels.map((m, index) => ({
+      key: `model_${index}`,
+      model: m.model,
+      shortModel: truncateLabel(m.model, 18),
+      color: modelLineColors[index % modelLineColors.length],
+    }))
+    const hitsByBucketModel = new Map<string, { requests: number; cacheHitRequests: number }>()
+    for (const point of serverData.model_timeline ?? []) {
+      hitsByBucketModel.set(`${point.bucket}|${point.model}`, {
+        requests: point.requests,
+        cacheHitRequests: point.cache_hit_requests,
+      })
+    }
+    const cacheHitData: CacheHitPoint[] = serverData.timeline.map((point, index) => {
+      const row: CacheHitPoint = {
+        label: timelineData[index].label,
+        fullLabel: timelineData[index].fullLabel,
+        allModels: toCacheHitRate(point.cache_hit_requests, point.requests),
+      }
+      for (const series of cacheHitSeries) {
+        const modelPoint = hitsByBucketModel.get(`${point.bucket}|${series.model}`)
+        row[series.key] = modelPoint ? toCacheHitRate(modelPoint.cacheHitRequests, modelPoint.requests) : null
+      }
+      return row
+    })
+
+    return { timelineData, modelData, cacheHitData, cacheHitSeries, sampleCount: totalRequests }
   }, [serverData, useFullDate, bucketMinutes])
 
   return (
@@ -134,8 +193,8 @@ export default function DashboardUsageCharts({
 
       {loading ? (
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-          {[0, 1, 2, 3].map((i) => (
-            <Card key={i} className="py-0">
+          {[0, 1, 2, 3, 4].map((i) => (
+            <Card key={i} className={cn('py-0', i === 4 && 'xl:col-span-2')}>
               <CardContent className="p-6">
                 <div className="mb-5 space-y-2">
                   <div className="h-4 w-32 rounded-md bg-muted animate-pulse" />
@@ -292,15 +351,58 @@ export default function DashboardUsageCharts({
               </BarChart>
             </ResponsiveContainer>
           </ChartCard>
+
+          <ChartCard title={t('dashboard.cacheHitTrend')} description={t('dashboard.cacheHitTrendDesc')} className="xl:col-span-2">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={displayData.cacheHitData} margin={chartMargin}>
+                <CartesianGrid vertical={false} stroke={gridColor} strokeDasharray="4 4" />
+                <XAxis dataKey="label" tick={{ fill: axisColor, fontSize: 12 }} axisLine={{ stroke: gridColor }} tickLine={{ stroke: gridColor }} minTickGap={20} tickMargin={8} />
+                <YAxis domain={[0, 100]} tickFormatter={formatPercentTick} tick={{ fill: axisColor, fontSize: 12 }} axisLine={{ stroke: gridColor }} tickLine={{ stroke: gridColor }} width={50} />
+                <Tooltip
+                  position={{ y: 10 }}
+                  formatter={(value, name) => [formatPercent(value), name]}
+                  labelFormatter={(_, payload) => getTooltipLabel(payload, 'fullLabel')}
+                  contentStyle={tooltipContentStyle}
+                  labelStyle={tooltipLabelStyle}
+                  itemStyle={tooltipItemStyle}
+                />
+                <Legend wrapperStyle={{ paddingTop: 4, fontSize: 12 }} />
+                <Line
+                  type="monotone"
+                  dataKey="allModels"
+                  name={t('dashboard.seriesAllModelsCacheHit')}
+                  stroke="var(--color-primary)"
+                  strokeWidth={2.8}
+                  dot={false}
+                  connectNulls
+                  activeDot={{ r: 4 }}
+                />
+                {displayData.cacheHitSeries.map((series) => (
+                  <Line
+                    key={series.key}
+                    type="monotone"
+                    dataKey={series.key}
+                    name={series.shortModel}
+                    stroke={series.color}
+                    strokeWidth={1.8}
+                    strokeDasharray="5 4"
+                    dot={false}
+                    connectNulls
+                    activeDot={{ r: 3 }}
+                  />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          </ChartCard>
         </div>
       )}
     </div>
   )
 }
 
-function ChartCard({ title, description, children }: { title: string; description: string; children: ReactNode }) {
+function ChartCard({ title, description, className, children }: { title: string; description: string; className?: string; children: ReactNode }) {
   return (
-    <Card className="py-0 border-border/70 bg-card shadow-2xs transition-all duration-200 hover:border-border">
+    <Card className={cn('py-0 border-border/70 bg-card shadow-2xs transition-all duration-200 hover:border-border', className)}>
       <CardContent className="p-3.5 sm:p-5">
         <div className="mb-3 sm:mb-4">
           <h4 className="text-sm font-bold tracking-tight text-foreground">{title}</h4>
@@ -380,6 +482,25 @@ function formatDurationTick(value: number | string): string {
   const numericValue = typeof value === 'number' ? value : Number(value)
   if (!Number.isFinite(numericValue)) return '0ms'
   return formatDuration(numericValue)
+}
+
+function toCacheHitRate(hits: number | undefined, requests: number): number | null {
+  if (!Number.isFinite(requests) || requests <= 0) return null
+  const hitCount = Number(hits ?? 0)
+  if (!Number.isFinite(hitCount) || hitCount < 0) return 0
+  return Math.round((hitCount / requests) * 1000) / 10
+}
+
+function formatPercent(value: unknown): string {
+  const numericValue = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(numericValue)) return '-'
+  return `${numericValue.toFixed(numericValue >= 10 ? 1 : 2)}%`
+}
+
+function formatPercentTick(value: number | string): string {
+  const numericValue = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(numericValue)) return '0%'
+  return `${Math.round(numericValue)}%`
 }
 
 function getTooltipLabel(payload: readonly { payload?: Record<string, unknown> }[] | undefined, key: string): string {

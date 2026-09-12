@@ -982,6 +982,7 @@ func (db *DB) getChartAggregationSQLite(ctx context.Context, start, end time.Tim
 			COUNT(*), COALESCE(AVG(duration_ms), 0),
 			COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
 			COALESCE(SUM(reasoning_tokens), 0), COALESCE(SUM(cached_tokens), 0),
+			COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN status_code >= 400 AND status_code < 500 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN status_code >= 500 AND status_code < 600 THEN 1 ELSE 0 END), 0)
 		FROM usage_logs
@@ -1005,7 +1006,7 @@ func (db *DB) getChartAggregationSQLite(ctx context.Context, start, end time.Tim
 	for rows.Next() {
 		var point ChartTimelinePoint
 		if err := rows.Scan(&point.Bucket, &point.Requests, &point.AvgLatency, &point.InputTokens,
-			&point.OutputTokens, &point.ReasoningTokens, &point.CachedTokens, &point.Errors4xx, &point.Errors5xx); err != nil {
+			&point.OutputTokens, &point.ReasoningTokens, &point.CachedTokens, &point.CacheHitRequests, &point.Errors4xx, &point.Errors5xx); err != nil {
 			return nil, err
 		}
 		point.Bucket = strings.Replace(point.Bucket, " ", "T", 1) + "Z"
@@ -1040,11 +1041,45 @@ func (db *DB) getChartAggregationSQLite(ctx context.Context, start, end time.Tim
 		}
 		result.Models = append(result.Models, point)
 	}
-	if result.Models == nil {
-		result.Models = []ChartModelPoint{}
+	if err := modelRows.Err(); err != nil {
+		return nil, err
 	}
 
-	return result, modelRows.Err()
+	modelTimelineQuery := `
+		SELECT
+			datetime((CAST(strftime('%s', created_at) AS INTEGER) / ($3 * 60)) * ($3 * 60), 'unixepoch') AS bucket,
+			COALESCE(NULLIF(effective_model, ''), NULLIF(model, ''), 'unknown'),
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END), 0)
+		FROM usage_logs
+		WHERE created_at >= $1 AND created_at < $2
+		  AND status_code <> 499
+		  AND TRIM(COALESCE(internal_reason, '')) = ''
+	`
+	modelTimelineArgs := []interface{}{startArg, endArg, bucketMinutes}
+	if channel != "" {
+		modelTimelineQuery += " AND channel = $4"
+		modelTimelineArgs = append(modelTimelineArgs, channel)
+	}
+	modelTimelineQuery += " GROUP BY 1, 2 ORDER BY 1, 3 DESC, 2"
+	modelTimelineRows, err := db.conn.QueryContext(ctx, modelTimelineQuery, modelTimelineArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer modelTimelineRows.Close()
+	for modelTimelineRows.Next() {
+		var point ChartModelTimelinePoint
+		if err := modelTimelineRows.Scan(&point.Bucket, &point.Model, &point.Requests, &point.CacheHitRequests); err != nil {
+			return nil, err
+		}
+		point.Bucket = strings.Replace(point.Bucket, " ", "T", 1) + "Z"
+		result.ModelTimeline = append(result.ModelTimeline, point)
+	}
+	if err := modelTimelineRows.Err(); err != nil {
+		return nil, err
+	}
+	finalizeChartAggregation(result)
+	return result, nil
 }
 
 // getAccountEventTrendSQLite SQLite 版账号事件趋势聚合（内存分桶）

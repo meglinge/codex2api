@@ -3452,6 +3452,7 @@ export interface ChartTimelinePoint {
   output_tokens: number
   reasoning_tokens: number
   cached_tokens: number
+  cache_hit_requests: number
   errors_4xx: number
   errors_5xx: number
 }
@@ -3461,9 +3462,17 @@ export interface ChartModelPoint {
   requests: number
 }
 
+export interface ChartModelTimelinePoint {
+  bucket: string
+  model: string
+  requests: number
+  cache_hit_requests: number
+}
+
 export interface ChartAggregation {
   timeline: ChartTimelinePoint[]
   models: ChartModelPoint[]
+  model_timeline?: ChartModelTimelinePoint[]
 }
 
 export interface ModelPricingOverride {

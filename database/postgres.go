@@ -297,23 +297,23 @@ func NormalizeUsageLogFlushIntervalSeconds(n int) int {
 
 // usageLogEntry 日志缓冲条目
 type usageLogEntry struct {
-	RequestID                string
-	UpstreamRequestID        string
-	UpstreamProxyID          int64
-	UpstreamProxyName        string
-	StoreUsageLog            bool
-	AccountID                int64
-	CredentialGeneration     int64
-	Channel                  string
-	ClientIP                 string
-	ClientUserAgent          string
-	UpstreamUserAgent        string
-	UserAgentOverridden      bool
-	OutboundCodexTurnState   string
-	InboundCodexTurnState    string
-	InternalReason           string
-	ParentRequestID          string
-	Endpoint                 string
+	RequestID              string
+	UpstreamRequestID      string
+	UpstreamProxyID        int64
+	UpstreamProxyName      string
+	StoreUsageLog          bool
+	AccountID              int64
+	CredentialGeneration   int64
+	Channel                string
+	ClientIP               string
+	ClientUserAgent        string
+	UpstreamUserAgent      string
+	UserAgentOverridden    bool
+	OutboundCodexTurnState string
+	InboundCodexTurnState  string
+	InternalReason         string
+	ParentRequestID        string
+	Endpoint               string
 	Model                  string
 	EffectiveModel         string
 	PromptTokens           int
@@ -4128,12 +4128,12 @@ type UsageLog struct {
 	CredentialGeneration   int64     `json:"credential_generation,omitempty"`
 	Channel                string    `json:"channel,omitempty"`
 	ClientIP               string    `json:"client_ip"`
-	ClientUserAgent          string    `json:"client_user_agent"`
-	UpstreamUserAgent        string    `json:"upstream_user_agent"`
-	UserAgentOverridden      bool      `json:"user_agent_overridden"`
-	OutboundCodexTurnState   string    `json:"outbound_codex_turn_state"`
-	InboundCodexTurnState    string    `json:"inbound_codex_turn_state"`
-	InternalReason           string    `json:"internal_reason"`
+	ClientUserAgent        string    `json:"client_user_agent"`
+	UpstreamUserAgent      string    `json:"upstream_user_agent"`
+	UserAgentOverridden    bool      `json:"user_agent_overridden"`
+	OutboundCodexTurnState string    `json:"outbound_codex_turn_state"`
+	InboundCodexTurnState  string    `json:"inbound_codex_turn_state"`
+	InternalReason         string    `json:"internal_reason"`
 	ParentRequestID        string    `json:"parent_request_id"`
 	Endpoint               string    `json:"endpoint"`
 	Model                  string    `json:"model"`
@@ -4290,12 +4290,12 @@ func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 		CredentialGeneration:   log.CredentialGeneration,
 		Channel:                clampUsageLogText(log.Channel, usageLogChannelMaxLen),
 		ClientIP:               clampUsageLogText(log.ClientIP, usageLogShortTextMaxLen),
-		ClientUserAgent:          log.ClientUserAgent,
-		UpstreamUserAgent:        log.UpstreamUserAgent,
-		UserAgentOverridden:      log.UserAgentOverridden,
-		OutboundCodexTurnState:   log.OutboundCodexTurnState,
-		InboundCodexTurnState:    log.InboundCodexTurnState,
-		InternalReason:           clampUsageLogText(log.InternalReason, usageLogShortTextMaxLen),
+		ClientUserAgent:        log.ClientUserAgent,
+		UpstreamUserAgent:      log.UpstreamUserAgent,
+		UserAgentOverridden:    log.UserAgentOverridden,
+		OutboundCodexTurnState: log.OutboundCodexTurnState,
+		InboundCodexTurnState:  log.InboundCodexTurnState,
+		InternalReason:         clampUsageLogText(log.InternalReason, usageLogShortTextMaxLen),
 		ParentRequestID:        clampUsageLogText(log.ParentRequestID, usageLogRequestIDMaxLen),
 		Endpoint:               clampUsageLogText(log.Endpoint, usageLogTextMaxLen),
 		Model:                  clampUsageLogText(log.Model, usageLogTextMaxLen),
@@ -4366,19 +4366,19 @@ type UsageLogInput struct {
 	// credential snapshot that issued it. Zero is legacy/unscoped traffic.
 	CredentialGeneration int64
 	// Channel 是处理该请求的上游渠道（codex/grok），写入时固化，空值表示未知。
-	Channel                  string
-	ClientIP                 string
-	ClientUserAgent          string
-	UpstreamUserAgent        string
-	UserAgentOverridden      bool
-	OutboundCodexTurnState   string
-	InboundCodexTurnState    string
-	InternalReason           string
-	ParentRequestID          string
-	Endpoint                 string
-	Model                    string
-	EffectiveModel           string
-	PromptTokens             int
+	Channel                string
+	ClientIP               string
+	ClientUserAgent        string
+	UpstreamUserAgent      string
+	UserAgentOverridden    bool
+	OutboundCodexTurnState string
+	InboundCodexTurnState  string
+	InternalReason         string
+	ParentRequestID        string
+	Endpoint               string
+	Model                  string
+	EffectiveModel         string
+	PromptTokens           int
 	CompletionTokens       int
 	TotalTokens            int
 	StatusCode             int
@@ -5432,15 +5432,16 @@ func (db *DB) ListRecentUsageLogs(ctx context.Context, limit int) ([]*UsageLog, 
 
 // ChartTimelinePoint 时间轴聚合点
 type ChartTimelinePoint struct {
-	Bucket          string  `json:"bucket"`
-	Requests        int64   `json:"requests"`
-	AvgLatency      float64 `json:"avg_latency"`
-	InputTokens     int64   `json:"input_tokens"`
-	OutputTokens    int64   `json:"output_tokens"`
-	ReasoningTokens int64   `json:"reasoning_tokens"`
-	CachedTokens    int64   `json:"cached_tokens"`
-	Errors4xx       int64   `json:"errors_4xx"`
-	Errors5xx       int64   `json:"errors_5xx"`
+	Bucket           string  `json:"bucket"`
+	Requests         int64   `json:"requests"`
+	AvgLatency       float64 `json:"avg_latency"`
+	InputTokens      int64   `json:"input_tokens"`
+	OutputTokens     int64   `json:"output_tokens"`
+	ReasoningTokens  int64   `json:"reasoning_tokens"`
+	CachedTokens     int64   `json:"cached_tokens"`
+	CacheHitRequests int64   `json:"cache_hit_requests"`
+	Errors4xx        int64   `json:"errors_4xx"`
+	Errors5xx        int64   `json:"errors_5xx"`
 }
 
 // ChartModelPoint 模型排行聚合点
@@ -5449,10 +5450,19 @@ type ChartModelPoint struct {
 	Requests int64  `json:"requests"`
 }
 
+// ChartModelTimelinePoint 单个模型在时间桶内的缓存命中统计
+type ChartModelTimelinePoint struct {
+	Bucket           string `json:"bucket"`
+	Model            string `json:"model"`
+	Requests         int64  `json:"requests"`
+	CacheHitRequests int64  `json:"cache_hit_requests"`
+}
+
 // ChartAggregation 仪表盘图表聚合结果
 type ChartAggregation struct {
-	Timeline []ChartTimelinePoint `json:"timeline"`
-	Models   []ChartModelPoint    `json:"models"`
+	Timeline      []ChartTimelinePoint      `json:"timeline"`
+	Models        []ChartModelPoint         `json:"models"`
+	ModelTimeline []ChartModelTimelinePoint `json:"model_timeline"`
 }
 
 // AccountEventPoint 账号事件趋势数据点
@@ -5547,9 +5557,10 @@ func (db *DB) GetChartAggregation(ctx context.Context, start, end time.Time, buc
 	}
 	result := &ChartAggregation{}
 
-	// One GROUPING SETS query produces both the timeline and model ranking. The
-	// epoch-based bucket works for every interval, including 6h and 24h; the old
-	// minute-of-hour modulo accidentally returned hourly points for those ranges.
+	// One GROUPING SETS query produces the overall timeline, model ranking, and
+	// per-model cache-hit timeline. The epoch-based bucket works for every
+	// interval, including 6h and 24h; the old minute-of-hour modulo accidentally
+	// returned hourly points for those ranges.
 	timelineQuery := `
 	WITH filtered AS (
 		SELECT
@@ -5562,22 +5573,28 @@ func (db *DB) GetChartAggregation(ctx context.Context, start, end time.Time, buc
 		  AND TRIM(COALESCE(internal_reason, '')) = ''` + channelClause + `
 	)
 	SELECT
-		CASE WHEN GROUPING(bucket) = 0 THEN 'timeline' ELSE 'model' END AS row_kind,
+		CASE
+			WHEN GROUPING(bucket) = 0 AND GROUPING(model_name) = 0 THEN 'model_timeline'
+			WHEN GROUPING(bucket) = 0 THEN 'timeline'
+			ELSE 'model'
+		END AS row_kind,
 		CASE WHEN GROUPING(bucket) = 0
 			THEN TO_CHAR(bucket AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
-			ELSE model_name
-		END AS row_key,
+			ELSE ''
+		END AS bucket_key,
+		CASE WHEN GROUPING(model_name) = 0 THEN model_name ELSE '' END AS model_key,
 		COUNT(*) AS requests,
 		COALESCE(AVG(duration_ms), 0) AS avg_latency,
 		COALESCE(SUM(input_tokens), 0) AS input_tokens,
 		COALESCE(SUM(output_tokens), 0) AS output_tokens,
 		COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
 		COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
+		COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END), 0) AS cache_hit_requests,
 		COALESCE(SUM(CASE WHEN status_code >= 400 AND status_code < 500 THEN 1 ELSE 0 END), 0) AS errors_4xx,
 		COALESCE(SUM(CASE WHEN status_code >= 500 AND status_code < 600 THEN 1 ELSE 0 END), 0) AS errors_5xx
 	FROM filtered
-	GROUP BY GROUPING SETS ((bucket), (model_name))
-	ORDER BY GROUPING(bucket), bucket, requests DESC, row_key`
+	GROUP BY GROUPING SETS ((bucket), (model_name), (bucket, model_name))
+	ORDER BY GROUPING(bucket), GROUPING(model_name), bucket, requests DESC, model_name`
 
 	timelineArgs := []interface{}{start, end, bucketMinutes}
 	if channel != "" {
@@ -5590,38 +5607,59 @@ func (db *DB) GetChartAggregation(ctx context.Context, start, end time.Time, buc
 	defer rows.Close()
 
 	for rows.Next() {
-		var rowKind, rowKey string
+		var rowKind, bucketKey, modelKey string
 		var requests int64
 		var avgLatency float64
-		var inputTokens, outputTokens, reasoningTokens, cachedTokens, errors4xx, errors5xx int64
-		if err := rows.Scan(&rowKind, &rowKey, &requests, &avgLatency, &inputTokens, &outputTokens, &reasoningTokens, &cachedTokens, &errors4xx, &errors5xx); err != nil {
+		var inputTokens, outputTokens, reasoningTokens, cachedTokens, cacheHitRequests, errors4xx, errors5xx int64
+		if err := rows.Scan(&rowKind, &bucketKey, &modelKey, &requests, &avgLatency, &inputTokens, &outputTokens, &reasoningTokens, &cachedTokens, &cacheHitRequests, &errors4xx, &errors5xx); err != nil {
 			return nil, err
 		}
-		if rowKind == "model" {
-			result.Models = append(result.Models, ChartModelPoint{Model: rowKey, Requests: requests})
-			continue
+		switch rowKind {
+		case "model":
+			result.Models = append(result.Models, ChartModelPoint{Model: modelKey, Requests: requests})
+		case "model_timeline":
+			result.ModelTimeline = append(result.ModelTimeline, ChartModelTimelinePoint{
+				Bucket: bucketKey, Model: modelKey, Requests: requests, CacheHitRequests: cacheHitRequests,
+			})
+		default:
+			result.Timeline = append(result.Timeline, ChartTimelinePoint{
+				Bucket: bucketKey, Requests: requests, AvgLatency: avgLatency,
+				InputTokens: inputTokens, OutputTokens: outputTokens, ReasoningTokens: reasoningTokens,
+				CachedTokens: cachedTokens, CacheHitRequests: cacheHitRequests, Errors4xx: errors4xx, Errors5xx: errors5xx,
+			})
 		}
-		result.Timeline = append(result.Timeline, ChartTimelinePoint{
-			Bucket: rowKey, Requests: requests, AvgLatency: avgLatency,
-			InputTokens: inputTokens, OutputTokens: outputTokens, ReasoningTokens: reasoningTokens,
-			CachedTokens: cachedTokens, Errors4xx: errors4xx, Errors5xx: errors5xx,
-		})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	finalizeChartAggregation(result)
+	return result, nil
+}
+
+func finalizeChartAggregation(result *ChartAggregation) {
 	if result.Timeline == nil {
 		result.Timeline = []ChartTimelinePoint{}
 	}
-
 	if len(result.Models) > 10 {
 		result.Models = result.Models[:10]
 	}
 	if result.Models == nil {
 		result.Models = []ChartModelPoint{}
 	}
-
-	return result, nil
+	allowed := make(map[string]struct{}, len(result.Models))
+	for _, model := range result.Models {
+		allowed[model.Model] = struct{}{}
+	}
+	filtered := result.ModelTimeline[:0]
+	for _, point := range result.ModelTimeline {
+		if _, ok := allowed[point.Model]; ok {
+			filtered = append(filtered, point)
+		}
+	}
+	result.ModelTimeline = filtered
+	if result.ModelTimeline == nil {
+		result.ModelTimeline = []ChartModelTimelinePoint{}
+	}
 }
 
 // GetAccountUsageStats 查询单个账号的用量统计和模型分布。days<=0 表示全量。

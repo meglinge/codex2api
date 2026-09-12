@@ -56,6 +56,70 @@ func TestChartAggregationUsesEpochBucketsForDailyRange(t *testing.T) {
 	}
 }
 
+func TestChartAggregationIncludesCacheHitRatesByModel(t *testing.T) {
+	db, err := New("sqlite", filepath.Join(t.TempDir(), "chart-cache-hit.db"))
+	if err != nil {
+		t.Fatalf("New(sqlite): %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	start := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	fixtures := []struct {
+		at     time.Time
+		model  string
+		cached int
+	}{
+		{start.Add(time.Minute), "gpt-5.4", 80},
+		{start.Add(2 * time.Minute), "gpt-5.4", 0},
+		{start.Add(3 * time.Minute), "gpt-5.3", 40},
+		{start.Add(8 * time.Minute), "gpt-5.4", 0},
+		{start.Add(9 * time.Minute), "low-volume", 10},
+	}
+	for _, fixture := range fixtures {
+		if _, err := db.conn.ExecContext(ctx, `
+			INSERT INTO usage_logs (endpoint, model, effective_model, status_code, duration_ms, input_tokens, cached_tokens, created_at)
+			VALUES ('/v1/responses', $1, $1, 200, 100, 100, $2, $3)
+		`, fixture.model, fixture.cached, sqliteTimeParam(fixture.at)); err != nil {
+			t.Fatalf("insert usage log: %v", err)
+		}
+	}
+
+	result, err := db.GetChartAggregation(ctx, start, start.Add(time.Hour), 5, "")
+	if err != nil {
+		t.Fatalf("GetChartAggregation: %v", err)
+	}
+	if len(result.Timeline) != 2 {
+		t.Fatalf("timeline = %+v, want 2 buckets", result.Timeline)
+	}
+	if result.Timeline[0].Requests != 3 || result.Timeline[0].CacheHitRequests != 2 {
+		t.Fatalf("first bucket = %+v, want 3 requests / 2 cache hits", result.Timeline[0])
+	}
+	if result.Timeline[1].Requests != 2 || result.Timeline[1].CacheHitRequests != 1 {
+		t.Fatalf("second bucket = %+v, want 2 requests / 1 cache hit", result.Timeline[1])
+	}
+	if len(result.Models) != 3 || result.Models[0].Model != "gpt-5.4" || result.Models[0].Requests != 3 {
+		t.Fatalf("models = %+v, want gpt-5.4 first with 3 requests", result.Models)
+	}
+
+	hitsByModelBucket := map[string]int64{}
+	for _, point := range result.ModelTimeline {
+		hitsByModelBucket[point.Bucket+"|"+point.Model] = point.CacheHitRequests
+		if point.Model == "gpt-5.4" && point.Requests == 2 && point.CacheHitRequests != 1 {
+			t.Fatalf("gpt-5.4 first bucket = %+v, want 2 requests / 1 hit", point)
+		}
+	}
+	if len(result.ModelTimeline) != 4 {
+		t.Fatalf("model_timeline = %+v, want 4 points for 3 models across 2 buckets", result.ModelTimeline)
+	}
+	if hitsByModelBucket[result.Timeline[0].Bucket+"|gpt-5.3"] != 1 {
+		t.Fatalf("gpt-5.3 first-bucket hits = %d, want 1", hitsByModelBucket[result.Timeline[0].Bucket+"|gpt-5.3"])
+	}
+	if hitsByModelBucket[result.Timeline[1].Bucket+"|low-volume"] != 1 {
+		t.Fatalf("low-volume second-bucket hits = %d, want 1", hitsByModelBucket[result.Timeline[1].Bucket+"|low-volume"])
+	}
+}
+
 func TestSQLitePromptFilterColumnDefaultsRemainUpgradeCompatible(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 	db, err := New("sqlite", dbPath)
