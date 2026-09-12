@@ -3920,7 +3920,7 @@
     "schedulerEngineIndexedDesc": "使用事件驱动的优先级与健康状态索引，稳态只检查少量候选账号，避免全池扫描。推荐大号池使用。",
     "codexTurnStateCache": {
       "title": "X-Codex-Turn-State 自动缓存",
-      "desc": "勾选的模型才会走缓存。值为空或超过 TTL 时，用全局 IPv6 轮转代理发 hi ping；返回的 X-Codex-Turn-State 按 Fernet 密文长度判断：160 没降智才保存，176 视为降智并换国家重试。命中该账号该模型的用户请求先等 ping 完成再发出。",
+      "desc": "勾选的模型才会走缓存。值为空或超过 TTL 时，用全局 IPv6 轮转代理发 hi ping；返回的 X-Codex-Turn-State 按 Fernet 密文长度判断：个人号 160 没降智，team/k12/self_serve_business 是 192，其它长度视为降智并换国家重试。命中该账号该模型的用户请求先等 ping 完成再发出。",
       "proxy": "IPv6 轮转代理",
       "proxyDesc": "每次 ping 走这个代理换新 IP。可写 socks5://user-region-{XX}:pass@host:port，{XX} 会替换成下面的国家代码。留空则用账号自身出口。",
       "ttl": "缓存有效期",
@@ -3928,9 +3928,9 @@
       "countries": "国家代码",
       "countriesDesc": "逗号分隔，例如 JP,SG。ping 失败时按这个顺序替换代理 URL 里的 {XX}。",
       "maxTries": "Ping 最大重试",
-      "maxTriesDesc": "Fernet 密文不是 160（含 176 降智）或上游没返回 turn-state 时，换国家重试的最大次数。",
+      "maxTriesDesc": "Fernet 密文不符合该套餐的健康长度（个人 160，team/k12/self_serve_business 192）或上游没返回 turn-state 时，换国家重试的最大次数。",
       "models": "参与缓存的模型",
-      "modelsDesc": "只对勾选的模型启用自动 ping 与回放。空列表等于关闭。Ping 发 hi，Fernet 密文 160 才保存。",
+      "modelsDesc": "只对勾选的模型启用自动 ping 与回放。空列表等于关闭。Ping 发 hi，个人号 Fernet 密文 160、team/k12/self_serve_business 192 才保存。",
       "noModels": "暂时没有可选模型，先同步 Codex 模型列表。",
       "saved": "X-Codex-Turn-State 缓存设置已保存"
     },

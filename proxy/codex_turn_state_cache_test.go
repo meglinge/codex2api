@@ -132,17 +132,44 @@ func TestEnsureCodexTurnStateReadyRotatesCountriesOnPingFailure(t *testing.T) {
 }
 
 func TestVerifyCodexTurnStatePingIntelligenceByFernetLength(t *testing.T) {
-	if err := verifyCodexTurnStatePingIntelligence(""); err == nil {
+	if err := verifyCodexTurnStatePingIntelligence("", ""); err == nil {
 		t.Fatal("empty token must fail")
 	}
-	if err := verifyCodexTurnStatePingIntelligence(fakeCodexTurnStateFernet(176)); err == nil {
+	if err := verifyCodexTurnStatePingIntelligence(fakeCodexTurnStateFernet(176), "plus"); err == nil {
 		t.Fatal("176-byte ciphertext must be treated as downgraded")
 	}
-	if err := verifyCodexTurnStatePingIntelligence(fakeCodexTurnStateFernet(160)); err != nil {
+	if err := verifyCodexTurnStatePingIntelligence(fakeCodexTurnStateFernet(160), "plus"); err != nil {
 		t.Fatalf("160-byte ciphertext must pass: %v", err)
 	}
-	if err := verifyCodexTurnStatePingIntelligence(fakeCodexTurnStateFernet(144)); err == nil {
+	if err := verifyCodexTurnStatePingIntelligence(fakeCodexTurnStateFernet(192), "plus"); err == nil {
+		t.Fatal("192-byte ciphertext must fail for non-team plans")
+	}
+	if err := verifyCodexTurnStatePingIntelligence(fakeCodexTurnStateFernet(144), ""); err == nil {
 		t.Fatal("unexpected ciphertext length must fail")
+	}
+}
+
+func TestVerifyCodexTurnStatePingIntelligenceTeamUses192(t *testing.T) {
+	if err := verifyCodexTurnStatePingIntelligence(fakeCodexTurnStateFernet(192), "team"); err != nil {
+		t.Fatalf("192-byte ciphertext must pass for team: %v", err)
+	}
+	if err := verifyCodexTurnStatePingIntelligence(fakeCodexTurnStateFernet(192), "k12"); err != nil {
+		t.Fatalf("192-byte ciphertext must pass for k12: %v", err)
+	}
+	if err := verifyCodexTurnStatePingIntelligence(fakeCodexTurnStateFernet(160), "team"); err == nil {
+		t.Fatal("160-byte ciphertext must fail for team")
+	}
+	if err := verifyCodexTurnStatePingIntelligence(fakeCodexTurnStateFernet(176), "teamplus"); err == nil {
+		t.Fatal("176-byte ciphertext must fail for team")
+	}
+	if err := verifyCodexTurnStatePingIntelligence(fakeCodexTurnStateFernet(192), "self_serve_business_prolite"); err != nil {
+		t.Fatalf("192-byte ciphertext must pass for self_serve_business_prolite: %v", err)
+	}
+	if err := verifyCodexTurnStatePingIntelligence(fakeCodexTurnStateFernet(160), "self_serve_business_prolite"); err == nil {
+		t.Fatal("160-byte ciphertext must fail for self_serve_business_prolite")
+	}
+	if err := verifyCodexTurnStatePingIntelligence(fakeCodexTurnStateFernet(192), "prolite"); err == nil {
+		t.Fatal("personal prolite must keep the 160-byte rule")
 	}
 }
 

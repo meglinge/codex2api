@@ -20,12 +20,12 @@ import (
 )
 
 const (
-	codexTurnStatePingTimeout         = 45 * time.Second
-	codexTurnStatePingBodyLimit       = 4096
-	codexTurnStateCacheWaiterKey      = "|"
-	codexTurnStateFernetVersion       = 0x80
-	codexTurnStateHealthyCipherLen    = 160
-	codexTurnStateDowngradedCipherLen = 176
+	codexTurnStatePingTimeout          = 45 * time.Second
+	codexTurnStatePingBodyLimit        = 4096
+	codexTurnStateCacheWaiterKey       = "|"
+	codexTurnStateFernetVersion        = 0x80
+	codexTurnStateHealthyCipherLen     = 160
+	codexTurnStateTeamHealthyCipherLen = 192
 )
 
 type codexTurnStateCache struct {
@@ -304,7 +304,11 @@ func defaultCodexTurnStatePing(ctx context.Context, account *auth.Account, model
 		return "", fmt.Errorf("上游返回 %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	value := collectCodexTurnStatePing(resp)
-	if err := verifyCodexTurnStatePingIntelligence(value); err != nil {
+	planType := ""
+	if account != nil {
+		planType = account.GetPlanType()
+	}
+	if err := verifyCodexTurnStatePingIntelligence(value, planType); err != nil {
 		return "", err
 	}
 	return value, nil
@@ -328,18 +332,34 @@ func collectCodexTurnStatePing(resp *http.Response) string {
 	return strings.TrimSpace(value)
 }
 
-func verifyCodexTurnStatePingIntelligence(value string) error {
+func verifyCodexTurnStatePingIntelligence(value, planType string) error {
 	info, err := inspectCodexTurnStateToken(value)
 	if err != nil {
 		return err
 	}
-	if info.CipherLen == codexTurnStateDowngradedCipherLen {
-		return fmt.Errorf("智力校验未通过: Fernet 密文 %d 字节（降智）", info.CipherLen)
-	}
-	if info.CipherLen != codexTurnStateHealthyCipherLen {
-		return fmt.Errorf("智力校验未通过: Fernet 密文 %d 字节，期望 %d", info.CipherLen, codexTurnStateHealthyCipherLen)
+	want := codexTurnStateHealthyCipherLenForPlan(planType)
+	if info.CipherLen != want {
+		return fmt.Errorf("智力校验未通过: Fernet 密文 %d 字节（降智），期望 %d", info.CipherLen, want)
 	}
 	return nil
+}
+
+func codexTurnStateHealthyCipherLenForPlan(planType string) int {
+	if isCodexTeamTurnStatePlan(planType) {
+		return codexTurnStateTeamHealthyCipherLen
+	}
+	return codexTurnStateHealthyCipherLen
+}
+
+func isCodexTeamTurnStatePlan(planType string) bool {
+	normalized := auth.NormalizePlanType(planType)
+	switch normalized {
+	case "team", "teamplus", "k12", "edu", "education":
+		return true
+	default:
+		return strings.HasPrefix(normalized, "team") ||
+			strings.HasPrefix(normalized, "self_serve_business")
+	}
 }
 
 type codexTurnStateTokenInfo struct {
@@ -391,6 +411,7 @@ func decodeCodexTurnStateFernet(value string) ([]byte, error) {
 }
 
 // CodexTurnStatePingPayload 构造发 hi 的 ping 请求体，用返回的 Fernet 密文长度判断是否降智。
+// 个人号健康密文 160；team/k12 以及 self_serve_business_* 工作区健康密文 192，其它长度视为降智。
 func CodexTurnStatePingPayload(model string) []byte {
 	return codexTurnStatePingPayload(model, auth.DefaultTestContent)
 }

@@ -3920,7 +3920,7 @@
     "schedulerEngineIndexedDesc": "Uses event-driven priority and health indexes and usually checks only a few candidates instead of the full pool. Recommended for large account pools.",
     "codexTurnStateCache": {
       "title": "X-Codex-Turn-State auto cache",
-      "desc": "Only selected models use the cache. An empty or expired value is refreshed with a hi ping through the global IPv6 rotating proxy. The returned X-Codex-Turn-State is a Fernet token: ciphertext 160 is healthy and saved, 176 is treated as a downgrade and the country code is rotated. User traffic waits until a fresh blob exists.",
+      "desc": "Only selected models use the cache. An empty or expired value is refreshed with a hi ping through the global IPv6 rotating proxy. The returned X-Codex-Turn-State is a Fernet token: ciphertext 160 is healthy for personal plans, 192 for team/k12/self_serve_business; any other length is a downgrade and the country code is rotated. User traffic waits until a fresh blob exists.",
       "proxy": "IPv6 rotating proxy",
       "proxyDesc": "Each ping uses this proxy to get a fresh IP. You can write socks5://user-region-{XX}:pass@host:port; {XX} is replaced by the country codes below. Leave empty to use the account's own egress.",
       "ttl": "Cache TTL",
@@ -3928,9 +3928,9 @@
       "countries": "Country codes",
       "countriesDesc": "Comma-separated, e.g. JP,SG. Failed pings replace {XX} in the proxy URL in this order.",
       "maxTries": "Max ping retries",
-      "maxTriesDesc": "Maximum country rotations after a Fernet ciphertext that is not 160 bytes (including 176 = downgrade) or a missing turn-state.",
+      "maxTriesDesc": "Maximum country rotations after a Fernet ciphertext that does not match the plan's healthy length (160 personal, 192 team/k12/self_serve_business) or a missing turn-state.",
       "models": "Cached models",
-      "modelsDesc": "Auto ping and replay only apply to checked models. An empty list disables the cache. Ping sends hi and only saves when the Fernet ciphertext is 160 bytes.",
+      "modelsDesc": "Auto ping and replay only apply to checked models. An empty list disables the cache. Ping sends hi and only saves a healthy Fernet ciphertext: 160 bytes for personal plans, 192 for team/k12/self_serve_business.",
       "noModels": "No models yet. Sync the Codex model catalog first.",
       "saved": "X-Codex-Turn-State cache settings saved"
     },
