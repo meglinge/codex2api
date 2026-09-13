@@ -14,6 +14,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
+
+	"github.com/codex2api/internal/imageproc"
 )
 
 // sizedPNGBase64 生成指定尺寸的纯色 PNG,模拟上游返回的基础分辨率图。
@@ -52,23 +54,23 @@ func imagesCompletedSSE(resultB64, size string) string {
 func TestImageUpscalePlanForRequest(t *testing.T) {
 	body := []byte(`{"tools":[{"type":"image_generation","model":"gpt-image-2","size":"2048x2048"}]}`)
 
-	plan := imageUpscalePlanForRequest("gpt-image-2-2k", body)
+	plan := imageUpscalePlanForRequest("gpt-image-2-2k", "gpt-image-2-2k", body, "")
 	if plan.Scale != "2k" || plan.RequestedSize != "2048x2048" {
 		t.Fatalf("2k plan = %#v", plan)
 	}
-	plan = imageUpscalePlanForRequest("GPT-Image-2-4K", body)
+	plan = imageUpscalePlanForRequest("GPT-Image-2-4K", "GPT-Image-2-4K", body, "")
 	if plan.Scale != "4k" {
 		t.Fatalf("4k plan = %#v", plan)
 	}
-	if plan = imageUpscalePlanForRequest("gpt-image-2", body); plan.enabled() {
+	if plan = imageUpscalePlanForRequest("gpt-image-2", "gpt-image-2", body, ""); plan.enabled() {
 		t.Fatalf("plain model should not enable upscale, got %#v", plan)
 	}
-	if plan = imageUpscalePlanForRequest("gpt-image-1.5", body); plan.enabled() {
+	if plan = imageUpscalePlanForRequest("gpt-image-1.5", "gpt-image-1.5", body, ""); plan.enabled() {
 		t.Fatalf("other model should not enable upscale, got %#v", plan)
 	}
 
 	autoBody := []byte(`{"tools":[{"type":"image_generation","model":"gpt-image-2","size":"auto"}]}`)
-	if plan = imageUpscalePlanForRequest("gpt-image-2-2k", autoBody); plan.RequestedSize != "" {
+	if plan = imageUpscalePlanForRequest("gpt-image-2-2k", "gpt-image-2-2k", autoBody, ""); plan.RequestedSize != "" {
 		t.Fatalf("auto size should clear RequestedSize, got %#v", plan)
 	}
 }
@@ -204,5 +206,113 @@ func TestStreamImagesResponseUpscalesCompletedEvent(t *testing.T) {
 	width, height := decodePNGSize(t, gjson.Get(payload, "b64_json").String())
 	if width != 2048 || height != 2048 {
 		t.Fatalf("streamed physical size = %dx%d, want 2048x2048", width, height)
+	}
+}
+
+// 公共 Images API 常传 1920x1080 这类显示尺寸。GPT Image 2 只接受 16 的倍数，
+// 网关必须向上取整后再发上游，并把用户要的精确画布留给后处理，而不是直接 400。
+func TestPreparePublicImagesRequestRoundsUpstreamSizeAndKeepsExactCanvas(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"image_generation","model":"gpt-image-2","size":"1920x1080"}]}`)
+	prepared, plan, err := preparePublicImagesRequest("gpt-image-2", "gpt-image-2", body, "1920x1080")
+	if err != nil {
+		t.Fatalf("preparePublicImagesRequest() error = %v", err)
+	}
+	if got := gjson.GetBytes(prepared, "tools.0.size").String(); got != "1920x1088" {
+		t.Fatalf("upstream size = %q, want 1920x1088 (1080 向上取整到 16 的倍数)", got)
+	}
+	if plan.RequestedSize != "1920x1080" {
+		t.Fatalf("plan.RequestedSize = %q, want 1920x1080", plan.RequestedSize)
+	}
+	if plan.Scale != "" {
+		t.Fatalf("plan.Scale = %q, want empty (无 -2k/-4k 别名)", plan.Scale)
+	}
+	if !plan.enabled() {
+		t.Fatal("plan.enabled() = false, 精确画布必须触发后处理缩放")
+	}
+}
+
+// 已经是 16 倍数的尺寸不该被改写；auto / 空值保持原样且不生成计划。
+func TestPreparePublicImagesRequestLeavesAlignedAndAutoSizes(t *testing.T) {
+	aligned := []byte(`{"tools":[{"type":"image_generation","model":"gpt-image-2","size":"1024x1024"}]}`)
+	prepared, plan, err := preparePublicImagesRequest("gpt-image-2", "gpt-image-2", aligned, "1024x1024")
+	if err != nil {
+		t.Fatalf("aligned error = %v", err)
+	}
+	if got := gjson.GetBytes(prepared, "tools.0.size").String(); got != "1024x1024" {
+		t.Fatalf("aligned upstream size = %q, want 1024x1024", got)
+	}
+	if plan.RequestedSize != "1024x1024" {
+		t.Fatalf("aligned plan.RequestedSize = %q, want 1024x1024", plan.RequestedSize)
+	}
+
+	autoBody := []byte(`{"tools":[{"type":"image_generation","model":"gpt-image-2","size":"auto"}]}`)
+	prepared, plan, err = preparePublicImagesRequest("gpt-image-2", "gpt-image-2", autoBody, "auto")
+	if err != nil {
+		t.Fatalf("auto error = %v", err)
+	}
+	if got := gjson.GetBytes(prepared, "tools.0.size").String(); got != "auto" {
+		t.Fatalf("auto upstream size = %q, want auto", got)
+	}
+	if plan.enabled() {
+		t.Fatalf("auto 不该生成后处理计划, got %#v", plan)
+	}
+}
+
+// 超出比例/像素预算的尺寸仍要被拒；单边超限不能因为乘法溢出而漏网。
+func TestPreparePublicImagesRequestRejectsOutOfBudgetSizes(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"image_generation","model":"gpt-image-2","size":"1024x1024"}]}`)
+	for _, size := range []string{"4000x100", "99999999999999x16"} {
+		if _, _, err := preparePublicImagesRequest("gpt-image-2", "gpt-image-2", body, size); err == nil {
+			t.Fatalf("size %q 应被拒绝", size)
+		}
+	}
+}
+
+// 用户写的 -2k/-4k 别名优先于映射；映射到别名上的自定义模型继承该档位。
+func TestImageUpscalePlanForRequestResolvesTierFromEitherModel(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"image_generation","model":"gpt-image-2","size":"2048x2048"}]}`)
+	if plan := imageUpscalePlanForRequest("gpt-image-2", "gpt-image-2-4k", body, ""); plan.Scale != imageproc.Upscale4K {
+		t.Fatalf("用户显式别名未生效: %#v", plan)
+	}
+	if plan := imageUpscalePlanForRequest("gpt-image-2-2k", "my-image", body, ""); plan.Scale != imageproc.Upscale2K {
+		t.Fatalf("映射到别名的自定义模型未继承档位: %#v", plan)
+	}
+}
+
+// 显式画布要变成构图硬要求，避免托管工具把宽幅请求画成两侧留白的竖版海报。
+func TestAppendNativeImageCanvasInstruction(t *testing.T) {
+	got := appendNativeImageCanvasInstruction("a cat", "1920x1080")
+	for _, want := range []string{"a cat", "horizontal composition", "1920x1080", "vertical poster"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("宽幅指令缺少 %q: %q", want, got)
+		}
+	}
+	if got := appendNativeImageCanvasInstruction("a cat", "1024x2048"); !strings.Contains(got, "tall vertical") {
+		t.Fatalf("高窄画布应给竖版指令: %q", got)
+	}
+	// 没有显式尺寸 / 尺寸非法时不得改写 prompt。
+	for _, size := range []string{"", "auto", "not-a-size"} {
+		if got := appendNativeImageCanvasInstruction("a cat", size); got != "a cat" {
+			t.Fatalf("size %q 不该改写 prompt, got %q", size, got)
+		}
+	}
+}
+
+// tool_choice 点名 image_gen namespace 与扁平 image_generation 等价，都是明确的生图意图；
+// 仅在 tools[] 里被无差别注入的声明仍不算意图（issue #304）。
+func TestImageGenerationToolChoiceRecognizesNamespace(t *testing.T) {
+	forced := [][]byte{
+		[]byte(`{"model":"gpt-5.5","tool_choice":{"type":"namespace","name":"image_gen"}}`),
+		[]byte(`{"model":"gpt-5.5","tool_choice":"image_gen"}`),
+		[]byte(`{"model":"gpt-5.5","tool_choice":{"type":"image_generation"}}`),
+	}
+	for _, body := range forced {
+		if !rawResponsesBodyShouldForceHTTPForImageGeneration(body) {
+			t.Fatalf("tool_choice 点名生图应强制 HTTP: %s", body)
+		}
+	}
+	injected := []byte(`{"model":"gpt-5.5","input":"hello","tools":[{"type":"namespace","name":"image_gen"}]}`)
+	if rawResponsesBodyShouldForceHTTPForImageGeneration(injected) {
+		t.Fatalf("仅声明 namespace 而无 tool_choice/自然语言意图时不得强制 HTTP: %s", injected)
 	}
 }

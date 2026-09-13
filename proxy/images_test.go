@@ -873,7 +873,7 @@ func TestForwardImagesSelectiveRetryBuffersWholeExplicitErrorAttempt(t *testing.
 	defer cancel()
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil).WithContext(requestCtx)
 	responsesBody := []byte(`{"model":"gpt-5.4","input":"draw a test image","tools":[{"type":"image_generation","model":"gpt-image-2"}],"stream":true}`)
-	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", true)
+	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", true, "")
 
 	body := recorder.Body.String()
 	if got := calls.Load(); got != 2 {
@@ -932,7 +932,7 @@ func TestForwardImagesTextFallbackFailsOverWithoutCoolingAccount(t *testing.T) {
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
 	responsesBody := []byte(`{"model":"gpt-5.4","input":"draw","tools":[{"type":"image_generation","model":"gpt-image-2"}],"stream":true}`)
-	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", false)
+	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", false, "")
 
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("upstream calls = %d, want 2; status=%d body=%s", got, recorder.Code, recorder.Body.String())
@@ -1001,7 +1001,7 @@ func TestForwardImagesExplicitToolMissingCoolsModel(t *testing.T) {
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
 	responsesBody := []byte(`{"model":"gpt-5.4","input":"draw","tools":[{"type":"image_generation","model":"gpt-image-2"}],"stream":true}`)
-	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", false)
+	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", false, "")
 
 	if account.ModelCooldownRemaining("gpt-image-2") <= 0 {
 		t.Fatal("explicit image_generation tool-missing error should cool the account/model pair")
@@ -1050,7 +1050,7 @@ func TestForwardImagesEmptyTerminalRetriesSameAccountOnce(t *testing.T) {
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
 	responsesBody := []byte(`{"model":"gpt-5.4","input":"draw","tools":[{"type":"image_generation","model":"gpt-image-2"}]}`)
-	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", false)
+	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", false, "")
 
 	if calls.Load() != 2 || recorder.Code != http.StatusOK {
 		t.Fatalf("same-account retry failed: calls=%d status=%d body=%s", calls.Load(), recorder.Code, recorder.Body.String())
@@ -1106,7 +1106,7 @@ func TestForwardImagesInitialKeepaliveCommitsSSEFailure(t *testing.T) {
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
 	responsesBody := []byte(`{"model":"gpt-5.4","input":"draw a test image","tools":[{"type":"image_generation","model":"gpt-image-2"}],"stream":true}`)
-	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", true)
+	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", true, "")
 
 	body := recorder.Body.String()
 	if recorder.Code != http.StatusOK || !strings.Contains(body, downstreamSSEKeepaliveComment) || !strings.Contains(body, `"type":"response.failed"`) || !strings.Contains(body, "stop now") {
@@ -1209,7 +1209,7 @@ func TestForwardImagesCatchAllRetriesBeyondOrdinaryAttemptCap(t *testing.T) {
 	defer cancel()
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil).WithContext(requestCtx)
 	responsesBody := []byte(`{"model":"gpt-5.4","input":"draw a test image","tools":[{"type":"image_generation","model":"gpt-image-2"}],"stream":true}`)
-	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", false)
+	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", false, "")
 
 	if got := calls.Load(); got != maxImageAttempts+1 {
 		t.Fatalf("upstream calls = %d, want %d failures followed by success", got, maxImageAttempts+1)
@@ -1260,7 +1260,7 @@ func TestForwardImagesCatchAllDiscardsPartialImageFromFailedAttempt(t *testing.T
 	defer cancel()
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil).WithContext(requestCtx)
 	responsesBody := []byte(`{"model":"gpt-5.4","input":"draw a test image","tools":[{"type":"image_generation","model":"gpt-image-2"}],"stream":true}`)
-	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", true)
+	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", true, "")
 
 	body := recorder.Body.String()
 	if got := calls.Load(); got != 2 {
@@ -1311,7 +1311,7 @@ func TestForwardImagesResponseFailedCyberPolicyEntersUnifiedAuditAndCandidateQue
 	}
 	handler.capturePromptRuleLearningEvidence(c, "/v1/images/generations", "gpt-image-2", evaluation)
 	responsesBody := []byte(`{"model":"gpt-5.4","input":"draw a harmless landscape","tools":[{"type":"image_generation","model":"gpt-image-2","size":"1024x1024"}],"stream":true}`)
-	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", false)
+	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", false, "")
 	waitPromptFilterAuditIdle(t, db)
 	incidents, incidentTotal, err := db.ListPromptPolicyIncidentsPage(context.Background(), database.PromptPolicyIncidentQuery{Page: 1, PageSize: 20})
 	if err != nil || incidentTotal != 1 || len(incidents) != 1 || incidents[0].Endpoint != "/v1/images/generations" || incidents[0].Transport != "http" {
@@ -1518,7 +1518,7 @@ func TestImageUpscalePlanForRequestHonorsSuffixOnAnyImageModel(t *testing.T) {
 		{model: "gpt-image-2", scale: ""},
 	}
 	for _, test := range tests {
-		plan := imageUpscalePlanForRequest(test.model, body)
+		plan := imageUpscalePlanForRequest(test.model, test.model, body, "")
 		if plan.Scale != test.scale {
 			t.Fatalf("imageUpscalePlanForRequest(%q).Scale = %q, want %q", test.model, plan.Scale, test.scale)
 		}

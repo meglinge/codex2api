@@ -2,9 +2,22 @@
 
 ## Unreleased
 
+### Fixes
+
+- **`/v1/images/*` no longer rejects display sizes that are not multiples of 16.** GPT Image 2 requires 16-aligned dimensions, so a common request such as `1920x1080` used to fail with a 400. The gateway now rounds only the upstream tool size up to the next multiple of 16 (`1920x1088`) and keeps the caller's exact canvas as the post-processing target, so the returned image is exactly the requested size. Size validation also bounds each dimension before multiplying, so a parseable but hostile value can no longer overflow past the total-pixel budget. Ported from ShowSnowBlood/codex2api.
+
+- **Image responses report the size that was actually produced.** The decoded dimensions, byte size and output format of each result are written back before and after post-processing, and the response-level metadata follows them, instead of echoing the size from the request.
+
+- **Explicit image canvases are enforced as a composition requirement.** ChatGPT's hosted image tool honors the canvas but rewrites short prompts into a vertical poster, leaving empty side bands on wide requests. Native OAuth image requests with an explicit size now append an orientation requirement (fill the frame edge to edge; no black bars, transparent borders or empty margins). Grok and relay image providers are untouched. Ported from ShowSnowBlood/codex2api.
+
+- **`tool_choice` naming the `image_gen` namespace counts as image-generation intent.** Both `{"type":"namespace","name":"image_gen"}` and the bare string `"image_gen"` are now recognized alongside `image_generation`, so such a request is routed to HTTP instead of having the capability stripped on the WebSocket path. A namespace that merely appears in `tools[]` without a `tool_choice` still does not force HTTP (issue #304).
+
+- **Responses Lite constraints are applied on the relay, relay compact and compact paths.** Those executors set the Lite header but never normalized the body, so upstream rejected them with `parallel_tool_calls` / `reasoning.context` errors. Ported from ShowSnowBlood/codex2api.
+
 ### Features
 
 - **Codex accounts can store per-model `X-Codex-Turn-State` and reuse it on later requests.** The connection-test modal still pings without the header so a new IP can mint an unthrottled blob; that value is filled into the current model and persisted. Replay tests and subsequent user traffic for that account+model send the saved header (and `client_metadata.x-codex-turn-state` when the body already has metadata). A changed upstream value still means the stored blob is stale.
+
 ## v2.9.7 - 2026-09-13
 
 ### Features

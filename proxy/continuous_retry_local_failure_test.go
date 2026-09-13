@@ -822,7 +822,7 @@ func TestContinuousRetryImageReplayLimitIsLocalProtocolFailure(t *testing.T) {
 	ctx, _ := gin.CreateTestContext(recorder)
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
 	responsesBody := []byte(`{"model":"gpt-5.5","input":"draw a test image","tools":[{"type":"image_generation","model":"gpt-image-2"}],"stream":true}`)
-	handler.forwardImagesRequest(ctx, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", true)
+	handler.forwardImagesRequest(ctx, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", true, "")
 
 	body := recorder.Body.String()
 	// Images publishes its existing connected comment before model output, so a

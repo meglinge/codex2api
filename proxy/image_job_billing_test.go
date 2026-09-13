@@ -65,7 +65,7 @@ func TestImagePerImageRetryBilling(t *testing.T) {
 			defer cancel()
 			c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil).WithContext(requestCtx)
 			c.Set(contextAPIKeyID, keyID)
-			handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "", []byte(`{"model":"gpt-5.4","input":"test","tools":[{"type":"image_generation","model":"gpt-image-2"}],"stream":true}`), "b64_json", "image_generation", stream)
+			handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "", []byte(`{"model":"gpt-5.4","input":"test","tools":[{"type":"image_generation","model":"gpt-image-2"}],"stream":true}`), "b64_json", "image_generation", stream, "")
 			if calls.Load() != 2 || recorder.Code != 200 || !strings.Contains(recorder.Body.String(), tinyPNGBase64) {
 				t.Fatalf("calls=%d status=%d body=%s", calls.Load(), recorder.Code, recorder.Body.String())
 			}

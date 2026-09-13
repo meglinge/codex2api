@@ -404,6 +404,39 @@ func AppendImageStyleToPrompt(prompt string, style string) string {
 	return prompt + "\n\nStyle guidance: " + style
 }
 
+// appendNativeImageCanvasInstruction 把显式画布尺寸变成构图硬要求。ChatGPT 托管的
+// 图片工具会遵守画布,但会把简短的 prompt 改写成竖版海报,宽幅请求两侧因此留下大片
+// 空白。仅用于原生 OAuth 路径:Grok 与 relay provider 各有自己的 prompt 约定。
+func appendNativeImageCanvasInstruction(prompt, size string) string {
+	prompt = strings.TrimSpace(prompt)
+	width, height, exact, err := validateGPTImage2SizeRules(size, false)
+	if err != nil || !exact {
+		return prompt
+	}
+
+	orientation := "square"
+	forbiddenLayout := "non-square"
+	switch {
+	case width >= height*2:
+		orientation = "ultra-wide horizontal"
+		forbiddenLayout = "vertical poster"
+	case width > height:
+		orientation = "horizontal"
+		forbiddenLayout = "vertical poster"
+	case height >= width*2:
+		orientation = "tall vertical"
+		forbiddenLayout = "horizontal banner"
+	case height > width:
+		orientation = "vertical"
+		forbiddenLayout = "horizontal banner"
+	}
+
+	return fmt.Sprintf(
+		"%s\n\nCanvas requirement: Use a %s composition for the requested %dx%d canvas. Fill the entire frame edge-to-edge with meaningful image content. Do not add black bars, transparent borders, empty margins, or fall back to a %s layout.",
+		prompt, orientation, width, height, forbiddenLayout,
+	)
+}
+
 func imageUsageLogInfoFromResponseJSON(responseJSON []byte) imageUsageLogInfo {
 	var info imageUsageLogInfo
 	output := gjson.GetBytes(responseJSON, "output")
@@ -589,39 +622,105 @@ func shouldValidateGPTImage2Size(model string) bool {
 	return isGPTImage2FamilyModel(toolModel)
 }
 
-func validateGPTImage2Size(size string) error {
+// validateGPTImage2SizeRules 校验一个尺寸并返回解析结果。requireMultipleOf16 为
+// false 时跳过 16 倍数这一条：公共 Images API 常收到 1920x1080 这类显示尺寸，网关
+// 会把发往上游的尺寸向上取整，用户要的精确画布留给后处理（见 preparePublicImagesRequest）。
+// exact 为 false 表示调用方没给尺寸（空或 auto），此时 width/height 无意义。
+func validateGPTImage2SizeRules(size string, requireMultipleOf16 bool) (width, height int, exact bool, err error) {
 	raw := strings.TrimSpace(size)
 	if raw == "" || strings.EqualFold(raw, "auto") {
-		return nil
+		return 0, 0, false, nil
 	}
 
 	parts := strings.Split(strings.ToLower(raw), "x")
 	if len(parts) != 2 {
-		return fmt.Errorf("image size %q must use WIDTHxHEIGHT format or auto", raw)
+		return 0, 0, false, fmt.Errorf("image size %q must use WIDTHxHEIGHT format or auto", raw)
 	}
-	width, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	width, err = strconv.Atoi(strings.TrimSpace(parts[0]))
 	if err != nil || width <= 0 {
-		return fmt.Errorf("image size %q has invalid width", raw)
+		return 0, 0, false, fmt.Errorf("image size %q has invalid width", raw)
 	}
-	height, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	height, err = strconv.Atoi(strings.TrimSpace(parts[1]))
 	if err != nil || height <= 0 {
-		return fmt.Errorf("image size %q has invalid height", raw)
+		return 0, 0, false, fmt.Errorf("image size %q has invalid height", raw)
 	}
-	if width%16 != 0 || height%16 != 0 {
-		return fmt.Errorf("image size %q is invalid: width and height must be multiples of 16", raw)
+	if requireMultipleOf16 && (width%16 != 0 || height%16 != 0) {
+		return 0, 0, false, fmt.Errorf("image size %q is invalid: width and height must be multiples of 16", raw)
+	}
+	// 先分别限制单边再相乘：可解析但恶意的超大值会让 int64 溢出，绕过总像素预算。
+	if int64(width) > maxGPTImage2Pixels || int64(height) > maxGPTImage2Pixels {
+		return 0, 0, false, fmt.Errorf("image size %q is invalid: dimensions exceed max pixel budget %d", raw, maxGPTImage2Pixels)
 	}
 	pixels := int64(width) * int64(height)
 	if pixels > maxGPTImage2Pixels {
-		return fmt.Errorf("image size %q is invalid: total pixels %d exceeds max %d", raw, pixels, maxGPTImage2Pixels)
+		return 0, 0, false, fmt.Errorf("image size %q is invalid: total pixels %d exceeds max %d", raw, pixels, maxGPTImage2Pixels)
 	}
 	longSide, shortSide := width, height
 	if height > width {
 		longSide, shortSide = height, width
 	}
 	if int64(longSide) > int64(shortSide)*3 {
-		return fmt.Errorf("image size %q is invalid: aspect ratio must not exceed 3:1", raw)
+		return 0, 0, false, fmt.Errorf("image size %q is invalid: aspect ratio must not exceed 3:1", raw)
 	}
-	return nil
+	return width, height, true, nil
+}
+
+func validateGPTImage2Size(size string) error {
+	_, _, _, err := validateGPTImage2SizeRules(size, true)
+	return err
+}
+
+// firstImageGenerationToolIndex 返回 tools[] 里第一个 image_generation 工具的下标，
+// 没有则返回 -1。生图请求由网关自行构造，工具不一定在 0 号位。
+func firstImageGenerationToolIndex(body []byte) int {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return -1
+	}
+	for index, tool := range tools.Array() {
+		if strings.TrimSpace(tool.Get("type").String()) == "image_generation" {
+			return index
+		}
+	}
+	return -1
+}
+
+// preparePublicImagesRequest 把调用方要的精确画布与发往上游的尺寸分开：GPT Image 2
+// 要求宽高是 16 的倍数，而 /v1/images/* 常收到 1920x1080 这类显示尺寸，过去直接 400。
+// 现在上游尺寸向上取整到 16 的倍数，精确画布留在 upscale plan 里由后处理缩回。
+func preparePublicImagesRequest(requestModel, originalModel string, responsesBody []byte, explicitSize string) ([]byte, imageUpscalePlan, error) {
+	plan := imageUpscalePlanForRequest(requestModel, originalModel, responsesBody, explicitSize)
+	explicitSize = strings.TrimSpace(explicitSize)
+	if explicitSize == "" || strings.EqualFold(explicitSize, "auto") {
+		return responsesBody, plan, nil
+	}
+
+	toolIndex := firstImageGenerationToolIndex(responsesBody)
+	if toolIndex < 0 {
+		return responsesBody, plan, nil
+	}
+	toolPath := fmt.Sprintf("tools.%d", toolIndex)
+	if !shouldValidateGPTImage2Size(gjson.GetBytes(responsesBody, toolPath+".model").String()) {
+		return responsesBody, plan, nil
+	}
+
+	width, height, exact, err := validateGPTImage2SizeRules(explicitSize, false)
+	if err != nil {
+		return nil, imageUpscalePlan{}, err
+	}
+	if !exact {
+		return responsesBody, plan, nil
+	}
+	const quantum = 16
+	upstreamSize := fmt.Sprintf("%dx%d", ((width+quantum-1)/quantum)*quantum, ((height+quantum-1)/quantum)*quantum)
+	if err := validateGPTImage2Size(upstreamSize); err != nil {
+		return nil, imageUpscalePlan{}, err
+	}
+	responsesBody, err = sjson.SetBytes(responsesBody, toolPath+".size", upstreamSize)
+	if err != nil {
+		return nil, imageUpscalePlan{}, err
+	}
+	return responsesBody, plan, nil
 }
 
 func validateResponsesImageGenerationSizes(body []byte) error {
@@ -650,6 +749,26 @@ func validateResponsesImageGenerationSizes(body []byte) error {
 	return nil
 }
 
+// isImageGenerationToolChoice 判断 tool_choice 是否点名了图片能力。两种写法都算:
+// 扁平的 image_generation,以及 namespace 形式 {"type":"namespace","name":"image_gen"}
+// (字符串 "image_gen" 同理)。tool_choice 是客户端明确的选择,与 tools[] 里可能被
+// 无差别注入的声明不同(issue #304),因此它足以表达真实生图意图。
+func isImageGenerationToolChoice(choice gjson.Result) bool {
+	if !choice.Exists() {
+		return false
+	}
+	if choice.Type == gjson.String {
+		target := strings.TrimSpace(choice.String())
+		return strings.EqualFold(target, "image_generation") || strings.EqualFold(target, "image_gen")
+	}
+	targetType := strings.TrimSpace(choice.Get("type").String())
+	if strings.EqualFold(targetType, "image_generation") {
+		return true
+	}
+	return strings.EqualFold(targetType, "namespace") &&
+		strings.EqualFold(strings.TrimSpace(choice.Get("name").String()), "image_gen")
+}
+
 func responsesBodyHasImageGenerationTool(body []byte) bool {
 	tools := gjson.GetBytes(body, "tools")
 	if tools.Exists() && tools.IsArray() {
@@ -659,25 +778,14 @@ func responsesBodyHasImageGenerationTool(body []byte) bool {
 			}
 		}
 	}
-	choice := gjson.GetBytes(body, "tool_choice")
-	if !choice.Exists() {
-		return false
-	}
-	if choice.Type == gjson.String {
-		return strings.EqualFold(strings.TrimSpace(choice.String()), "image_generation")
-	}
-	return strings.EqualFold(strings.TrimSpace(choice.Get("type").String()), "image_generation")
+	return isImageGenerationToolChoice(gjson.GetBytes(body, "tool_choice"))
 }
 
 func responsesBodyRequestsImageGeneration(body []byte) bool {
 	if isImageOnlyModel(gjson.GetBytes(body, "model").String()) {
 		return true
 	}
-	choice := gjson.GetBytes(body, "tool_choice")
-	if choice.Type == gjson.String && strings.EqualFold(strings.TrimSpace(choice.String()), "image_generation") {
-		return true
-	}
-	if choice.Exists() && strings.EqualFold(strings.TrimSpace(choice.Get("type").String()), "image_generation") {
+	if isImageGenerationToolChoice(gjson.GetBytes(body, "tool_choice")) {
 		return true
 	}
 	for _, key := range responsesImageGenerationOptionFields {
@@ -1200,6 +1308,8 @@ func (h *Handler) ImagesGenerations(c *gin.Context) {
 		h.forwardGrokImagesRequest(c, "/v1/images/generations", imageModel, requestModel, logEffectiveModel, promptForRequest, responseFormat, grokImagesParamsFromJSON(rawBody), nil, stream)
 		return
 	}
+	explicitSize := strings.TrimSpace(gjson.GetBytes(rawBody, "size").String())
+	promptForRequest = appendNativeImageCanvasInstruction(promptForRequest, explicitSize)
 	tool := []byte(`{"type":"image_generation","action":"generate","model":""}`)
 	toolModel, defaultSize := normalizeImageToolModelForPrompt(imageModel, promptForRequest)
 	tool, _ = sjson.SetBytes(tool, "model", toolModel)
@@ -1216,7 +1326,7 @@ func (h *Handler) ImagesGenerations(c *gin.Context) {
 	tool = setDefaultImageToolSize(tool, defaultSize)
 
 	responsesBody := buildImagesResponsesRequest(promptForRequest, nil, tool)
-	h.forwardImagesRequest(c, "/v1/images/generations", imageModel, requestModel, logEffectiveModel, responsesBody, responseFormat, "image_generation", stream)
+	h.forwardImagesRequest(c, "/v1/images/generations", imageModel, requestModel, logEffectiveModel, responsesBody, responseFormat, "image_generation", stream, explicitSize)
 }
 
 func (h *Handler) ImagesEdits(c *gin.Context) {
@@ -1333,9 +1443,11 @@ func (h *Handler) imagesEditsFromMultipart(c *gin.Context) {
 		h.forwardGrokImagesRequest(c, "/v1/images/edits", imageModel, requestModel, logEffectiveModel, promptForRequest, responseFormat, grokImagesParamsFromForm(c), images, stream)
 		return
 	}
+	explicitSize := strings.TrimSpace(c.PostForm("size"))
+	promptForRequest = appendNativeImageCanvasInstruction(promptForRequest, explicitSize)
 	tool := buildImagesEditToolFromForm(c, imageModel, maskDataURL)
 	responsesBody := buildImagesResponsesRequest(promptForRequest, images, tool)
-	h.forwardImagesRequest(c, "/v1/images/edits", imageModel, requestModel, logEffectiveModel, responsesBody, responseFormat, "image_edit", stream)
+	h.forwardImagesRequest(c, "/v1/images/edits", imageModel, requestModel, logEffectiveModel, responsesBody, responseFormat, "image_edit", stream, explicitSize)
 }
 
 // captureSignedMultipartIngress preserves the exact wire body for NewAPI HMAC
@@ -1472,6 +1584,8 @@ func (h *Handler) imagesEditsFromJSON(c *gin.Context) {
 		h.forwardGrokImagesRequest(c, "/v1/images/edits", imageModel, requestModel, logEffectiveModel, promptForRequest, responseFormat, grokImagesParamsFromJSON(rawBody), images, stream)
 		return
 	}
+	explicitSize := strings.TrimSpace(gjson.GetBytes(rawBody, "size").String())
+	promptForRequest = appendNativeImageCanvasInstruction(promptForRequest, explicitSize)
 	tool := []byte(`{"type":"image_generation","action":"edit","model":""}`)
 	toolModel, defaultSize := normalizeImageToolModelForPrompt(imageModel, promptForRequest)
 	tool, _ = sjson.SetBytes(tool, "model", toolModel)
@@ -1491,7 +1605,7 @@ func (h *Handler) imagesEditsFromJSON(c *gin.Context) {
 	tool = setDefaultImageToolSize(tool, defaultSize)
 
 	responsesBody := buildImagesResponsesRequest(promptForRequest, images, tool)
-	h.forwardImagesRequest(c, "/v1/images/edits", imageModel, requestModel, logEffectiveModel, responsesBody, responseFormat, "image_edit", stream)
+	h.forwardImagesRequest(c, "/v1/images/edits", imageModel, requestModel, logEffectiveModel, responsesBody, responseFormat, "image_edit", stream, explicitSize)
 }
 
 func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte) []byte {
@@ -1548,9 +1662,16 @@ func (h *Handler) nextImageAccount(c *gin.Context, apiKeyID int64, exclude map[i
 }
 
 // forwardImagesRequest 执行 Images 请求的账号调度、上游重试、响应聚合和下游输出。
-func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestModel, logModel, logEffectiveModel string, responsesBody []byte, responseFormat, streamPrefix string, stream bool) {
+func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestModel, logModel, logEffectiveModel string, responsesBody []byte, responseFormat, streamPrefix string, stream bool, explicitSize string) {
 	if strings.TrimSpace(logModel) == "" {
 		logModel = requestModel
+	}
+	var upscalePlan imageUpscalePlan
+	var prepareErr error
+	responsesBody, upscalePlan, prepareErr = preparePublicImagesRequest(requestModel, logModel, responsesBody, explicitSize)
+	if prepareErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: " + prepareErr.Error(), "type": "invalid_request_error"}})
+		return
 	}
 	if err := validateResponsesImageGenerationSizes(responsesBody); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: " + err.Error(), "type": "invalid_request_error"}})
@@ -1589,7 +1710,6 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 	if persister != nil {
 		urlFor = persister.buildURL
 	}
-	upscalePlan := imageUpscalePlanForRequest(requestModel, responsesBody)
 
 	for attempt := 0; ; attempt++ {
 		if attempt >= maxImageAttempts && !continuousRetryActive {
@@ -2232,24 +2352,52 @@ type imageUpscalePlan struct {
 }
 
 func (p imageUpscalePlan) enabled() bool {
-	return p.Scale != ""
+	if p.Scale != "" {
+		return true
+	}
+	// 没有 -2k/-4k 档位时,只要调用方给了精确画布仍要后处理:上游只接受 16 倍数的
+	// 尺寸,出图后必须缩回用户真正要的那个画布(imageupscale 支持无档位的严格缩放)。
+	_, _, ok := imageupscale.ParseSize(p.RequestedSize)
+	return ok
 }
 
-// imageUpscalePlanForRequest 只对 -2k/-4k 别名生成计划;RequestedSize 取 tool
-// 里最终生效的 size(用户显式值优先,否则别名默认),它是权威目标尺寸。
-func imageUpscalePlanForRequest(requestModel string, responsesBody []byte) imageUpscalePlan {
+// imageUpscalePlanForRequest 生成出图后处理计划。requestModel 是映射后的模型、
+// originalModel 是用户请求里写的名字:用户显式写的 -2k/-4k 别名优先,映射到别名上的
+// 自定义模型继承该物理档位。没有档位时,只要调用方给了精确画布也生成计划。
+// RequestedSize 是权威目标尺寸(显式值优先,否则取 tool 里最终生效的 size)。
+func imageUpscalePlanForRequest(requestModel, originalModel string, responsesBody []byte, explicitSize string) imageUpscalePlan {
 	var scale string
-	switch _, tier := splitImageModelSizeAlias(requestModel); tier {
-	case imageModel2KSuffix:
-		scale = imageproc.Upscale2K
-	case imageModel4KSuffix:
-		scale = imageproc.Upscale4K
-	default:
-		return imageUpscalePlan{}
+	for _, model := range []string{originalModel, requestModel} {
+		switch _, tier := splitImageModelSizeAlias(model); tier {
+		case imageModel2KSuffix:
+			scale = imageproc.Upscale2K
+		case imageModel4KSuffix:
+			scale = imageproc.Upscale4K
+		}
+		if scale != "" {
+			break
+		}
 	}
-	requestedSize := strings.TrimSpace(gjson.GetBytes(responsesBody, "tools.0.size").String())
+	if scale == "" {
+		if !shouldValidateGPTImage2Size(requestModel) {
+			return imageUpscalePlan{}
+		}
+		if _, _, ok := imageupscale.ParseSize(explicitSize); !ok {
+			return imageUpscalePlan{}
+		}
+	}
+	requestedSize := strings.TrimSpace(explicitSize)
+	if requestedSize == "" {
+		// tool 里的 size 已经是「用户显式值优先,否则别名默认」的结果(见
+		// setDefaultImageToolSize),直接取它,不用再从别名推导一次。
+		if toolIndex := firstImageGenerationToolIndex(responsesBody); toolIndex >= 0 {
+			requestedSize = strings.TrimSpace(gjson.GetBytes(responsesBody, fmt.Sprintf("tools.%d.size", toolIndex)).String())
+		}
+	}
 	if strings.EqualFold(requestedSize, "auto") {
 		requestedSize = ""
+	} else if width, height, ok := imageupscale.ParseSize(requestedSize); ok {
+		requestedSize = fmt.Sprintf("%dx%d", width, height)
 	}
 	return imageUpscalePlan{Scale: scale, RequestedSize: requestedSize}
 }
@@ -2264,6 +2412,14 @@ func applyImageUpscalePlan(ctx context.Context, plan imageUpscalePlan, results [
 		data, ok := decodeImageBase64(results[i].Result)
 		if !ok {
 			continue
+		}
+		// 先记下上游实际出图的尺寸:后处理可能不发生(已是目标画布)或失败降级,
+		// 这时元数据也必须是真实分辨率,而不是请求里写的那个。
+		if width, height := imageupscale.Dimensions(data); width > 0 && height > 0 {
+			results[i].ByteSize = len(data)
+			results[i].Width = width
+			results[i].Height = height
+			results[i].Size = fmt.Sprintf("%dx%d", width, height)
 		}
 		upscaleCtx, cancel := context.WithTimeout(ctx, imageUpscaleTimeout)
 		upscaled, err := imageupscale.EnsureSize(upscaleCtx, data, plan.Scale, plan.RequestedSize)
@@ -2707,6 +2863,11 @@ func collectImagesResponse(ctx context.Context, body io.Reader, responseFormat, 
 				readErr = upscaleErr
 				return false
 			}
+			// 响应级元数据要跟着后处理走,否则报的还是请求里那个尺寸。
+			if len(results) > 0 {
+				firstMeta.Size = results[0].Size
+				firstMeta.OutputFormat = results[0].OutputFormat
+			}
 			out, readErr = buildImagesAPIResponse(ctx, results, createdAt, usageRaw, firstMeta, responseFormat, urlFor)
 			imageLogInfo = imageUsageLogInfoFromImages(results)
 			return false
@@ -2740,6 +2901,10 @@ func collectImagesResponse(ctx context.Context, body io.Reader, responseFormat, 
 			pendingResults, readErr = applyImageUpscalePlanWithKeepalive(ctx, upscalePlan, pendingResults)
 			if readErr != nil {
 				return nil, usage, 0, imageLogInfo, readErr
+			}
+			if len(pendingResults) > 0 {
+				firstMeta.Size = pendingResults[0].Size
+				firstMeta.OutputFormat = pendingResults[0].OutputFormat
 			}
 			out, readErr = buildImagesAPIResponse(ctx, pendingResults, createdAt, nil, firstMeta, responseFormat, urlFor)
 			if readErr != nil {

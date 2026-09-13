@@ -770,6 +770,12 @@ func ExecuteOpenAIResponsesRequest(ctx context.Context, account *auth.Account, r
 	defer func() { encryptedAttempt.observeResponse(upstreamResponse, requestBody) }()
 	responsesLite := gateResponsesLiteForAccount(codexResponsesLiteRequested(requestBody, headers), requestBody, account)
 	requestBody, headers = prepareCodexResponsesLiteTransport(requestBody, headers, false, responsesLite)
+	if responsesLite {
+		// Lite 的上游硬约束（parallel_tool_calls=false、reasoning.context=all_turns、
+		// HTTP 不接受 hosted 工具）对 relay / relay compact / compact 同样成立，漏掉会被
+		// 上游 400 unsupported_value 拒掉。
+		requestBody = normalizeCodexResponsesLiteBody(requestBody, true)
+	}
 	requestBody = normalizeCompactionTriggerFinal(requestBody, false)
 
 	baseURL, apiKey := account.OpenAIResponsesCredentials()
@@ -933,6 +939,12 @@ func ExecuteOpenAIResponsesCompactRequest(ctx context.Context, account *auth.Acc
 	defer func() { encryptedAttempt.observeResponse(upstreamResponse, requestBody) }()
 	responsesLite := gateResponsesLiteForAccount(codexResponsesLiteRequested(requestBody, headers), requestBody, account)
 	requestBody, headers = prepareCodexResponsesLiteTransport(requestBody, headers, false, responsesLite)
+	if responsesLite {
+		// Lite 的上游硬约束（parallel_tool_calls=false、reasoning.context=all_turns、
+		// HTTP 不接受 hosted 工具）对 relay / relay compact / compact 同样成立，漏掉会被
+		// 上游 400 unsupported_value 拒掉。
+		requestBody = normalizeCodexResponsesLiteBody(requestBody, true)
+	}
 
 	baseURL, apiKey := account.OpenAIResponsesCredentials()
 	account.Mu().RLock()
@@ -1010,6 +1022,12 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	// 顶层 type 是 WS 事件信封字段，compact HTTP 端点同样不接受，兜底删除(issue #548)。
 	requestBody, _ = sjson.DeleteBytes(requestBody, "type")
 	requestBody, headers = prepareCodexResponsesLiteTransport(requestBody, headers, false, responsesLite)
+	if responsesLite {
+		// Lite 的上游硬约束（parallel_tool_calls=false、reasoning.context=all_turns、
+		// HTTP 不接受 hosted 工具）对 relay / relay compact / compact 同样成立，漏掉会被
+		// 上游 400 unsupported_value 拒掉。
+		requestBody = normalizeCodexResponsesLiteBody(requestBody, true)
+	}
 	// 指纹收敛：与 ExecuteRequest 同样在请求体定稿后、构造出站请求前改写
 	// client_metadata。漏掉这一步会让 compact 路径只收敛请求头、请求体仍带客户端
 	// 真实标识，上游看到「头说设备 A、体说设备 B」这种真实客户端不会有的矛盾。
