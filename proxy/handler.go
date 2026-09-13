@@ -3765,8 +3765,6 @@ func (h *Handler) Responses(c *gin.Context) {
 		rawBody, requestModel, mappedModel, mappingApplied = h.applyConfiguredModelMappingToBody(rawBody, supportedModels)
 	}
 	rawBody, _ = normalizePortableResponsesCompactionHistory(rawBody)
-	// 下行身份隔离：上游回显的 prompt_cache_key 换回客户端自己的值（见 codex_downstream_identity.go）。
-	downstreamIdentity := newDownstreamIdentityContextWithCtx(c.Request.Context(), rawBody, nil)
 	setRawRequestBody(c, rawBody)
 
 	// Validate request
@@ -5152,8 +5150,6 @@ func (h *Handler) Responses(c *gin.Context) {
 			emptyIncomplete := &emptyIncompleteTracker{}
 			forwardWithEvent := func(sseEvent string, data []byte) bool {
 				streamDiag.markUpstreamFrame()
-				// 标识隔离：上游 response.id 在进入缓存、日志与下游之前换成网关 id（codex_id_isolation.go）。
-				data = rewriteDownstreamResponseID(data)
 				if continuousRetryBuffersAttempts(continuousRetryPolicy) {
 					compactionProvenancePayloads = append(compactionProvenancePayloads, bytes.Clone(data))
 				} else {
@@ -5277,7 +5273,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					// 进不了首包前静默换号/超窗压缩分支。必须写出时改写降载码。
 					shouldDefer := shouldDeferPreContentSSEEvent(eventType, contentTokenSeen, gotTerminal, preflightPassthrough) ||
 						(!contentTokenSeen && !visibleBody && !gotTerminal && isRetryableUpstreamErrorFrame(eventType, data, continuousRetryPolicy))
-					wrote, err := writeDeferredSSEData(streamWriter, &pendingFirstTokenEvents, sanitizeDownstreamResponseIdentity(sanitizeCapacityShedEventForClient(eventType, data), downstreamIdentity.withAccount(account)), shouldDefer)
+					wrote, err := writeDeferredSSEData(streamWriter, &pendingFirstTokenEvents, sanitizeCapacityShedEventForClient(eventType, data), shouldDefer)
 					if err != nil {
 						writeErr = err
 						clientGone = true
@@ -5688,7 +5684,6 @@ func (h *Handler) Responses(c *gin.Context) {
 					"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
 				})
 			} else if responseJSON != nil {
-				responseJSON = sanitizeDownstreamResponseIdentity(responseJSON, downstreamIdentity.withAccount(account))
 				c.Header("Content-Type", "application/json")
 				c.Status(http.StatusOK)
 				if err := writeAll(c.Writer, responseJSON); err == nil {

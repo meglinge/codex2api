@@ -485,19 +485,19 @@ func TestApplyCodexRequestHeadersAppliesAccountCustomHeadersLast(t *testing.T) {
 	}
 }
 
-// TestApplyCodexRequestHeadersStripsAttestation 验证 DeviceCheck 设备认证头
-// （openai/codex#20619）不透传：它把下游真实设备与号池账号绑定，与生成的 UA 画像
-// 无法自洽；缺失是合法状态。同时本代理也绝不伪造该头。
-func TestApplyCodexRequestHeadersStripsAttestation(t *testing.T) {
+// TestApplyCodexRequestHeadersForwardsAttestationOnlyWhenPresent 验证 DeviceCheck
+// 设备认证头（openai/codex#20619）的透传策略：下游携带真实 token 时原样转发，
+// 缺失时绝不伪造/补空——假 token 服务端向 Apple 验证必败，比不携带更暴露特征。
+func TestApplyCodexRequestHeadersForwardsAttestationOnlyWhenPresent(t *testing.T) {
 	acc := &auth.Account{DBID: 42, AccountID: "acct-42"}
 
-	// 下游携带真实 token → 剥离
+	// 下游携带真实 token → 原样透传
 	withToken, _ := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
 	applyCodexRequestHeaders(withToken, acc, "token-123", "cache-key-1", "api-key-1", nil, http.Header{
 		"X-Oai-Attestation": []string{"v1.real-devicecheck-token"},
 	})
-	if got := withToken.Header.Get("X-Oai-Attestation"); got != "" {
-		t.Fatalf("X-Oai-Attestation = %q, want stripped", got)
+	if got := withToken.Header.Get("X-Oai-Attestation"); got != "v1.real-devicecheck-token" {
+		t.Fatalf("X-Oai-Attestation = %q, want passthrough of downstream token", got)
 	}
 
 	// 下游未携带 → 不注入（保持与合法 CLI 一致的"干净缺失"）

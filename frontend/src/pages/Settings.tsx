@@ -2272,7 +2272,6 @@ export default function Settings() {
     { label: t('settings.clientCompatPreserve'), value: 'preserve' },
     { label: t('settings.clientCompatAuto'), value: 'auto' },
     { label: t('settings.clientCompatForce'), value: 'force' },
-    { label: t('settings.clientCompatForcePlatform'), value: 'force_platform' },
   ]
   const usageLogModeOptions = [
     { label: t('settings.usageLogFull'), value: 'full' },

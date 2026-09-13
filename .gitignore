@@ -60,6 +60,3 @@ diagrams/
 /data/
 /codex2api_local
 /server.log
-
-# Rust sender build output
-/sender/target/

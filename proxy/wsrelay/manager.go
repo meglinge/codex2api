@@ -1125,13 +1125,7 @@ func (m *Manager) createConnection(
 	// 配置代理（Resin 反代模式下跳过，URL 已包含 Resin 地址）
 	proxyURL := effectiveProxyURL(account, proxyOverride)
 
-	// rust 模式：握手改拨 c2a-sender 的回环 /ws，代理由发送器按控制头去连，
-	// TLS / 握手头序与真实 Codex 客户端同源；连接池 key 与 wc.URL 仍按上游地址记。
-	dialURL, dialHeaders := wsURL, headers
-	if senderURL, senderHeaders, viaSender := proxy.RustSenderWebsocketDial(wsURL, headers, proxyURL); viaSender && !proxy.IsResinEnabled() {
-		dialURL, dialHeaders = senderURL, senderHeaders
-		dialer.Proxy = nil
-	} else if !proxy.IsResinEnabled() && proxyURL != "" {
+	if !proxy.IsResinEnabled() && proxyURL != "" {
 		if err := configureWebsocketDialerProxy(dialer, proxyURL); err != nil {
 			return nil, err
 		}
@@ -1150,7 +1144,7 @@ func (m *Manager) createConnection(
 	m.sessions.Store(poolKey, session)
 
 	// 拨号连接
-	conn, resp, err := dialer.DialContext(ctx, dialURL, dialHeaders)
+	conn, resp, err := dialer.DialContext(ctx, wsURL, headers)
 	if err != nil {
 		m.sessions.Delete(poolKey)
 		session.Close()

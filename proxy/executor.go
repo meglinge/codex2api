@@ -196,8 +196,6 @@ func codexTransportModeFromEnv() string {
 		return codexTransportModeStandard
 	case "utls", "utls_chrome", "chrome":
 		return codexTransportModeUTLSChrome
-	case "rust", "sender", "c2a", "codex":
-		return codexTransportModeRust
 	default:
 		return codexTransportModeStandard
 	}
@@ -268,9 +266,6 @@ func newCodexTransport(proxyURL string) http.RoundTripper {
 	switch codexTransportModeFromEnv() {
 	case codexTransportModeUTLSChrome:
 		return NewUTLSTransport(proxyURL)
-	case codexTransportModeRust:
-		// 出站交给 sender/（c2a-sender），TLS / HTTP2 / 头序与真实 Codex 客户端同源。
-		return newRustSenderTransport(proxyURL)
 	default:
 		return newCodexStandardTransport(proxyURL)
 	}
@@ -369,22 +364,17 @@ const (
 	defaultCodexBetaFeatures = "remote_compaction_v2"
 )
 
-// codexAllowedForwardHeaders 是允许从下游原样透传到上游的 Codex 头。
-//
-// 明确不透传 X-Oai-Attestation（DeviceCheck 设备认证，上游 openai/codex#20619）：
-// 该 token 由 Apple 硬件背书、服务端向 Apple 验证，携带它等于把下游用户的真实
-// 设备与号池账号绑在一起，且与网关按画像生成的 UA / 平台不可能自洽。缺失是合法
-// 状态（纯 CLI、VS Code 插件、非 macOS 客户端本就不声明该能力），上游看到的只是
-// 一个未开启 attestation 的客户端。本代理也从不伪造它。
 var codexAllowedForwardHeaders = []string{
 	"X-Codex-Turn-State",
 	"X-Codex-Turn-Metadata",
 	"X-Client-Request-Id",
-	// 真实客户端每个请求都带 x-codex-window-id（responses_metadata.rs
-	// compatibility_headers）；取值已由 unifyCodexOutboundIdentity 与 metadata 对齐。
-	"X-Codex-Window-Id",
 	"X-Codex-Beta-Features",
 	codexResponsesLiteHeader,
+	// DeviceCheck 设备认证头（上游 openai/codex#20619）。仅在下游真实 Codex
+	// 客户端携带时原样透传——本代理无法（也不该）伪造：token 是 Apple 硬件
+	// 背书、服务端向 Apple 验证，假值必然验证失败、比"不携带"更暴露特征。
+	// 缺失是合法状态（纯 CLI / 非 macOS 客户端本就不发）。
+	"X-Oai-Attestation",
 }
 
 func codexResponsesLiteRequested(requestBody []byte, headers http.Header) bool {
@@ -541,8 +531,6 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	var encryptedAttempt *encryptedContentAttempt
 	requestBody, encryptedAttempt = prepareEncryptedContentAttempt(ctx, account, requestBody, sessionID, headers)
 	defer func() { encryptedAttempt.observeResponse(upstreamResponse, requestBody) }()
-	// 标识隔离：下游回带的 turn-state token 换回上游 blob（跨账号或未知则删除），见 codex_id_isolation.go。
-	requestBody, headers = resolveCodexTurnStateEcho(account, requestBody, headers)
 	var readyErr error
 	ctx, readyErr = ensureCodexTurnStateReady(ctx, account, requestBody)
 	if readyErr != nil {
@@ -562,17 +550,6 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	// 指纹收敛在 WS/HTTP 分叉前统一改写请求体，两条上游路径共享结果；请求头侧的
 	// 收敛（ApplyCodexFingerprintHeaders）从同一份「账号 + 下游头」推导，取值一致。
 	requestBody = ApplyCodexFingerprintToBody(requestBody, account, headers)
-	// 环境上下文对齐（codex_env_context.go）：从正文识别下游操作系统家族挂到 ctx，
-	// 三端强制模拟模式下出站 UA 的平台段据此选取；<timezone> / <current_date> 改写成
-	// 实际出口的时区。与指纹收敛一样在 WS/HTTP 分叉前做一次，两条路径共享结果。
-	osFamily := DetectCodexClientOSFamily(requestBody, headers)
-	ctx = WithCodexClientOSFamily(ctx, osFamily)
-	requestBody = alignCodexEnvironmentContextTimezone(ctx, requestBody, effectiveCodexProxyURL(account, proxyOverride))
-	// turn metadata 的 codex_version 必须与最终出站的 Version 头一致（同一套解析，
-	// 结果确定）。透传官方客户端时两者本就相同，此处为空操作。
-	if _, outboundVersion, _ := resolveCodexOutboundClientHeaders(ctx, account, apiKey, deviceCfg, headers); outboundVersion != "" {
-		requestBody, headers = alignCodexTurnMetadataVersion(requestBody, headers, outboundVersion)
-	}
 	// lite 信号收敛：签名在 payload 规则改写后采集（规则可注入/删除 WS 标记，改写
 	// 前采集会让注入失效、删除被回填），模型也已被入口映射/规则定稿——已知不支持
 	// lite 的模型带信号上游必 400，发出前剥离。
@@ -607,11 +584,6 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 						// 避免 baseKey 退化为每请求唯一键而触发握手风暴。
 						poolRouteKey = "ws-pool-default"
 					}
-					// 三端强制模拟下握手 UA 按家族对齐，而握手头逐连接冻结：同一 API Key 下
-					// 不同操作系统的用户必须落到不同连接，否则 Windows 用户会复用 macOS 画像的连接。
-					if osFamily != CodexClientOSFamilyUnknown && codexPlatformAlignmentEnabled(CurrentRuntimeSettings()) {
-						poolRouteKey += "|os:" + string(osFamily)
-					}
 				} else if det != "" {
 					// per-api-key：保留与 HTTP 路径同源的确定性 prompt cache key（既是上游身份也是
 					// baseKey），否则上游 prompt cache 每次请求都会 miss（v2.2.7 引入的回归）。
@@ -620,14 +592,8 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 			}
 		}
 	}
-	// 出站身份统一（codex_outbound_identity.go）：会话头、窗口头、两份 turn metadata、
-	// client_metadata 与 prompt_cache_key 必须报同一组值。上游会话键此时已定：HTTP 为
-	// sessionID，WS stateless 为刚写入帧体的 prompt_cache_key。真实客户端自报身份时
-	// 以它为准，网关的会话键随之改用同一个值。
-	requestBody, ctx, sessionID = unifyCodexOutboundIdentity(ctx, account, requestBody, headers, sessionID, apiKey, deviceCfg)
 	// 用账号为该模型保存的未降智 blob 覆盖出站 turn-state（请求头 / client_metadata）。
-	// 放在身份统一之后，合成出的 client_metadata 也能带上这个字段。Ping 用
-	// WithSkipStoredCodexTurnState 跳过。HTTP/SSE 与 WebSocket 共用这一步。
+	// Ping 用 WithSkipStoredCodexTurnState 跳过。HTTP/SSE 与 WebSocket 共用这一步。
 	requestBody, headers = injectStoredCodexTurnState(ctx, account, requestBody, headers)
 	RecordOutboundCodexTurnState(ctx, headers.Get(codexTurnStateHeader))
 	if wantWebsocket && WebsocketExecuteFunc != nil {
@@ -646,8 +612,6 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 			account.Mu().RUnlock()
 		}
 		recordTrace := beginUpstreamTrace(ctx, account, traceProxy, true)
-		// WS 续链：下游回带的网关 response id 换回上游 id，续链亲和与帧体都用上游 id。
-		requestBody = mapPreviousResponseIDToUpstream(requestBody)
 		resp, err := WebsocketExecuteFunc(ctx, account, requestBody, sessionID, proxyOverride, apiKey, deviceCfg, headers, poolRouteKey)
 		recordTrace(resp)
 		return resp, err
@@ -1007,8 +971,6 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	var encryptedAttempt *encryptedContentAttempt
 	requestBody, encryptedAttempt = prepareEncryptedContentAttempt(ctx, account, requestBody, sessionID, headers)
 	defer func() { encryptedAttempt.observeResponse(upstreamResponse, requestBody) }()
-	// 标识隔离：下游回带的 turn-state token 换回上游 blob（跨账号或未知则删除），见 codex_id_isolation.go。
-	requestBody, headers = resolveCodexTurnStateEcho(account, requestBody, headers)
 	var readyErr error
 	ctx, readyErr = ensureCodexTurnStateReady(ctx, account, requestBody)
 	if readyErr != nil {
@@ -1047,14 +1009,6 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	// 必须用 prepareCodexResponsesLiteTransport 之后的 headers（它可能返回克隆），
 	// 与下方 applyCodexRequestHeaders 取同一份下游头，两处推导结果才一致。
 	requestBody = ApplyCodexFingerprintToBody(requestBody, account, headers)
-	// 环境上下文对齐：compact 请求同样携带整段对话，与 ExecuteRequest 相同处理，
-	// 否则压缩请求会把未改写的时区 / 与 UA 不符的平台再送一遍上游。
-	ctx = WithCodexClientOSFamily(ctx, DetectCodexClientOSFamily(requestBody, headers))
-	requestBody = alignCodexEnvironmentContextTimezone(ctx, requestBody, proxyURL)
-	if _, outboundVersion, _ := resolveCodexOutboundClientHeaders(ctx, account, apiKey, deviceCfg, headers); outboundVersion != "" {
-		requestBody, headers = alignCodexTurnMetadataVersion(requestBody, headers, outboundVersion)
-	}
-	requestBody, ctx, sessionID = unifyCodexOutboundIdentity(ctx, account, requestBody, headers, sessionID, apiKey, deviceCfg)
 	requestBody, headers = injectStoredCodexTurnState(ctx, account, requestBody, headers)
 	RecordOutboundCodexTurnState(ctx, headers.Get(codexTurnStateHeader))
 
@@ -1158,7 +1112,7 @@ func generatedCodexClientHeaders(account *auth.Account, settings RuntimeSettings
 
 func shouldGenerateCodexClientHeaders(settings RuntimeSettings, userAgent, originator string) bool {
 	switch settings.ClientCompatMode {
-	case ClientCompatModeForce, ClientCompatModeForcePlatform:
+	case ClientCompatModeForce:
 		return true
 	case ClientCompatModeAuto:
 		version, ok := parseCodexClientVersion(userAgent)
@@ -1175,34 +1129,7 @@ func shouldGenerateCodexClientHeaders(settings RuntimeSettings, userAgent, origi
 	}
 }
 
-// codexPlatformAlignmentEnabled 报告当前兼容模式是否按下游操作系统对齐 UA 平台段。
-func codexPlatformAlignmentEnabled(settings RuntimeSettings) bool {
-	return settings.ClientCompatMode == ClientCompatModeForcePlatform
-}
-
-// resolveCodexOutboundClientHeaders 决定出站 User-Agent / Version。
-//
-// 兼容模式（client_compat_mode）：
-//   - preserve：官方 Codex 客户端的 UA / Version 原样透传，其余客户端用网关画像；
-//   - auto：过旧的官方客户端抬到画像池并补最低版本，其余同 preserve；
-//   - force：始终使用网关画像（后台 UA 配置或内置画像池）；
-//   - force_platform（三端强制模拟）：同 force，但画像的平台段按下游用户的操作系统
-//     对齐到 windows / macos / linux（AlignCodexUserAgentPlatform）。家族来自 ctx 上的
-//     WithCodexClientOSFamily，由请求体 <environment_context> 或下游 UA 识别；每个账号
-//     对每个家族各有一套固定画像，识别不出时沿用画像原值。
-func resolveCodexOutboundClientHeaders(ctx context.Context, account *auth.Account, apiKey string, deviceCfg *DeviceProfileConfig, downstreamHeaders http.Header) (userAgent, version string, usedGenerated bool) {
-	settings := CurrentRuntimeSettings()
-	align := func(ua string) string {
-		if !codexPlatformAlignmentEnabled(settings) {
-			return ua
-		}
-		accountID := int64(0)
-		if account != nil {
-			accountID = account.ID()
-		}
-		return AlignCodexUserAgentPlatform(ua, CodexClientOSFamilyFromContext(ctx), accountID)
-	}
-
+func resolveCodexOutboundClientHeaders(account *auth.Account, apiKey string, deviceCfg *DeviceProfileConfig, downstreamHeaders http.Header) (userAgent, version string, usedGenerated bool) {
 	if IsDeviceProfileStabilizationEnabled(deviceCfg) {
 		profile := ResolveDeviceProfile(account, apiKey, downstreamHeaders, deviceCfg)
 		userAgent = strings.TrimSpace(profile.UserAgent)
@@ -1210,14 +1137,15 @@ func resolveCodexOutboundClientHeaders(ctx context.Context, account *auth.Accoun
 		if userAgent == "" {
 			userAgent = defaultCodexCLIUserAgent
 		}
-		return align(userAgent), strings.TrimSpace(version), false
+		return userAgent, strings.TrimSpace(version), false
 	}
 
 	userAgent = strings.TrimSpace(downstreamHeaders.Get("User-Agent"))
 	originator := strings.TrimSpace(downstreamHeaders.Get("Originator"))
+	settings := CurrentRuntimeSettings()
 	if shouldGenerateCodexClientHeaders(settings, userAgent, originator) {
 		userAgent, version = generatedCodexClientHeaders(account, settings)
-		return align(userAgent), version, true
+		return userAgent, version, true
 	}
 	if IsCodexOfficialClientByHeaders(userAgent, originator) && userAgent != "" {
 		version = firstNonEmptyHeader(downstreamHeaders, "Version", codexVersionFromUserAgent(userAgent, latestCodexCLIVersion))
@@ -1232,10 +1160,10 @@ func resolveCodexOutboundClientHeaders(ctx context.Context, account *auth.Accoun
 		configAccountID = account.ID()
 	}
 	if userAgent, version, ok := codexUserAgentFromConfig(settings.CodexUserAgentConfig, configAccountID, versionFloor); ok {
-		return align(userAgent), version, true
+		return userAgent, version, true
 	}
 	effectiveVersion := effectiveLatestCodexCLIVersion()
-	return align(replaceCodexUserAgentVersion(defaultCodexCLIUserAgent, effectiveVersion)), effectiveVersion, false
+	return replaceCodexUserAgentVersion(defaultCodexCLIUserAgent, effectiveVersion), effectiveVersion, false
 }
 
 func ResolveCodexOutboundClientHeaders(account *auth.Account, apiKey string, deviceCfg *DeviceProfileConfig, downstreamHeaders http.Header) (userAgent, version string) {
@@ -1244,27 +1172,7 @@ func ResolveCodexOutboundClientHeaders(account *auth.Account, apiKey string, dev
 }
 
 func ResolveCodexOutboundClientHeadersWithDecision(account *auth.Account, apiKey string, deviceCfg *DeviceProfileConfig, downstreamHeaders http.Header) (userAgent, version string, usedGenerated bool) {
-	return resolveCodexOutboundClientHeaders(context.Background(), account, apiKey, deviceCfg, downstreamHeaders)
-}
-
-// ResolveCodexOutboundClientHeadersWithDecisionContext 与上者相同，但从 ctx 读取下游
-// 操作系统家族以对齐 UA 平台段（WS 握手路径使用）。
-func ResolveCodexOutboundClientHeadersWithDecisionContext(ctx context.Context, account *auth.Account, apiKey string, deviceCfg *DeviceProfileConfig, downstreamHeaders http.Header) (userAgent, version string, usedGenerated bool) {
-	return resolveCodexOutboundClientHeaders(ctx, account, apiKey, deviceCfg, downstreamHeaders)
-}
-
-// effectiveCodexProxyURL 返回本次请求实际使用的出口代理：代理池分配（proxyOverride）
-// 优先，其次账号绑定的代理，空表示直连。
-func effectiveCodexProxyURL(account *auth.Account, proxyOverride string) string {
-	if proxyOverride = strings.TrimSpace(proxyOverride); proxyOverride != "" {
-		return proxyOverride
-	}
-	if account == nil {
-		return ""
-	}
-	account.Mu().RLock()
-	defer account.Mu().RUnlock()
-	return strings.TrimSpace(account.ProxyURL)
+	return resolveCodexOutboundClientHeaders(account, apiKey, deviceCfg, downstreamHeaders)
 }
 
 func applyCodexAllowedForwardHeaders(req *http.Request, downstreamHeaders http.Header) {
@@ -1303,7 +1211,7 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 		account.Mu().RUnlock()
 	}
 
-	userAgent, version, usedGeneratedHeaders := resolveCodexOutboundClientHeaders(req.Context(), account, apiKey, deviceCfg, downstreamHeaders)
+	userAgent, version, usedGeneratedHeaders := resolveCodexOutboundClientHeaders(account, apiKey, deviceCfg, downstreamHeaders)
 	req.Header.Set("User-Agent", userAgent)
 
 	// Agent Identity 账号用动态签名的 AgentAssertion 头替代 Bearer（task 已由调用方确保就绪）。
@@ -1354,9 +1262,6 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 	// 收敛开启时与 turn metadata 报同一组身份。CODEX_SESSION_HEADER_MODE=legacy
 	// 可整体退回旧的 Session_id 形态。
 	ApplyCodexSessionHeaders(req.Header, account, cacheKey, downstreamHeaders, false)
-	// 出站身份统一：会话 / 线程 / 窗口标识与 turn metadata 头在此定稿，与请求体同源
-	// （见 codex_outbound_identity.go）。仍在账号自定义头之前，保持运维覆盖优先。
-	ApplyCodexOutboundIdentityHeaders(req.Header, req.Context())
 	applyAccountCustomHeaders(req, account)
 	RecordUpstreamUserAgent(req.Context(), req.Header.Get("User-Agent"))
 	RecordOutboundCodexTurnState(req.Context(), req.Header.Get(codexTurnStateHeader))
@@ -1381,7 +1286,7 @@ func applyOpenAIResponsesRequestHeaders(req *http.Request, account *auth.Account
 			version = codexVersionFromUserAgent(userAgent, effectiveLatestCodexCLIVersion())
 		}
 	} else {
-		userAgent, version, usedGenerated = resolveCodexOutboundClientHeaders(req.Context(), account, "", nil, headers)
+		userAgent, version, usedGenerated = resolveCodexOutboundClientHeaders(account, "", nil, headers)
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")

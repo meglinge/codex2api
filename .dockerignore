@@ -34,14 +34,3 @@ docker-compose.yml
 *.so
 *.dylib
 codex2api
-
-# Rust sender: only third_party/codex/codex-rs is needed by Dockerfile.sender; keep build
-# outputs and the rest of the codex checkout out of every build context.
-sender/target/
-third_party/codex/codex-rs/target/
-third_party/codex/.git
-third_party/codex/.github/
-third_party/codex/codex-cli/
-third_party/codex/sdk/
-third_party/codex/docs/
-third_party/codex/tz_proxy/

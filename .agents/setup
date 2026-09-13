@@ -283,17 +283,6 @@ CODEX2API_TEST_REDIS_ADDR=127.0.0.1:6379 go test -count=1 ./cache ./proxy
 
 Neither variable is exported by default, so a plain `go test ./...` skips these suites
 exactly like CI does.
-
-## Not installed
-
-The Rust `sender/` crate needs the `third_party/codex` submodule and a full
-reqwest/hyper/rustls build, which is too slow for orb setup. Enable it on demand:
-
-```bash
-git submodule update --init --depth 1 third_party/codex
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y   # rust-toolchain.toml pins the version
-cargo build --manifest-path sender/Cargo.toml
-```
 EOF
 }
 

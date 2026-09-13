@@ -398,7 +398,6 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	}
 
 	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
-	downstreamIdentity := newDownstreamIdentityContextWithCtx(c.Request.Context(), rawBody, nil)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
 	hasPreviousResponse := strings.TrimSpace(gjson.GetBytes(rawBody, "previous_response_id").String()) != ""
@@ -934,7 +933,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		}
 		preserveAffinity := preserveContinuationBinding()
 		allowContinuationDegrade := canDegradeContinuation()
-		if err := h.streamResponsesWSUpstream(c, conn, resp, account, proxyURL, affinityKey, affinityGuard, preserveAffinity, allowContinuationDegrade, logModel, effectiveModel, logEffectiveModel, reasoningEffort, serviceTier, respCacheOwner, attemptReplay, start, ttftGuard, retryEnabled, hideUpstreamErrors, useWebsocket, fallbackLog, attempt+1, options, continuousRetryPolicy, downstreamIdentity); err != nil {
+		if err := h.streamResponsesWSUpstream(c, conn, resp, account, proxyURL, affinityKey, affinityGuard, preserveAffinity, allowContinuationDegrade, logModel, effectiveModel, logEffectiveModel, reasoningEffort, serviceTier, respCacheOwner, attemptReplay, start, ttftGuard, retryEnabled, hideUpstreamErrors, useWebsocket, fallbackLog, attempt+1, options, continuousRetryPolicy); err != nil {
 			if continuousRetryDeadlineExceeded(c.Request.Context()) {
 				return errResponsesWSClientGone
 			}
@@ -1062,7 +1061,6 @@ func (h *Handler) streamResponsesWSUpstream(
 	fallbackAttempt int,
 	options *responsesWSForwardOptions,
 	continuousRetryPolicy database.ContinuousRetryPolicy,
-	downstreamIdentity downstreamIdentityContext,
 ) error {
 	account.Mu().RLock()
 	c.Set("x-account-email", account.Email)
@@ -1139,8 +1137,6 @@ func (h *Handler) streamResponsesWSUpstream(
 	}
 
 	readErr = readSSEStreamWithContinuousRetryKeepalive(c.Request.Context(), resp.Body, func(sseEvent string, data []byte) bool {
-		// 标识隔离：上游 response.id 换成网关 id（codex_id_isolation.go）。
-		data = rewriteDownstreamResponseID(data)
 		if wsReplay == nil {
 			h.recordCompactionProvenanceFromPayload(context.Background(), account, data)
 		}
@@ -1158,7 +1154,6 @@ func (h *Handler) streamResponsesWSUpstream(
 		// 一旦要透传给客户端就改写为可重试的 server_error。冷却/计费/日志用的
 		// terminalFailurePayload 取改写前的原始 data，不受影响。
 		clientData = sanitizeCapacityShedEventForClient(eventType, clientData)
-		clientData = sanitizeDownstreamResponseIdentity(clientData, downstreamIdentity.withAccount(account))
 		ttftGuard.MarkProgress(eventType)
 		isFirstToken := isFirstTokenResultForMode(parsed, currentFirstTokenMode())
 		if !ttftRecorded && isFirstToken {
