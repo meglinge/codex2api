@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -137,9 +138,42 @@ func ensureCodexTurnStateReady(ctx context.Context, account *auth.Account, body 
 	}
 	value, err := cache.refresh(ctx, account, model)
 	if err != nil {
-		return ctx, err
+		return ctx, opaqueCodexTurnStateRefreshError(err)
 	}
 	return withExpectedCodexTurnState(ctx, account, model, value), nil
+}
+
+// opaqueCodexTurnStateRefreshError 把 ping / 智力校验失败收成可换号的 503。
+// 诊断只留在服务端日志和 Cause 里，不能进下游 JSON。
+func opaqueCodexTurnStateRefreshError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	var existing *Error
+	if errors.As(err, &existing) {
+		return existing
+	}
+	return &Error{
+		Code:       ErrorCodeNoAvailableAccount,
+		Message:    "No available account, please retry later",
+		Type:       ErrorTypeServerError,
+		Retryable:  true,
+		HTTPStatus: http.StatusServiceUnavailable,
+		Cause:      err,
+	}
+}
+
+func isInternalCodexTurnStateError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "X-Codex-Turn-State") ||
+		strings.Contains(msg, "智力校验") ||
+		strings.Contains(msg, "Fernet")
 }
 
 func withExpectedCodexTurnState(ctx context.Context, account *auth.Account, model, stored string) context.Context {

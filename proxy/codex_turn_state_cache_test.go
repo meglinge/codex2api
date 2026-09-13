@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -128,6 +129,35 @@ func TestEnsureCodexTurnStateReadyRotatesCountriesOnPingFailure(t *testing.T) {
 	}
 	if got := account.GetCodexTurnState("gpt-5.6-sol"); got != "ok-blob" {
 		t.Fatalf("stored = %q", got)
+	}
+}
+
+func TestEnsureCodexTurnStateReadyHidesRefreshDiagnostics(t *testing.T) {
+	previous := currentCodexTurnStateCache()
+	t.Cleanup(func() { globalCodexTurnStateCache.Store(previous) })
+
+	account := &auth.Account{DBID: 31}
+	SetCodexTurnStateCache(newCodexTurnStateCache(nil, nil, database.CodexTurnStateCacheConfig{
+		IPv6ProxyURL: "socks5://[::1]:1080",
+		Models:       []string{"gpt-5.6-sol"},
+		TTLMinutes:   43,
+		MaxPingTries: 1,
+	}, func(context.Context, *auth.Account, string, string) (string, error) {
+		return "", verifyCodexTurnStatePingIntelligence(fakeCodexTurnStateFernet(176), "plus")
+	}))
+	_, err := ensureCodexTurnStateReady(context.Background(), account, []byte(`{"model":"gpt-5.6-sol"}`))
+	if err == nil {
+		t.Fatal("downgraded ping must fail")
+	}
+	var apiErr *Error
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error type = %T, want *Error", err)
+	}
+	if apiErr.Code != ErrorCodeNoAvailableAccount || apiErr.HTTPStatus != http.StatusServiceUnavailable || !apiErr.Retryable {
+		t.Fatalf("api error = %+v", apiErr)
+	}
+	if strings.Contains(apiErr.Message, "Fernet") || strings.Contains(apiErr.Message, "智力") || strings.Contains(apiErr.Message, "X-Codex-Turn-State") {
+		t.Fatalf("client message leaked diagnostics: %q", apiErr.Message)
 	}
 }
 

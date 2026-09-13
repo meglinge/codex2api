@@ -327,7 +327,18 @@ func ErrorToGinResponse(c *gin.Context, err error) {
 
 	var e *Error
 	if errors.As(err, &e) {
+		if isInternalCodexTurnStateError(err) {
+			safe := ErrNoAvailableAccount()
+			c.JSON(safe.HTTPStatus, safe.ToGinH())
+			return
+		}
 		c.JSON(e.HTTPStatus, e.ToGinH())
+		return
+	}
+
+	if isInternalCodexTurnStateError(err) {
+		safe := ErrNoAvailableAccount()
+		c.JSON(safe.HTTPStatus, safe.ToGinH())
 		return
 	}
 

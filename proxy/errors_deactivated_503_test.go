@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -41,5 +42,31 @@ func TestErrorToGinResponseHandshakeDeactivatedBecomes503(t *testing.T) {
 	ErrorToGinResponse(c, errors.New("dial tcp timeout"))
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("generic error status = %d, want 500", rec.Code)
+	}
+}
+
+func TestErrorToGinResponseHidesCodexTurnStateRefresh(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cases := []error{
+		fmt.Errorf("刷新 X-Codex-Turn-State 失败: 智力校验未通过: Fernet 密文 176 字节（降智），期望 160"),
+		opaqueCodexTurnStateRefreshError(fmt.Errorf("智力校验未通过: Fernet 密文 176 字节（降智），期望 160")),
+	}
+	for i, err := range cases {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		ErrorToGinResponse(c, err)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("case %d status = %d, want 503; body = %s", i, rec.Code, rec.Body.String())
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, ErrorCodeNoAvailableAccount) {
+			t.Fatalf("case %d body = %s", i, body)
+		}
+		for _, leaked := range []string{"Fernet", "智力", "X-Codex-Turn-State", "176"} {
+			if strings.Contains(body, leaked) {
+				t.Fatalf("case %d leaked %q: %s", i, leaked, body)
+			}
+		}
 	}
 }
