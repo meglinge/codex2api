@@ -1,0 +1,20 @@
+services:
+  # The gateway serves the admin console from frontend/dist, which main.go embeds.
+  # Rebuild the bundle (npm --prefix frontend run build) and restart this service
+  # after changing the UI. Port 8080 is fixed so frontend/vite.config.js's dev proxy
+  # keeps working when you run the Vite dev server alongside it.
+  app:
+    command: CODEX_PORT="$PORT" CODEX_BIND=0.0.0.0 exec go run .
+    port: 8080
+    health: /health
+    portal:
+      url: /admin/
+      title: Codex2API admin
+      description: First visit asks you to set an admin secret; .env uses SQLite and an in-memory cache.
+    portals:
+      - url: /key-usage
+        title: Key usage
+      - url: /image-studio
+        title: Image studio
+      - url: /account-portal
+        title: Account portal

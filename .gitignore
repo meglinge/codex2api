@@ -36,6 +36,10 @@ scripts
 !frontend/scripts/
 !.github/scripts/
 
+# Amp orb generated state: portal links and thread artifacts
+.amp/portals/
+.amp/in/
+
 # Logs
 logs/
 AGENTS.md

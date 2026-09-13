@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Runs after orb activation and on every wake, with a 10 second budget.
+#
+# .agents/setup provisions the disposable PostgreSQL and Redis instances the
+# opt-in integration suites use, but no process survives into the orb snapshot,
+# so they are started here. Both starts are guarded by a port check and are
+# therefore safe to run repeatedly. Never install anything in this script.
+set -euo pipefail
+
+pg_major="18"
+
+sudo=()
+if [ "$(id -u)" -ne 0 ]; then sudo=(sudo); fi
+
+listening() {
+	(exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+
+if command -v pg_ctlcluster >/dev/null && ! listening 5432; then
+	"${sudo[@]}" install -d -o postgres -g postgres -m 2775 /var/run/postgresql
+	"${sudo[@]}" pg_ctlcluster "$pg_major" main start --skip-systemctl-redirect || true
+fi
+
+if command -v redis-server >/dev/null && ! listening 6379; then
+	"${sudo[@]}" install -d -o redis -g redis -m 2755 /var/run/redis
+	"${sudo[@]}" -u redis redis-server /etc/redis/redis.conf --daemonize yes || true
+fi
+
+listening 5432 && echo "postgres: up" || echo "postgres: down"
+listening 6379 && echo "redis: up" || echo "redis: down"

@@ -1,0 +1,314 @@
+#!/usr/bin/env bash
+# Prepare a fresh Amp orb for codex2api.
+#
+# Installs the pinned Go toolchain, warms the Go module/build caches, installs and
+# builds the frontend (main.go embeds frontend/dist, so it must exist before any
+# Go build), installs the lint/vulnerability tools CI uses, and provisions the
+# disposable PostgreSQL and Redis instances the opt-in integration tests need.
+#
+# Must stay non-interactive and idempotent: Amp re-runs it when an orb starts
+# from a stale snapshot. Long-lived processes belong in .amp/services.yaml
+# (portal services) or .agents/resume (databases), never here.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+# Keep these in sync with the workflows under .github/workflows/.
+go_version="$(awk '/^go /{print $2; exit}' go.mod)"   # pr-check.yml uses go-version-file: go.mod
+golangci_lint_version="2.9.0"                          # pr-check.yml: golangci-lint-action version v2.9
+govulncheck_version="v1.7.0"                           # security-scan.yml
+pg_major="18"                                          # docker-compose.yml: postgres:18-alpine
+pg_test_role="codex2api_test"
+pg_test_password="test-only"
+
+sudo=()
+if [ "$(id -u)" -ne 0 ]; then sudo=(sudo); fi
+
+export PATH="/usr/local/go/bin:$HOME/go/bin:$HOME/.local/bin:$PATH"
+export DEBIAN_FRONTEND=noninteractive
+
+step() {
+	local label="$1"
+	shift
+	local start=$SECONDS
+	echo "==> $label"
+	"$@"
+	echo "    ${label}: $((SECONDS - start))s"
+}
+
+pkg_installed() {
+	[ "$(dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null || true)" = "installed" ]
+}
+
+# ---------------------------------------------------------------- system packages
+
+install_system_packages() {
+	local missing=()
+	pkg_installed "postgresql-${pg_major}" || missing+=("postgresql-${pg_major}")
+	pkg_installed redis-server || missing+=(redis-server)
+	if [ "${#missing[@]}" -eq 0 ]; then
+		echo "    postgresql-${pg_major} and redis-server already installed"
+		return
+	fi
+
+	# Debian 12 only ships PostgreSQL 15; PGDG has the 18 series the compose files use.
+	if [ ! -f /etc/apt/sources.list.d/pgdg.list ]; then
+		curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc |
+			"${sudo[@]}" gpg --batch --yes --dearmor -o /usr/share/keyrings/pgdg.gpg
+		echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" |
+			"${sudo[@]}" tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+	fi
+
+	"${sudo[@]}" apt-get update -qq
+	"${sudo[@]}" apt-get install -y -qq "${missing[@]}"
+}
+
+# ---------------------------------------------------------------- go toolchain
+
+install_go() {
+	if [ "$(go env GOVERSION 2>/dev/null || true)" = "go${go_version}" ]; then
+		echo "    go${go_version} already installed"
+		return
+	fi
+
+	local arch tarball tmp expected
+	arch="$(dpkg --print-architecture)"
+	tarball="go${go_version}.linux-${arch}.tar.gz"
+	tmp="$(mktemp -d)"
+	curl -fsSL -o "$tmp/$tarball" "https://dl.google.com/go/$tarball"
+	expected="$(curl -fsSL "https://dl.google.com/go/$tarball.sha256")"
+	echo "$expected  $tmp/$tarball" | sha256sum -c - >/dev/null
+	"${sudo[@]}" rm -rf /usr/local/go
+	"${sudo[@]}" tar -C /usr/local -xzf "$tmp/$tarball"
+	rm -rf "$tmp"
+	go version
+}
+
+# The installer above cannot change the environment of shells Amp starts later,
+# so persist the toolchain PATH for every non-interactive login shell.
+persist_path() {
+	local marker="# codex2api orb toolchain (managed by .agents/setup)"
+	if grep -Fqx "$marker" "$HOME/.bash_profile" 2>/dev/null; then
+		echo "    ~/.bash_profile already exports the toolchain PATH"
+		return
+	fi
+	cat >>"$HOME/.bash_profile" <<EOF
+
+$marker
+export PATH="/usr/local/go/bin:\$HOME/go/bin:\$HOME/.local/bin:\$PATH"
+EOF
+}
+
+install_go_tools() {
+	if [ "$(golangci-lint version --short 2>/dev/null || true)" != "$golangci_lint_version" ]; then
+		local arch tmp
+		arch="$(dpkg --print-architecture)"
+		tmp="$(mktemp -d)"
+		curl -fsSL -o "$tmp/golangci-lint.tar.gz" \
+			"https://github.com/golangci/golangci-lint/releases/download/v${golangci_lint_version}/golangci-lint-${golangci_lint_version}-linux-${arch}.tar.gz"
+		mkdir -p "$HOME/go/bin"
+		tar -xzf "$tmp/golangci-lint.tar.gz" --strip-components=1 -C "$HOME/go/bin" \
+			"golangci-lint-${golangci_lint_version}-linux-${arch}/golangci-lint"
+		rm -rf "$tmp"
+	fi
+	if ! govulncheck -version 2>/dev/null | grep -Fq "govulncheck@${govulncheck_version}"; then
+		go install "golang.org/x/vuln/cmd/govulncheck@${govulncheck_version}"
+	fi
+	golangci-lint version --short
+	govulncheck -version | head -2
+}
+
+# ---------------------------------------------------------------- dependencies
+
+download_go_modules() {
+	# Plain `go mod download`, not `download all`: the `all` pattern resolves the test
+	# dependencies of dependencies too and writes new go.sum lines, dirtying the tree.
+	go mod download
+}
+
+build_frontend() {
+	npm --prefix frontend ci --no-audit --no-fund
+	# main.go has //go:embed frontend/dist/*, so nothing in Go builds without this.
+	npm --prefix frontend run build
+}
+
+warm_go_caches() {
+	go build ./...
+	# Compiles and links every test binary without running any test, so the first
+	# `go test` an agent runs is seconds instead of a minute.
+	go test -count=1 -run '^$' ./... >/dev/null
+}
+
+# ---------------------------------------------------------------- local runtime config
+
+write_local_env() {
+	mkdir -p data logs
+	if [ -f .env ]; then
+		echo "    .env already exists, leaving it alone"
+		return
+	fi
+	cat >.env <<'EOF'
+# Local orb development config, generated by .agents/setup (never overwritten).
+# SQLite + in-memory cache, so the gateway runs with no external services.
+# See .env.example / .env.sqlite.example for every supported option.
+CODEX_PORT=8080
+CODEX_BIND=127.0.0.1
+DATABASE_DRIVER=sqlite
+DATABASE_PATH=./data/codex2api.db
+CACHE_DRIVER=memory
+IMAGE_ASSET_DIR=./data/images
+LOG_DIR=logs
+TZ=Asia/Shanghai
+EOF
+}
+
+# PostgreSQL and Redis stay stopped when this script exits (anything still running
+# is killed before the snapshot is taken); .agents/resume starts them on every wake.
+provision_databases() {
+	local conf_dir="/etc/postgresql/${pg_major}/main/conf.d"
+	"${sudo[@]}" install -d "$conf_dir"
+	# Disposable test data: trade durability for speed.
+	printf '%s\n' \
+		'# Managed by .agents/setup: throwaway orb database, speed over durability.' \
+		'fsync = off' \
+		'synchronous_commit = off' \
+		'full_page_writes = off' |
+		"${sudo[@]}" tee "$conf_dir/99-orb.conf" >/dev/null
+
+	"${sudo[@]}" install -d -o postgres -g postgres -m 2775 /var/run/postgresql
+	"${sudo[@]}" pg_ctlcluster "$pg_major" main start --skip-systemctl-redirect || true
+	for _ in $(seq 1 30); do
+		"${sudo[@]}" -u postgres pg_isready -q && break
+		sleep 0.5
+	done
+
+	"${sudo[@]}" -u postgres psql -v ON_ERROR_STOP=1 -q <<SQL
+DO \$\$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${pg_test_role}') THEN
+    CREATE ROLE ${pg_test_role} LOGIN CREATEDB PASSWORD '${pg_test_password}';
+  END IF;
+END \$\$;
+SQL
+	"${sudo[@]}" -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname = '${pg_test_role}'" |
+		grep -q 1 || "${sudo[@]}" -u postgres createdb -O "$pg_test_role" "$pg_test_role"
+
+	# Lets psql/createdb/dropdb run without a password prompt or an inline secret.
+	local pgpass_line="127.0.0.1:5432:*:${pg_test_role}:${pg_test_password}"
+	if ! grep -Fqx "$pgpass_line" "$HOME/.pgpass" 2>/dev/null; then
+		printf '%s\n' "$pgpass_line" >>"$HOME/.pgpass"
+	fi
+	chmod 600 "$HOME/.pgpass"
+
+	"${sudo[@]}" pg_ctlcluster "$pg_major" main stop --skip-systemctl-redirect || true
+}
+
+# The PostgreSQL suites assert against an empty database, so every run needs its own.
+install_pgtest_helper() {
+	mkdir -p "$HOME/.local/bin"
+	cat >"$HOME/.local/bin/c2a-pgtest" <<EOF
+#!/usr/bin/env bash
+# Run a command with CODEX2API_TEST_POSTGRES_DSN pointing at a fresh, empty
+# database that is dropped again afterwards. Installed by codex2api's .agents/setup.
+#   c2a-pgtest go test -race -count=1 ./database
+set -euo pipefail
+if [ "\$#" -eq 0 ]; then
+	echo "usage: c2a-pgtest <command> [args...]" >&2
+	exit 2
+fi
+db="c2a_test_\$\$_\$(date +%s)"
+createdb -h 127.0.0.1 -U ${pg_test_role} "\$db"
+trap 'dropdb -h 127.0.0.1 -U ${pg_test_role} --if-exists "\$db"' EXIT
+export CODEX2API_TEST_POSTGRES_DSN="postgres://${pg_test_role}:${pg_test_password}@127.0.0.1:5432/\$db?sslmode=disable"
+"\$@"
+EOF
+	chmod +x "$HOME/.local/bin/c2a-pgtest"
+}
+
+# AGENTS.md is gitignored in this repository, so this is per-orb guidance only and
+# an existing file (yours or a previous run's) is never replaced.
+write_agent_notes() {
+	if [ -f AGENTS.md ]; then
+		echo "    AGENTS.md already exists, leaving it alone"
+		return
+	fi
+	cat >AGENTS.md <<'EOF'
+# codex2api in an Amp orb
+
+`.agents/setup` already installed everything below. Do not reinstall the toolchain.
+
+## Toolchain
+
+- Go is at `/usr/local/go/bin/go`, pinned to the `go` directive in `go.mod`; module and
+  build caches are warm.
+- Node.js and npm come from the orb image; `frontend/node_modules` is installed and
+  `frontend/dist` is built. `main.go` embeds `frontend/dist`, so rebuild it
+  (`npm --prefix frontend run build`) after changing the UI, or Go keeps embedding the old bundle.
+- `golangci-lint` and `govulncheck` are on `PATH` at the versions the workflows pin.
+
+## Checks (same as .github/workflows)
+
+```bash
+go build ./... && go test -count=1 ./...
+golangci-lint run --enable-only=govet --timeout=10m ./...
+govulncheck ./...
+npm --prefix frontend ci && npm --prefix frontend test && npm --prefix frontend run typecheck
+```
+
+## Running the gateway
+
+`.env` is generated for SQLite + in-memory cache, so `go run .` works with no external
+services. To expose the admin UI in the thread's Portal tab:
+
+```bash
+amp orb services ensure
+```
+
+## PostgreSQL and Redis (opt-in test suites)
+
+`.agents/resume` starts both on every orb wake. If either is down, re-run `.agents/resume`.
+
+Postgres suites (`database/`) require an *empty* database per run, so use the helper —
+reusing one database makes them fail on the second run:
+
+```bash
+c2a-pgtest go test -race -count=1 ./database -run '^TestPostgresTraceAndCapabilities$'
+```
+
+Redis suites (`cache/`, `proxy/`) are safe to point at the shared instance:
+
+```bash
+CODEX2API_TEST_REDIS_ADDR=127.0.0.1:6379 go test -count=1 ./cache ./proxy
+```
+
+Neither variable is exported by default, so a plain `go test ./...` skips these suites
+exactly like CI does.
+
+## Not installed
+
+The Rust `sender/` crate needs the `third_party/codex` submodule and a full
+reqwest/hyper/rustls build, which is too slow for orb setup. Enable it on demand:
+
+```bash
+git submodule update --init --depth 1 third_party/codex
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y   # rust-toolchain.toml pins the version
+cargo build --manifest-path sender/Cargo.toml
+```
+EOF
+}
+
+# ----------------------------------------------------------------------------
+
+total_start=$SECONDS
+step "system packages"          install_system_packages
+step "go ${go_version}"         install_go
+step "persist toolchain PATH"   persist_path
+step "go modules"               download_go_modules
+step "frontend deps and bundle" build_frontend
+step "go and vulncheck tools"   install_go_tools
+step "warm go build caches"     warm_go_caches
+step "local .env"               write_local_env
+step "postgres and redis"       provision_databases
+step "c2a-pgtest helper"        install_pgtest_helper
+step "agent notes"              write_agent_notes
+echo "==> setup finished in $((SECONDS - total_start))s"
