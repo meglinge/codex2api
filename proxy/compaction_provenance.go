@@ -44,6 +44,37 @@ type compactionAffinityResolution struct {
 	Known               bool
 	CompatibilityDomain string
 	PreferredAccountID  int64
+	KnownDigests        compactionProvenanceDigests
+}
+
+// Only digests survive stream inspection; retaining whole SSE frames would
+// duplicate large responses and keep opaque state in memory until completion.
+type compactionProvenanceDigests map[string]struct{}
+
+func (digests *compactionProvenanceDigests) addPayload(payload []byte) {
+	for _, content := range compactionEncryptedContentsFromPayload(payload) {
+		if *digests == nil {
+			*digests = make(compactionProvenanceDigests)
+		}
+		(*digests)[compactionContentDigest(content)] = struct{}{}
+	}
+}
+
+type compactionAffinityContextKey struct{}
+
+func withCompactionAffinity(ctx context.Context, affinity compactionAffinityResolution) context.Context {
+	return context.WithValue(ctx, compactionAffinityContextKey{}, affinity)
+}
+
+func grokCompactionDigestsForAccount(ctx context.Context, account *auth.Account) compactionProvenanceDigests {
+	if ctx == nil || account == nil || !account.IsGrokAPI() {
+		return nil
+	}
+	affinity, ok := ctx.Value(compactionAffinityContextKey{}).(compactionAffinityResolution)
+	if !ok || !affinity.Known || affinity.CompatibilityDomain != accountCompactionDomain(account) {
+		return nil
+	}
+	return affinity.KnownDigests
 }
 
 func compactionContentDigest(encryptedContent string) string {
@@ -115,12 +146,19 @@ func decodeCompactionProvenanceRecord(raw json.RawMessage) (compactionProvenance
 }
 
 func (h *Handler) recordCompactionProvenance(ctx context.Context, account *auth.Account, encryptedContent string) error {
+	encryptedContent = strings.TrimSpace(encryptedContent)
+	if encryptedContent == "" {
+		return nil
+	}
+	return h.recordCompactionProvenanceDigest(ctx, account, compactionContentDigest(encryptedContent))
+}
+
+func (h *Handler) recordCompactionProvenanceDigest(ctx context.Context, account *auth.Account, digest string) error {
 	if h == nil || h.cache == nil || account == nil {
 		return nil
 	}
-	encryptedContent = strings.TrimSpace(encryptedContent)
 	domain := accountCompactionDomain(account)
-	if encryptedContent == "" || domain == "" || account.ID() <= 0 {
+	if digest == "" || domain == "" || account.ID() <= 0 {
 		return nil
 	}
 	if ctx == nil {
@@ -140,7 +178,7 @@ func (h *Handler) recordCompactionProvenance(ctx context.Context, account *auth.
 	if err != nil {
 		return err
 	}
-	return h.cache.SetRuntime(cacheCtx, compactionProvenanceCacheNamespace, compactionContentDigest(encryptedContent), raw, compactionProvenanceTTL())
+	return h.cache.SetRuntime(cacheCtx, compactionProvenanceCacheNamespace, digest, raw, compactionProvenanceTTL())
 }
 
 // compactionPayloadMayContainEncryptedState is a cheap prefilter that keeps
@@ -234,6 +272,14 @@ func (h *Handler) recordCompactionProvenanceFromPayload(ctx context.Context, acc
 	}
 }
 
+func (h *Handler) recordCompactionProvenanceDigests(ctx context.Context, account *auth.Account, digests compactionProvenanceDigests) {
+	for digest := range digests {
+		if err := h.recordCompactionProvenanceDigest(ctx, account, digest); err != nil {
+			log.Printf("record compaction provenance failed: account=%d err=%v", account.ID(), err)
+		}
+	}
+}
+
 func (h *Handler) resolveCompactionAffinity(ctx context.Context, body []byte) (compactionAffinityResolution, error) {
 	if h == nil || h.cache == nil {
 		return compactionAffinityResolution{}, nil
@@ -249,8 +295,13 @@ func (h *Handler) resolveCompactionAffinity(ctx context.Context, body []byte) (c
 	defer cancel()
 
 	var resolution compactionAffinityResolution
+	seen := make(compactionProvenanceDigests)
 	for _, encryptedContent := range contents {
 		digest := compactionContentDigest(encryptedContent)
+		if _, duplicate := seen[digest]; duplicate {
+			continue
+		}
+		seen[digest] = struct{}{}
 		raw, ok, err := h.cache.GetRuntime(cacheCtx, compactionProvenanceCacheNamespace, digest)
 		if err != nil {
 			// Provenance is a routing optimization; a cache outage must not
@@ -275,8 +326,10 @@ func (h *Handler) resolveCompactionAffinity(ctx context.Context, body []byte) (c
 				Known:               true,
 				CompatibilityDomain: record.CompatibilityDomain,
 				PreferredAccountID:  record.AccountID,
+				KnownDigests:        make(compactionProvenanceDigests),
 			}
 		}
+		resolution.KnownDigests[digest] = struct{}{}
 
 		record.LastSeenAt = time.Now().UTC()
 		refreshed, marshalErr := json.Marshal(record)

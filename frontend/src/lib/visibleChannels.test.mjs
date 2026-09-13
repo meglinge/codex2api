@@ -23,6 +23,7 @@ test('dashboard, accounts and the usage channel filter consume the visibility se
   assert.match(read('../App.tsx'), /<VisibleChannelsProvider>/)
   assert.match(read('../pages/Dashboard.tsx'), /useVisibleChannels\(\)/)
   assert.match(read('../pages/Accounts.tsx'), /useVisibleChannels\(\)/)
+  assert.match(read('../pages/QualityTest.tsx'), /useVisibleChannels\(\)/)
   assert.match(read('../components/ChannelFilter.tsx'), /useVisibleChannels\(\)/)
   // 直接打开被隐藏渠道的账号路由要回落到 Codex，而不是渲染一个切换器里不存在的视图。
   assert.match(read('../pages/Accounts.tsx'), /isChannelVisible\(providerView\)/)

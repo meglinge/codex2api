@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "node --experimental-strip-types --test src/lib/*.test.mjs",
+    "test:svg": "node --experimental-strip-types --test tests/qualityTestSVG.browser.test.mjs",
     "typecheck": "tsc --noEmit",
     "audit:ci": "node scripts/audit-gate.mjs"
   },
@@ -32,6 +33,8 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^6.0.1",
+    "playwright": "^1.63.0",
+    "prettier": "^3.9.6",
     "typescript": "^5.9.3",
     "vite": "^8.0.2"
   }

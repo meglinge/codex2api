@@ -699,6 +699,7 @@ type APIKeySelfUsageBreakdown struct {
 }
 
 type APIKeySelfUsageLog struct {
+	UserBilling
 	ID                     int64     `json:"id"`
 	Endpoint               string    `json:"endpoint"`
 	Model                  string    `json:"model"`
@@ -735,6 +736,10 @@ type APIKeySelfUsageLog struct {
 // populateBillingBreakdown 复用与管理端一致的计费拆解逻辑，按 effective_model + 计费档位
 // 还原输入/输出/缓存读取的费用与单价，并在与实际计费总额不一致时等比缩放对齐。
 func (l *APIKeySelfUsageLog) populateBillingBreakdown() {
+	if l.UserBillingMode == UserBillingModePerImage {
+		l.TotalCost = l.UserBilled
+		return
+	}
 	billingModel := l.EffectiveModel
 	if billingModel == "" {
 		billingModel = l.Model
@@ -996,6 +1001,7 @@ func (db *DB) listAPIKeySelfRecentLogs(ctx context.Context, apiKeyID int64, rang
 			COALESCE(image_input_tokens, 0), COALESCE(image_output_tokens, 0), COALESCE(cached_image_input_tokens, 0),
 			COALESCE(total_tokens, 0),
 			COALESCE(user_billed, 0),
+			COALESCE(user_billing_mode, ''), COALESCE(image_unit_price, 0), COALESCE(billed_image_count, 0),
 			COALESCE(NULLIF(billing_service_tier, ''), NULLIF(actual_service_tier, ''), NULLIF(service_tier, ''), ''),
 			COALESCE(stream, false),
 			COALESCE(compact, false),
@@ -1029,7 +1035,7 @@ func (db *DB) listAPIKeySelfRecentLogs(ctx context.Context, apiKeyID int64, rang
 			&item.OutputTokens,
 			&item.CachedTokens, &item.ImageInputTokens, &item.ImageOutputTokens, &item.CachedImageInputTokens,
 			&item.TotalTokens,
-			&item.UserBilled,
+			&item.UserBilled, &item.UserBillingMode, &item.ImageUnitPrice, &item.BilledImageCount,
 			&item.ServiceTier,
 			&item.Stream,
 			&item.Compact,

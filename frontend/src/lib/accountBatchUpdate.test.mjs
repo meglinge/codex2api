@@ -85,3 +85,31 @@ test("buildBatchMetadataUpdate sends null only for enabled reset fields", () => 
     scheduler_priority: null,
   });
 });
+
+test("buildBatchMetadataUpdate binds a trimmed timezone only when enabled", () => {
+  const base = {
+    ids: [1],
+    updateTags: false,
+    tags: [],
+    updateGroups: false,
+    groupIds: [],
+    updateScoreBias: false,
+    scoreBias: null,
+    updateBaseConcurrency: false,
+    baseConcurrency: null,
+    updateSchedulerPriority: false,
+    schedulerPriority: null,
+  };
+  assert.deepEqual(
+    buildBatchMetadataUpdate({ ...base, updateTimezone: true, timezone: " America/New_York " }),
+    { ids: [1], timezone: "America/New_York" },
+  );
+  assert.deepEqual(
+    buildBatchMetadataUpdate({ ...base, updateTimezone: true, timezone: "" }),
+    { ids: [1], timezone: "" },
+  );
+  assert.deepEqual(
+    buildBatchMetadataUpdate({ ...base, updateTimezone: false, timezone: "Asia/Tokyo" }),
+    { ids: [1] },
+  );
+});

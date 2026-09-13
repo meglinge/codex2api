@@ -59,7 +59,7 @@ func durationFromEnv(key string, fallback time.Duration) time.Duration {
 	}
 	d, err := time.ParseDuration(raw)
 	if err != nil || d < 0 {
-		log.Printf("[CodexTransport] %s=%q 非法，沿用默认 %s", key, raw, fallback)
+		log.Printf("[Config] %s=%q 非法，沿用默认 %s", key, raw, fallback)
 		return fallback
 	}
 	return d
@@ -550,6 +550,8 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	// 指纹收敛在 WS/HTTP 分叉前统一改写请求体，两条上游路径共享结果；请求头侧的
 	// 收敛（ApplyCodexFingerprintHeaders）从同一份「账号 + 下游头」推导，取值一致。
 	requestBody = ApplyCodexFingerprintToBody(requestBody, account, headers)
+	// 账号绑定时区：改写 environment_context 的时区/日期，与指纹收敛一样在分叉前统一处理。
+	requestBody = ApplyCodexTimezoneToBody(requestBody, account, time.Now())
 	// lite 信号收敛：签名在 payload 规则改写后采集（规则可注入/删除 WS 标记，改写
 	// 前采集会让注入失效、删除被回填），模型也已被入口映射/规则定稿——已知不支持
 	// lite 的模型带信号上游必 400，发出前剥离。
@@ -563,6 +565,11 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	if account.IsCodexAgentIdentity() {
 		wantWebsocket = false
 	}
+	telemetryAttempt := beginCodexTelemetry(codexTelemetryRequest{
+		account: account, body: requestBody, sessionID: sessionID, proxyOverride: proxyOverride,
+		apiKey: apiKey, deviceCfg: deviceCfg, headers: headers,
+	})
+	defer func() { telemetryAttempt.observeResult(upstreamResponse, upstreamErr) }()
 	poolRouteKey := ""
 	if wantWebsocket {
 		sessionID = strings.TrimSpace(sessionID)
@@ -1009,6 +1016,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	// 必须用 prepareCodexResponsesLiteTransport 之后的 headers（它可能返回克隆），
 	// 与下方 applyCodexRequestHeaders 取同一份下游头，两处推导结果才一致。
 	requestBody = ApplyCodexFingerprintToBody(requestBody, account, headers)
+	requestBody = ApplyCodexTimezoneToBody(requestBody, account, time.Now())
 	requestBody, headers = injectStoredCodexTurnState(ctx, account, requestBody, headers)
 	RecordOutboundCodexTurnState(ctx, headers.Get(codexTurnStateHeader))
 

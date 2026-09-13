@@ -353,7 +353,7 @@ func readClaudeMessagesStream(ctx context.Context, resp *http.Response, onText f
 	return readClaudeMessagesStreamObserved(ctx, resp, onText, nil)
 }
 
-func readClaudeMessagesStreamObserved(ctx context.Context, resp *http.Response, onText func(string), onEvent func([]byte)) (string, string) {
+func readClaudeMessagesStreamObserved(ctx context.Context, resp *http.Response, onText func(string), onEvent func([]byte), preserveWhitespace ...bool) (string, string) {
 	if resp == nil || resp.Body == nil {
 		return "failed", "Claude 探测响应为空"
 	}
@@ -419,8 +419,8 @@ func readClaudeMessagesStreamObserved(ctx context.Context, resp *http.Response, 
 			case "thinking_delta", "signature_delta":
 				hasThinking = true
 			}
-			if text := gjson.GetBytes(data, "delta.text").String(); strings.TrimSpace(text) != "" {
-				hasContent = true
+			if text := gjson.GetBytes(data, "delta.text").String(); text != "" && (strings.TrimSpace(text) != "" || (len(preserveWhitespace) > 0 && preserveWhitespace[0])) {
+				hasContent = hasContent || strings.TrimSpace(text) != ""
 				if onText != nil {
 					onText(text)
 				}

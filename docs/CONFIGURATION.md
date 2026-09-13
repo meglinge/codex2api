@@ -37,6 +37,16 @@ Codex2API 采用三层配置架构：
 
 ---
 
+## 生图按张计费
+
+在管理后台 **模型定价**（`/admin/model-pricing`）找到图片模型，把「用户生图计费」切换为「按成功图片张数」，填写大于 0 的每张美元单价后保存。默认仍为 Token 计费；恢复默认价格会同时恢复 Token 计费。例如单价 `$0.05`，成功返回 2 张图片扣 `$0.10`，Key 的 `$10` 额度剩余 `$9.90`。
+
+- 按实际成功图片张数收费，不按 HTTP 请求数收费；失败、取消和内部重试不收图片费用。多图任务部分成功时只结算成功部分。
+- 图片 API（`/v1/images/generations`、`/v1/images/edits`，含流式）在成功响应后记账；工作台任务在图片保存完成后结算，无法保存或解码的结果不收费。
+- Token 价格继续核算上游成本（`account_billed`）；用户费用（`user_billed`）按张计算，用于 Key 累计额度、总消费及分组/账号预算，不额外叠加 Token 费用。文本模型通过 Responses 内嵌图片工具的请求仍沿用 Token 计费。
+- 每条用量记录保存计费方式、单价和收费张数，调价不重算历史记录。配置按实际生效的模型定价键匹配：GPT Image 2.5 的日期和 2K/4K 别名共用对应 Flare/Sunburst 价格；GPT Image 2 的基础、2K、4K 模型可分别设置。
+- 公开工作台在生成按钮上方显示所选模型的每张单价，Key 旁显示剩余额度。额度沿用异步结算机制；这不是预扣余额或并发余额预留，并发/批量请求仍可能超过剩余额度。
+
 ## 环境变量配置
 
 ### 核心服务配置
@@ -67,8 +77,12 @@ Codex2API 采用三层配置架构：
 | `CODEX_COMPACTION_AFFINITY_TTL` | 否 | `168h` | 加密压缩状态的来源亲和 TTL。缓存仅保存密文的 SHA-256 摘要、来源账号和兼容域；已知状态不会跨 Codex 官方、不同 Responses 中转或 Grok 上游流转 |
 | `CODEX_FINGERPRINT_DEBUG` | 否 | `false` | 输出脱敏指纹策略诊断日志，不记录 token |
 | `CODEX_REQUEST_COMPRESSION` | 否 | 跟随系统设置 | 覆盖系统设置「Codex HTTP 请求体压缩」。`zstd`/`on`/`true`/`1` 强制开启，`off`/`false`/`0` 强制关闭，未设置或取值无法识别时以系统设置为准。作为部署级逃生阀存在：DB 不可达或后台打不开时仍可整机切换 |
+| `CODEX_TELEMETRY_ENABLED` | 否 | 跟随系统设置 | 设为 `false` 时无视管理后台「客户端遥测」开关，部署层强制关闭模拟遥测外发 |
+| `CODEX_STATSIG_API_KEY` | 否 | 内置公开 key | 覆盖 Codex Desktop/CLI 共用的公开 Statsig SDK key，仅遥测开启时使用 |
 | `CODEX_SESSION_HEADER_MODE` | 否 | `native` | 出站会话头形态。`native` 发真实客户端的 `session-id` / `thread-id` / `x-client-request-id`；`legacy` 回退到旧的 `Session_id`（WS 另带 `Conversation_id`） |
 | `CODEX_SESSION_HEADER_ALIGN_CONVERGED` | 否 | `false` | 开启后 `session-id` 头改用指纹收敛后的会话身份，与 turn metadata 的 `session_id` 对齐。默认关：请求体 `prompt_cache_key` 始终独立隔离，但上游是否也拿该头参与缓存分组无法从客户端源码确认 |
+| `DOWNSTREAM_HTTP_KEEPALIVE_INTERVAL` | 否 | `30s` | 下游 HTTP/SSE 保活周期，使用 Go duration；`0` 关闭。流式端点从首个心跳起建立 SSE 200，发送注释或 Messages ping；非流式端点发送 HTTP 102 |
+| `DOWNSTREAM_WS_KEEPALIVE_INTERVAL` | 否 | `45s` | 下游 WebSocket Ping 周期，使用 Go duration；`0` 关闭。覆盖 Responses、Realtime 与 Live Sideband |
 
 > `CODEX_UPSTREAM_TRANSPORT` 只控制 HTTP 入站请求转发到 Codex 上游时使用 `http` 还是 `ws`。客户端侧 WebSocket 入口独立可用：使用 `GET ws://<host>/v1/responses` 建连，首帧发送 `response.create` JSON，服务端会通过 Codex 上游 WS 返回 Responses 事件帧。
 
@@ -151,6 +165,16 @@ Codex2API 采用三层配置架构：
 启动自动创建修订表和 PostgreSQL/SQLite 触发器，无需手工迁移。关闭两级缓存后仍保留这些表和触发器，便于混合版本部署；旧版策略只对无访问约束的 Key 缓存元数据，并合并同一时刻的相同 Key 查询。
 
 `GET /api/admin/ops/overview` 的 `api_key_auth_cache` 提供开关、L1 条目/字节数、本地/远端命中、数据库配置加载次数、动态额度读取次数、修订号复核次数、失效、淘汰、超限旁路和错误计数。评估收益时应分开看配置回源与动态额度查询。
+
+#### Codex 客户端遥测
+
+**实验性功能，默认关闭。** 开启后，Codex OAuth 的普通 Responses 请求会按所选 Codex Desktop/CLI 指纹异步发送客户端遥测。分析事件发送到 `chatgpt.com/backend-api/codex/analytics-events/events`，OTLP metrics 发送到 `ab.chatgpt.com/otlp/v1/metrics`；失败不会影响代理响应，沿用账号的代理地址，Resin 启用时与 `/responses` 一样经反代发出。注意：工具调用、文件修改、hook 等事件是随机模拟生成的，并非对真实请求的观测，与上游侧可见的请求流可能不一致；是否开启由部署者自行评估。
+
+管理后台「系统设置 → Codex → 客户端遥测」可实时开关，字段为 `codex_telemetry_enabled`（新装与升级安装均默认关闭）。`CODEX_TELEMETRY_ENABLED=false` 是部署层强制关闭开关，无视后台设置。`CODEX_STATSIG_API_KEY` 可覆盖内置的公开 SDK key；当前 Codex Desktop 与 Codex CLI 使用同一个 key。
+
+事件按 Codex CLI 的结构模拟：首次观察到的 thread 使用 `codex_thread_initialized`，每轮生成 `codex_turn_event`，结束时生成 4 个 `codex_hook_run`。`codex_dynamic_tool_call_event` 每轮随机 40%，命中后其中 50% 同时生成 `codex_command_execution_event`；`codex_file_change_event` 每轮随机 20%，并同时生成 `codex_accepted_line_fingerprints`，其 `repo_hash` 固定为 `null`。这些随机事件不解析请求中的命令、工具调用或 diff。
+
+原生 `codex_turn_steer_event` 只对应 App Server 的 `turn/steer` RPC；Responses 请求无法可靠识别，因此不会模拟。普通 turn 固定 `steer_count=0`，历史 assistant/tool 内容、`previous_response_id` 和恢复标记也不会被推断为 resumed。标题和 guardian 子流程使用独立的初始化事件。OTLP 首批发送 HAR 中的 62 个启动指标，随后每 60 秒增量发送本轮产生的 turn/hook/tool 指标；包含仅在后续样本出现的 4 个名称，共覆盖 66 个名称。
 
 #### 窗口用量与连接池
 
@@ -258,7 +282,11 @@ Codex 瞬时账号限流按 `15s → 30s → 60s → 120s → 240s → 300s` 退
 
 `catch_all` 是默认关闭的超级模式。开启后不再依赖已知类别或错误码清单；除明确的上游 `cyber_policy` 外，任何真实上游 HTTP、传输、流读取、`error`、`response.failed` 或未知失败都会进入持续重试，包括永久额度、余额、鉴权、无效请求和其他结构化安全策略错误。明确的上游 `cyber_policy` 始终终止当前请求，不换号、不重放。文本推理只接受上游 HTTP `200` 及协议正常终态；其他状态、失败终态及无终态 EOF 都会丢弃整次尝试并继续。管理界面的超级开关会在一次保存中同时设置 `enabled=true` 和 `catch_all=true`；关闭总开关会同步清除 `catch_all`，避免隐藏启用。
 
-持续重试会把每次流式上游尝试完整暂存；失败整次丢弃，正常终态才一次性回放。因此客户端等待时由 SSE 注释或 Responses WebSocket Ping 保活，但不再实时逐 token 收到生成结果。非流式 JSON（包括 Grok media）在进入无限重试后，会在退避、等待账号、等待响应头和读取响应体时发送标准 HTTP `102 Processing` 信息响应；它不会提交最终 JSON 状态，但中间代理可能丢弃 1xx，仍需依赖墙钟上限和客户端超时。`max_duration_seconds` 设置无限预算的墙钟时间上限（默认 600 秒，范围 1 到 900 秒），从请求第一次进入无限重试时开始，后续尝试不会重置。期限到达会立即取消上游并返回最近一次真实上游失败；仅在尚无失败可返回时使用 `504 upstream_timeout`。普通自选模式不会无限重试未选中的结构化安全策略拒绝；`catch_all` 可覆盖其他拒绝，但不能覆盖明确的上游 `cyber_policy` 或本地重试期限。
+持续重试会把每次流式上游尝试完整暂存；失败整次丢弃，正常终态才一次性回放。目标端点等待上游响应头、读取响应体或流数据时保持下游连接：Responses、Chat Completions 和 Images 在首个保活周期到达时建立 SSE 200 并发送 `: keepalive` 注释，Messages 发送 Anthropic 原生 `event: ping`；Responses、Realtime 与 Live Sideband WebSocket 使用 Ping 控制帧。原生 Grok SSE 仍保留上游帧格式并允许插入保活帧。心跳提交 SSE 后，随后的上游错误会使用协议错误事件，不再改变 HTTP 200。非流式 JSON（包括 relay/native Responses、compact、Images、Grok 图片和 Alpha Search）使用标准 HTTP `102 Processing` 信息响应，不提交最终状态或 JSON；Cloudflare 收到 102 后仍要求在 125 秒内收到最终响应，因此它只能延长等待，不是无限期保活。`max_duration_seconds` 设置无限预算的墙钟时间上限（默认 600 秒，范围 1 到 900 秒），从请求第一次进入无限重试时开始，后续尝试不会重置。期限到达会立即取消上游并返回最近一次真实上游失败；仅在尚无失败可返回时使用 `504 upstream_timeout`。普通自选模式不会无限重试未选中的结构化安全策略拒绝；`catch_all` 可覆盖其他拒绝，但不能覆盖明确的上游 `cyber_policy` 或本地重试期限。
+
+上述 HTTP/SSE 保活覆盖 `/v1/responses`（含 relay/native、stream 与 non-stream）、`/v1/chat/completions`、`/v1/messages`、`/v1/responses/compact`、`/v1/alpha/search`、`/v1/images/generations` 和 `/v1/images/edits`；视频、image jobs 与 `POST /v1/live` 不启用这套保活。Claude 原生 Messages 的首字前及已提交流保活继续由 `stream_keepalive_enabled` 共同控制，缺省为开启。
+
+配置 API Key 模型请求次数预算时，额度准入完成前不会因保活提交 SSE 200；准入或重试也不会重新开启已关闭的 Claude 保活。普通 Responses、Chat Completions 和 Messages 请求在下游取消后停止发送心跳，并沿用最多 5 秒的上游 usage 补读窗口；持续重试的响应读取仍随下游取消立即结束。
 
 单次流式尝试的暂存上限为 64 MiB，前 8 MiB 使用内存，之后写入立即 unlink 的 mode-0600 临时文件；暂存超限或存储失败会作为本地错误立即停止。当前没有跨请求的进程级暂存总预算，高并发环境需要另行限制并发并监控内存与临时磁盘。Responses HTTP 等待期间若 SSE 心跳已提交响应头，最终成功账号的 `X-Codex-Turn-State` 无法再补发，因此实现会省略该头而不会转发失败账号的状态；无法安全展开为自包含请求的账号绑定 continuation 也不会强行换号。
 
@@ -565,3 +593,9 @@ curl -H "X-Admin-Key: your-secret" http://localhost:8080/api/admin/ops/overview
 - `DATABASE_HOST is empty` - 未配置数据库主机
 - `REDIS_ADDR is empty` - Redis 模式下未配置 Redis 地址
 - `DATABASE_PATH is empty` - SQLite 模式下未配置数据路径
+
+### 惰性模式下的 Codex 授权保活
+
+管理设置 `codex_oauth_keepalive_enabled`（默认 `false`）允许惰性模式单独运行 Codex Token 续期。它使用现有 `background_refresh_interval_minutes` 巡检间隔和 AT 到期前 5 分钟的阈值，不改变额度冷却、不启用生成探针，也不影响 Claude、Grok 或 Antigravity 的刷新策略。普通模式本来就运行 Codex 续期，不依赖此开关。
+
+Codex 刷新新增 `codex_oauth_refresh_attempts` 保护表，启动时自动创建，兼容 PostgreSQL 与 SQLite。表内只保存旧 RT 的 SHA-256 指纹、刷新操作 ID 和开始时间，不保存明文 Token。成功保存全部相关凭据后删除记录；结果不确定的记录保留，防止跨实例或重启后重复消费旧 RT。已有凭据无需重新导入；已经失效的授权需重新登录恢复。

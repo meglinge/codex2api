@@ -1,9 +1,13 @@
+import { formatImageStudioQuota } from '../lib/imageStudioQuota'
 import { IMAGE_MODELS, imageQualityOptions, normalizeImageQualityForModel } from '../lib/imageStudioModels'
 import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { NavLink, useNavigate, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import {
+  ArrowRight,
+  ArrowUpRight,
   Check,
+  ChevronDown,
   Clock3,
   Copy,
   Download,
@@ -16,6 +20,7 @@ import {
   Images,
   KeyRound,
   Languages,
+  Lightbulb,
   Loader2,
   LogIn,
   LogOut,
@@ -33,7 +38,7 @@ import { api } from '../api'
 import { DEFAULT_SITE_LOGO, useBranding } from '../branding'
 import Pagination from '../components/Pagination'
 import { useTheme } from '../hooks/useTheme'
-import type { CreateImageJobPayload, ImageAsset, ImageGenerationJob } from '../types'
+import type { CreateImageJobPayload, ImageAsset, ImageGenerationJob, ImageStudioQuota } from '../types'
 import { getErrorMessage } from '../utils/error'
 import { formatBeijingTime } from '../utils/time'
 import { Badge } from '@/components/ui/badge'
@@ -49,6 +54,10 @@ import {
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
+import { SegmentedPillGroup } from '@/components/ui/segmented-pill-group'
+import { StudioArtwork, type StudioScene } from '@/components/image-studio/StudioArtwork'
+import { PortalQuota } from '@/components/image-studio/PortalQuota'
+import './image-studio-portal.css'
 
 const STORAGE_KEY = 'codex2api_image_studio_api_key'
 const PORTAL_VIEWS = ['studio', 'history', 'gallery'] as const
@@ -72,6 +81,33 @@ const FORMAT_OPTIONS = [
 const MAX_INPUT_IMAGES = 4
 const HISTORY_PAGE_SIZE = 20
 const GALLERY_PAGE_SIZE = 16
+const RECENT_JOB_COUNT = 3
+const PORTAL_INSPIRATIONS: Array<{ scene: StudioScene; size: string }> = [
+  { scene: 'landscape', size: '1536x864' },
+  { scene: 'product', size: '1024x1024' },
+  { scene: 'architecture', size: '864x1536' },
+]
+
+function PortalInspiration({ onSelect }: { onSelect: (scene: StudioScene, size: string) => void }) {
+  const { t } = useTranslation()
+  return (
+    <div className="portal-inspiration">
+      <span className="portal-eyebrow"><Lightbulb className="size-3.5" />{t('imageStudioPortal.design.inspirationEyebrow')}</span>
+      <h2>{t('imageStudioPortal.design.inspirationTitle')}</h2>
+      <p>{t('imageStudioPortal.design.inspirationDesc')}</p>
+      <div className="portal-inspiration-grid">
+        {PORTAL_INSPIRATIONS.map(({ scene, size }) => (
+          <Button key={scene} type="button" variant="ghost" className="portal-inspiration-card" onClick={() => onSelect(scene, size)}>
+            <div className="portal-inspiration-art"><StudioArtwork scene={scene} className="size-full" /><span><ArrowUpRight className="size-4" /></span></div>
+            <span className="portal-inspiration-name">{t(`imageStudioPortal.design.inspiration.${scene}.title`)}</span>
+            <span className="portal-inspiration-note">{t(`imageStudioPortal.design.inspiration.${scene}.description`)}</span>
+          </Button>
+        ))}
+      </div>
+      <span className="portal-inspiration-caption">{t('imageStudioPortal.design.inspirationCaption')}</span>
+    </div>
+  )
+}
 
 function normalizeView(value?: string): PortalView {
   return PORTAL_VIEWS.includes(value as PortalView) ? (value as PortalView) : 'studio'
@@ -164,21 +200,8 @@ function PortalTabs({ activeView, className }: { activeView: PortalView; classNa
     { view: 'history' as const, label: t('imageStudioPortal.views.history'), icon: History, to: '/image-studio/history' },
     { view: 'gallery' as const, label: t('imageStudioPortal.views.gallery'), icon: Images, to: '/image-studio/gallery' },
   ]
-  const activeIndex = Math.max(0, tabs.findIndex((tab) => tab.view === activeView))
-
   return (
-    <div
-      className={cn(
-        'relative grid w-full max-w-[22rem] grid-cols-3 rounded-xl border border-border/80 bg-muted/40 p-0.5 shadow-sm',
-        className,
-      )}
-      role="tablist"
-      aria-label={t('imageStudioPortal.title')}
-    >
-      <div
-        className="pointer-events-none absolute left-0.5 top-0.5 h-[calc(100%-0.25rem)] rounded-[0.65rem] border border-primary/15 bg-background shadow-sm transition-transform duration-300 ease-out"
-        style={{ width: 'calc((100% - 0.25rem) / 3)', transform: `translateX(${activeIndex * 100}%)` }}
-      />
+    <nav className={cn('portal-navigation', className)} aria-label={t('imageStudioPortal.title')}>
       {tabs.map((tab) => {
         const Icon = tab.icon
         const active = activeView === tab.view
@@ -186,19 +209,15 @@ function PortalTabs({ activeView, className }: { activeView: PortalView; classNa
           <NavLink
             key={tab.view}
             to={tab.to}
-            role="tab"
-            aria-selected={active}
-            className={cn(
-              'relative z-10 flex h-8 items-center justify-center gap-1 rounded-[0.65rem] px-1.5 text-xs font-semibold transition-colors sm:gap-1.5 sm:px-2 sm:text-[13px]',
-              active ? 'text-foreground' : 'text-muted-foreground hover:text-foreground',
-            )}
+            aria-current={active ? 'page' : undefined}
+            className="portal-nav-link"
           >
             <Icon className="size-3.5 shrink-0" />
-            <span className="truncate">{tab.label}</span>
+            <span>{tab.label}</span>
           </NavLink>
         )
       })}
-    </div>
+    </nav>
   )
 }
 
@@ -211,6 +230,17 @@ export default function ImageStudioPortal() {
   const activeView = normalizeView(view)
   const logoSrc = siteLogo || DEFAULT_SITE_LOGO
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const promptRef = useRef<HTMLTextAreaElement>(null)
+  const workspaceRef = useRef<HTMLDivElement>(null)
+  const [mobilePanel, setMobilePanel] = useState<'compose' | 'canvas'>('compose')
+  const [inspirationOpen, setInspirationOpen] = useState(false)
+
+  const selectMobilePanel = (panel: 'compose' | 'canvas') => {
+    setMobilePanel(panel)
+    window.requestAnimationFrame(() => {
+      if (window.matchMedia('(max-width: 1023px)').matches) workspaceRef.current?.scrollIntoView({ block: 'start' })
+    })
+  }
 
   const [apiKeyInput, setAPIKeyInput] = useState(() => readStoredAPIKey().key)
   const [remember, setRemember] = useState(() => {
@@ -218,6 +248,15 @@ export default function ImageStudioPortal() {
     return stored.key ? stored.remember : true
   })
   const [activeAPIKey, setActiveAPIKey] = useState(() => readStoredAPIKey().key)
+  const [quotaSnapshot, setQuotaSnapshot] = useState<{ key: string; value: ImageStudioQuota } | null>(null)
+  const [quotaLoading, setQuotaLoading] = useState(false)
+  const [quotaError, setQuotaError] = useState('')
+  const quotaRequestRef = useRef(0)
+  const quotaRefreshKeyRef = useRef<string | null>(null)
+  const quota = quotaSnapshot?.key === activeAPIKey ? quotaSnapshot.value : null
+  const quotaReady = quota !== null
+  const quotaLocked = quota?.status === 'quota_exhausted' || quota?.status === 'expired'
+  const quotaExpired = quota?.status === 'expired'
   const [showKey, setShowKey] = useState(false)
   const [bootstrapping, setBootstrapping] = useState(() => Boolean(readStoredAPIKey().key))
   const [loginError, setLoginError] = useState('')
@@ -269,8 +308,28 @@ export default function ImageStudioPortal() {
   }, [navigate, view])
 
   const verifyAndEnter = useCallback(async (key: string) => {
-    await api.getPortalImageJobs(key, { page: 1, pageSize: 1 })
+    return api.getPortalImageQuota(key)
   }, [])
+
+  const refreshQuota = useCallback(async () => {
+    if (!activeAPIKey || quotaRefreshKeyRef.current === activeAPIKey) return
+    const requestID = ++quotaRequestRef.current
+    quotaRefreshKeyRef.current = activeAPIKey
+    setQuotaLoading(true)
+    try {
+      const value = await api.getPortalImageQuota(activeAPIKey)
+      if (requestID !== quotaRequestRef.current) return
+      setQuotaSnapshot({ key: activeAPIKey, value })
+      setQuotaError('')
+    } catch (error) {
+      if (requestID === quotaRequestRef.current) setQuotaError(getErrorMessage(error))
+    } finally {
+      if (requestID === quotaRequestRef.current) {
+        quotaRefreshKeyRef.current = null
+        setQuotaLoading(false)
+      }
+    }
+  }, [activeAPIKey])
 
   useEffect(() => {
     if (!activeAPIKey) {
@@ -278,33 +337,67 @@ export default function ImageStudioPortal() {
       return
     }
     let cancelled = false
+    const requestID = ++quotaRequestRef.current
+    quotaRefreshKeyRef.current = null
+    setQuotaError('')
+    setQuotaLoading(true)
     setBootstrapping(true)
     void verifyAndEnter(activeAPIKey)
-      .then(() => {
-        if (!cancelled) setLoginError('')
+      .then(value => {
+        if (cancelled || requestID !== quotaRequestRef.current) return
+        setQuotaSnapshot({ key: activeAPIKey, value })
+        setLoginError('')
       })
       .catch((err) => {
         if (cancelled) return
         clearStoredAPIKey()
+        setQuotaSnapshot(null)
         setActiveAPIKey('')
         setLoginError(getErrorMessage(err))
       })
       .finally(() => {
-        if (!cancelled) setBootstrapping(false)
+        if (!cancelled) {
+          setBootstrapping(false)
+          setQuotaLoading(false)
+        }
       })
     return () => {
       cancelled = true
+      if (requestID === quotaRequestRef.current) quotaRequestRef.current += 1
     }
   }, [activeAPIKey, verifyAndEnter])
 
+  useEffect(() => {
+    if (!activeAPIKey || bootstrapping) return
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') void refreshQuota()
+    }
+    const timer = window.setInterval(refreshWhenVisible, 30000)
+    window.addEventListener('focus', refreshWhenVisible)
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refreshWhenVisible)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+    }
+  }, [activeAPIKey, bootstrapping, refreshQuota])
+
+  const settlementRefreshDelay = (quota?.refresh_after_seconds ?? 6) * 1000
+  useEffect(() => {
+    if (!activeAPIKey || !currentJob || !['succeeded', 'failed'].includes(currentJob.status)) return
+    void refreshQuota()
+    const timer = window.setTimeout(() => void refreshQuota(), settlementRefreshDelay)
+    return () => window.clearTimeout(timer)
+  }, [activeAPIKey, currentJob?.id, currentJob?.status, refreshQuota, settlementRefreshDelay])
+
   const loadHistory = useCallback(
-    async (key = activeAPIKey, page = historyPage) => {
+    async (key = activeAPIKey, page = historyPage, pageSize = HISTORY_PAGE_SIZE) => {
       if (!key) return
       setHistoryLoading(true)
       try {
         const res = await api.getPortalImageJobs(key, {
           page,
-          pageSize: HISTORY_PAGE_SIZE,
+          pageSize,
         })
         setHistoryJobs(res.jobs ?? [])
         setHistoryTotal(res.total ?? 0)
@@ -338,16 +431,22 @@ export default function ImageStudioPortal() {
   )
 
   useEffect(() => {
-    if (!activeAPIKey || bootstrapping) return
+    if (!activeAPIKey || bootstrapping || !quotaReady || quotaExpired) return
+    if (activeView === 'studio') void loadHistory(activeAPIKey, 1, RECENT_JOB_COUNT)
     if (activeView === 'history') void loadHistory()
     if (activeView === 'gallery') void loadAssets()
-  }, [activeAPIKey, activeView, bootstrapping, loadAssets, loadHistory])
+  }, [activeAPIKey, activeView, bootstrapping, loadAssets, loadHistory, quotaExpired, quotaReady])
 
   useEffect(() => {
-    if (!currentJob || !['queued', 'running'].includes(currentJob.status) || !activeAPIKey) return
+    if (!currentJob || !['queued', 'running'].includes(currentJob.status) || !activeAPIKey || quotaExpired) return
+    let cancelled = false
+    let polling = false
     const timer = window.setInterval(async () => {
+      if (polling) return
+      polling = true
       try {
         const res = await api.getPortalImageJob(activeAPIKey, currentJob.id, { includeCache: true })
+        if (cancelled) return
         setCurrentJob(res.job)
         if (!['queued', 'running'].includes(res.job.status)) {
           void loadHistory(activeAPIKey, 1)
@@ -355,10 +454,15 @@ export default function ImageStudioPortal() {
         }
       } catch {
         // keep polling quiet
+      } finally {
+        polling = false
       }
     }, 2500)
-    return () => window.clearInterval(timer)
-  }, [activeAPIKey, currentJob, loadAssets, loadHistory])
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [activeAPIKey, currentJob, loadAssets, loadHistory, quotaExpired])
 
   useEffect(() => {
     assetURLsRef.current = assetURLs
@@ -371,14 +475,17 @@ export default function ImageStudioPortal() {
   }, [])
 
   const visibleAssets = useMemo(() => {
-    const merged = [...(currentJob?.assets ?? []), ...assets, ...historyJobs.flatMap((job) => job.assets ?? [])]
+    const historyAssets = activeView === 'studio'
+      ? historyJobs.slice(0, RECENT_JOB_COUNT).flatMap(job => job.assets?.slice(0, 1) ?? [])
+      : historyJobs.flatMap(job => job.assets ?? [])
+    const merged = [...(currentJob?.assets ?? []), ...assets, ...historyAssets]
     const seen = new Set<number>()
     return merged.filter((asset) => {
       if (seen.has(asset.id)) return false
       seen.add(asset.id)
       return true
     })
-  }, [assets, currentJob, historyJobs])
+  }, [activeView, assets, currentJob, historyJobs])
 
   useEffect(() => {
     if (!activeAPIKey) return
@@ -446,6 +553,10 @@ export default function ImageStudioPortal() {
   }
 
   const handleLogout = () => {
+    quotaRequestRef.current += 1
+    quotaRefreshKeyRef.current = null
+    setQuotaSnapshot(null)
+    setQuotaError('')
     clearStoredAPIKey()
     setActiveAPIKey('')
     setAPIKeyInput('')
@@ -570,6 +681,10 @@ export default function ImageStudioPortal() {
 
   const submitJob = async () => {
     if (!activeAPIKey) return
+    if (quotaLocked) {
+      showToast(t(`imageStudioPortal.quota.${quota.status}`))
+      return
+    }
     const payload = createPayload()
     const isEdit = Boolean(payload.input_images?.length)
     if (!payload.prompt) {
@@ -586,11 +701,14 @@ export default function ImageStudioPortal() {
         ? await api.createPortalImageEditJob(activeAPIKey, payload)
         : await api.createPortalImageJob(activeAPIKey, payload)
       setCurrentJob(res.job)
+      setInspirationOpen(false)
+      selectMobilePanel('canvas')
       showToast(t('images.jobCreated'))
       setHistoryPage(1)
       void loadHistory(activeAPIKey, 1)
     } catch (err) {
       showToast(getErrorMessage(err))
+      void refreshQuota()
     } finally {
       setSubmitting(false)
     }
@@ -668,9 +786,27 @@ export default function ImageStudioPortal() {
 
   const usePromptInStudio = (text: string) => {
     setPrompt(text)
+    setMobilePanel('compose')
     closePreview()
     navigate('/image-studio/studio')
     showToast(t('imageStudioPortal.promptFilled'))
+  }
+
+  const applyInspiration = (scene: StudioScene, presetSize: string) => {
+    setPrompt(t(`imageStudioPortal.design.inspiration.${scene}.prompt`))
+    setSize(presetSize)
+    setImageToImageMode(false)
+    setInspirationOpen(false)
+    setMobilePanel('compose')
+    window.requestAnimationFrame(() => {
+      promptRef.current?.focus({ preventScroll: true })
+      if (window.matchMedia('(max-width: 1023px)').matches) workspaceRef.current?.scrollIntoView({ block: 'start' })
+    })
+  }
+
+  const openInspiration = () => {
+    setInspirationOpen(true)
+    selectMobilePanel('canvas')
   }
 
   const statusLabel = (status: string) => {
@@ -680,7 +816,7 @@ export default function ImageStudioPortal() {
   }
 
   const toolbar = (
-    <div className="flex items-center gap-2">
+    <div className="portal-toolbar">
       <Button
         variant="outline"
         size="icon-sm"
@@ -802,40 +938,26 @@ export default function ImageStudioPortal() {
   const resultAssets = currentJob?.assets ?? []
 
   return (
-    <div className="relative min-h-dvh bg-background text-foreground">
-      {/* Ambient surface — soft mesh so the page never feels like empty white */}
-      <div
-        aria-hidden="true"
-        className="pointer-events-none fixed inset-0 -z-10 opacity-100 [background:
-          radial-gradient(ellipse 70% 50% at 15% -10%, color-mix(in oklab, var(--color-primary) 12%, transparent), transparent 55%),
-          radial-gradient(ellipse 55% 45% at 90% 0%, color-mix(in oklab, var(--color-primary) 8%, transparent), transparent 50%),
-          linear-gradient(180deg, color-mix(in oklab, var(--color-muted) 55%, var(--color-background)), var(--color-background) 42%)
-        ]"
-      />
-
-      <header className="sticky top-0 z-20 border-b border-border/60 bg-card/75 shadow-sm backdrop-blur-xl supports-[backdrop-filter]:bg-card/65">
-        <div className="mx-auto flex h-14 max-w-[1440px] items-center gap-3 px-3 sm:px-5 lg:px-6">
-          <div className="flex min-w-0 shrink-0 items-center gap-2.5">
+    <div className="image-studio-portal">
+      <header className="portal-header">
+        <div className="portal-header-inner">
+          <div className="portal-brand">
             <img src={logoSrc} alt={siteName} className="size-8 rounded-lg object-cover shadow-sm ring-1 ring-border/60" />
-            <div className="min-w-0 hidden min-[400px]:block">
-              <h1 className="truncate text-sm font-semibold tracking-tight leading-tight">{t('imageStudioPortal.title')}</h1>
+            <div className="min-w-0">
+              <div className="portal-brand-title truncate text-sm font-semibold tracking-tight leading-tight">{t('imageStudioPortal.title')}</div>
               <div className="truncate text-[11px] text-muted-foreground leading-tight">{siteName}</div>
             </div>
           </div>
 
-          <div className="flex min-w-0 flex-1 justify-center px-1">
+          <div className="portal-header-navigation">
             <PortalTabs activeView={activeView} />
           </div>
 
-          <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+          <PortalQuota maskedKey={maskKey(activeAPIKey)} quota={quota} loading={quotaLoading} error={quotaError} onRefresh={() => void refreshQuota()} />
+
+          <div className="portal-account">
             {toolbar}
-            <div className="hidden items-center gap-1.5 rounded-lg border border-border/70 bg-muted/35 px-2 py-1 md:flex">
-              <KeyRound className="size-3.5 text-primary" />
-              <span className="max-w-[7.5rem] truncate font-mono text-[11px] text-muted-foreground lg:max-w-[9rem]">
-                {maskKey(activeAPIKey)}
-              </span>
-            </div>
-            <Button variant="outline" size="sm" className="h-8 px-2.5" onClick={handleLogout}>
+            <Button variant="ghost" size="sm" className="portal-logout" onClick={handleLogout} aria-label={t('imageStudioPortal.logout')}>
               <LogOut className="size-3.5" />
               <span className="hidden sm:inline">{t('imageStudioPortal.logout')}</span>
             </Button>
@@ -843,97 +965,76 @@ export default function ImageStudioPortal() {
         </div>
       </header>
 
-      <main
-        className={cn(
-          'mx-auto w-full max-w-[1440px] px-3 sm:px-5 lg:px-6',
-          activeView === 'studio' ? 'py-3 sm:py-4' : 'py-4 sm:py-5',
-        )}
-      >
+      <main className="portal-main">
+        {quotaLocked ? <div className="portal-quota-notice" role="status">{t(`imageStudioPortal.quota.${quota.status}`)}</div> : null}
         {activeView === 'studio' ? (
-          <div
-            className={cn(
-              'grid animate-image-studio-fade-in gap-3',
-              'lg:h-[calc(100dvh-3.5rem-1.5rem)] lg:grid-cols-[minmax(320px,400px)_minmax(0,1fr)] lg:items-stretch lg:gap-3',
-              'xl:grid-cols-[minmax(340px,420px)_minmax(0,1fr)] xl:gap-4',
-            )}
-          >
-            {/* Compose — equal height with canvas, shared header + sticky footer */}
-            <Card className="flex min-h-[min(60dvh,560px)] flex-col overflow-hidden border-border/70 shadow-md shadow-black/[0.03] dark:shadow-black/20 lg:min-h-0 lg:h-full">
-              {/* Panel header — same height as canvas header for optical alignment */}
-              <div className="flex h-14 shrink-0 items-center border-b border-border/60 bg-card px-4">
-                <div className="min-w-0">
-                  <div className="text-sm font-semibold tracking-tight leading-none">
-                    {t('imageStudioPortal.studioHeading')}
-                  </div>
-                  <p className="mt-1 truncate text-[11px] leading-none text-muted-foreground">
-                    {t('imageStudioPortal.studioDesc')}
-                  </p>
-                </div>
+          <>
+          <div className="portal-intro">
+            <div><span className="portal-eyebrow">{t('imageStudioPortal.design.eyebrow')}</span><h1>{t('imageStudioPortal.design.title')}</h1></div>
+            <p>{t('imageStudioPortal.design.subtitle')}</p>
+          </div>
+          <div ref={workspaceRef} className="portal-workspace" data-mobile-panel={mobilePanel}>
+            <SegmentedPillGroup
+              className="portal-mobile-switch"
+              label={t('imageStudioPortal.design.mobileView')}
+              value={mobilePanel}
+              onChange={selectMobilePanel}
+              options={[
+                { value: 'compose', label: t('imageStudioPortal.design.editPanel'), icon: <Pencil className="size-4" /> },
+                { value: 'canvas', label: t('imageStudioPortal.design.canvasPanel'), icon: <ImageIcon className="size-4" /> },
+              ]}
+            />
+            <Card className="portal-composer">
+              <div className="portal-panel-heading">
+                <h2><Sparkles className="size-4" />{t('imageStudioPortal.studioHeading')}</h2>
+                <span>{t('imageStudioPortal.design.yourPrompt')}</span>
               </div>
 
-              <div className="flex min-h-0 flex-1 flex-col">
-                <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-4 py-3.5">
-                  <div className="inline-flex w-full rounded-xl border border-border/80 bg-muted/45 p-0.5">
-                    <button
-                      type="button"
-                      className={cn(
-                        'inline-flex h-9 flex-1 items-center justify-center gap-1.5 rounded-[0.65rem] px-2.5 text-xs font-semibold transition-all',
-                        imageToImageMode ? 'text-muted-foreground hover:text-foreground' : 'bg-background text-foreground shadow-sm',
-                      )}
-                      onClick={() => setImageToImageMode(false)}
-                    >
-                      <ImageIcon className="size-3.5" />
-                      {t('images.textToImage')}
-                    </button>
-                    <button
-                      type="button"
-                      className={cn(
-                        'inline-flex h-9 flex-1 items-center justify-center gap-1.5 rounded-[0.65rem] px-2.5 text-xs font-semibold transition-all',
-                        imageToImageMode
-                          ? 'bg-background text-foreground shadow-sm'
-                          : 'text-muted-foreground hover:text-foreground',
-                      )}
-                      onClick={() => setImageToImageMode(true)}
-                    >
-                      <Upload className="size-3.5" />
-                      {t('images.imageToImage')}
-                    </button>
-                  </div>
+              <div className="portal-composer-body">
+                <div className="portal-form-scroll">
+                  <SegmentedPillGroup
+                    label={t('imageStudioPortal.design.creationMode')}
+                    value={imageToImageMode ? 'edit' : 'generate'}
+                    onChange={value => setImageToImageMode(value === 'edit')}
+                    options={[
+                      { value: 'generate', label: t('images.textToImage'), icon: <Sparkles className="size-4" /> },
+                      { value: 'edit', label: t('images.imageToImage'), icon: <Upload className="size-4" /> },
+                    ]}
+                  />
 
-                  <div className="grid grid-cols-2 gap-2.5">
-                    <Field label={t('images.model')}>
-                      <Select value={model} onValueChange={setModel} options={IMAGE_MODELS} compact />
-                    </Field>
-                    <Field label={t('images.size')}>
-                      <Select value={size} onValueChange={setSize} options={SIZE_OPTIONS} compact />
-                    </Field>
-                  </div>
-
-                  <label className="flex min-w-0 flex-col gap-1.5">
-                    <div className="flex h-5 items-center justify-between gap-2">
-                      <span className="text-xs font-semibold text-muted-foreground">{t('images.prompt')}</span>
-                      <span className="text-[11px] tabular-nums text-muted-foreground">
-                        {prompt.length}/8000
-                      </span>
+                  <div className="portal-prompt-field">
+                    <div className="portal-field-heading">
+                      <label htmlFor="portal-prompt">{t('images.prompt')}</label>
+                      <Button type="button" size="sm" variant="ghost" className="portal-text-action" onClick={openInspiration}><Lightbulb className="size-3.5" />{t('imageStudioPortal.design.findInspiration')}</Button>
                     </div>
+                    <div className="portal-prompt-editor">
                     <textarea
+                      id="portal-prompt"
+                      ref={promptRef}
                       value={prompt}
                       onChange={(e) => setPrompt(e.target.value)}
                       onKeyDown={(e) => {
-                        if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && prompt.trim() && !submitting) {
+                        if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && prompt.trim() && !submitting && !quotaLocked) {
                           e.preventDefault()
                           void submitJob()
                         }
                       }}
-                      rows={imageToImageMode ? 5 : 8}
-                      placeholder={t('images.promptPlaceholder')}
-                      className={cn(
-                        'w-full resize-y rounded-xl border border-input bg-background/80 px-3 py-2.5 text-sm leading-6 shadow-xs outline-none transition-[border-color,box-shadow]',
-                        'placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:bg-input/30',
-                        imageToImageMode ? 'min-h-[100px]' : 'min-h-[140px]',
-                      )}
+                      rows={5}
+                      maxLength={8000}
+                      placeholder={t('imageStudioPortal.design.promptPlaceholder')}
                     />
-                  </label>
+                    <div className="portal-prompt-footer"><span>{t('imageStudioPortal.design.promptHint')}</span><span>{prompt.length} / 8000</span></div>
+                    </div>
+                  </div>
+
+                  <div className="portal-model-settings">
+                    <Field label={t('images.model')}>
+                      <Select value={model} onValueChange={setModel} options={IMAGE_MODELS} compact />
+                    </Field>
+                    <Field label={t('images.size')}>
+                      <Select value={size} onValueChange={setSize} options={SIZE_OPTIONS.map(option => ({ ...option, label: option.value === 'auto' ? t('imageStudioPortal.design.autoSize') : option.label.replace('x', ' × ') }))} compact />
+                    </Field>
+                  </div>
 
                   {imageToImageMode ? (
                     <div className="flex min-w-0 flex-col gap-1.5">
@@ -1053,17 +1154,20 @@ export default function ImageStudioPortal() {
                     </div>
                   ) : null}
 
-                  <div className="overflow-hidden rounded-xl border border-border/80">
-                    <button
+                  <div className="portal-advanced">
+                    <Button
                       type="button"
+                      variant="ghost"
                       onClick={() => setAdvancedOpen((v) => !v)}
-                      className="flex h-9 w-full items-center justify-between gap-2 px-3 text-left text-xs font-semibold text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
+                      aria-expanded={advancedOpen}
+                      aria-controls="portal-advanced-settings"
+                      className="portal-advanced-toggle"
                     >
                       <span>{t('images.advancedParams')}</span>
-                      <span className={cn('text-[10px] transition-transform', advancedOpen && 'rotate-180')}>▾</span>
-                    </button>
+                      <ChevronDown className={cn('size-4 transition-transform motion-reduce:transition-none', advancedOpen && 'rotate-180')} />
+                    </Button>
                     {advancedOpen ? (
-                      <div className="grid grid-cols-2 gap-2.5 border-t border-border px-3 py-3">
+                      <div id="portal-advanced-settings" className="grid grid-cols-2 gap-3 border-t border-border p-3">
                         <Field label={t('images.quality')}>
                           <Select value={quality} onValueChange={setQuality} options={imageQualityOptions(model)} compact />
                         </Field>
@@ -1085,53 +1189,48 @@ export default function ImageStudioPortal() {
                   </div>
                 </div>
 
-                {/* Footer — aligns with bottom of canvas card */}
-                <div className="shrink-0 space-y-1.5 border-t border-border/60 bg-card px-4 py-3">
+                <div className="portal-composer-footer">
+                  {quota?.image_pricing?.[model]?.user_billing_mode === 'per_image' ? <p className="text-center text-xs text-muted-foreground" role="status">{t('imageStudioPortal.quota.imagePrice', { price: formatImageStudioQuota(quota.image_pricing[model].image_unit_price) })}</p> : null}
                   <Button
-                    className={cn(
-                      'h-10 w-full',
-                      prompt.trim() && !submitting && 'shadow-[0_0_0_1px_color-mix(in_oklab,var(--color-primary)_30%,transparent),0_10px_24px_-12px_color-mix(in_oklab,var(--color-primary)_55%,transparent)]',
-                    )}
-                    disabled={submitting || !prompt.trim()}
+                    className="portal-generate"
+                    disabled={submitting || !prompt.trim() || quotaLocked}
                     onClick={() => void submitJob()}
                   >
-                    {submitting ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
+                    {submitting ? <RefreshCw className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
                     {t('images.generate')}
                   </Button>
-                  <p className="text-center text-[10px] leading-none text-muted-foreground">
-                    ⌘/Ctrl + Enter
-                  </p>
+                  <div className="portal-submit-hint"><span>{t('imageStudioPortal.design.privateWorkspace')}</span><kbd>⌘ / Ctrl + Enter</kbd></div>
                 </div>
               </div>
             </Card>
 
-            {/* Canvas — same outer height as compose */}
-            <Card className="flex min-h-[min(52dvh,420px)] flex-col overflow-hidden border-border/70 shadow-md shadow-black/[0.03] dark:shadow-black/20 lg:min-h-0 lg:h-full">
-              <div className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border/60 bg-card px-4">
+            <div className="portal-preview-column">
+            <Card className="portal-canvas">
+              <div className="portal-panel-heading">
                 <div className="min-w-0">
-                  <div className="text-sm font-semibold tracking-tight leading-none">{t('imageStudioPortal.canvasTitle')}</div>
-                  <p className="mt-1 truncate text-[11px] leading-none text-muted-foreground">
-                    {currentJob
+                  <h2>{t('imageStudioPortal.canvasTitle')}</h2>
+                  <p className="portal-canvas-subtitle">
+                    {currentJob && !inspirationOpen
                       ? busy
                         ? statusLabel(currentJob.status)
                         : t('imageStudioPortal.latestResult') + ` · #${currentJob.id}`
-                      : t('imageStudioPortal.canvasHint')}
+                      : t('imageStudioPortal.design.canvasReady')}
                   </p>
                 </div>
-                {resultAssets[0] ? (
+                {inspirationOpen && currentJob ? <Button size="sm" variant="ghost" className="portal-text-action" onClick={() => setInspirationOpen(false)}>{t('imageStudioPortal.design.backToResult')}<ArrowRight className="size-3.5" /></Button> : resultAssets[0] && !inspirationOpen ? (
                   <div className="flex shrink-0 gap-1">
-                    <Button size="sm" variant="outline" className="h-8" onClick={() => openPreview(resultAssets[0], currentJob?.prompt)}>
+                    <Button size="sm" variant="outline" className="h-8" onClick={() => openPreview(resultAssets[0], currentJob?.prompt)} aria-label={t('imageStudioPortal.viewFullscreen')}>
                       <Expand className="size-3.5" />
                       <span className="hidden sm:inline">{t('imageStudioPortal.preview')}</span>
                     </Button>
-                    <Button size="sm" variant="outline" className="h-8" onClick={() => void downloadAsset(resultAssets[0])}>
+                    <Button size="sm" variant="outline" className="h-8" onClick={() => void downloadAsset(resultAssets[0])} aria-label={t('images.download')}>
                       <Download className="size-3.5" />
                     </Button>
                   </div>
                 ) : null}
               </div>
-              <div className="image-studio-canvas-bg relative flex min-h-0 flex-1 items-center justify-center p-4 sm:p-5">
-                {currentJob ? (
+              <div className={cn('portal-canvas-body', currentJob && !inspirationOpen && 'portal-canvas-has-job')}>
+                {currentJob && !inspirationOpen ? (
                   busy ? (
                     <div className="flex w-full max-w-md flex-col items-center gap-4 animate-image-studio-fade-in">
                       <div className="image-studio-checkerboard relative aspect-[16/10] w-full overflow-hidden rounded-2xl border border-border/70 shadow-inner">
@@ -1142,7 +1241,7 @@ export default function ImageStudioPortal() {
                           <div className="h-full w-1/2 animate-image-studio-progress rounded-full bg-primary/70" />
                         </div>
                         <div className="text-sm font-medium">{statusLabel(currentJob.status)}</div>
-                        <div className="text-xs text-muted-foreground">#{currentJob.id}</div>
+                        <div className="text-xs text-muted-foreground">{t('imageStudioPortal.design.runningHint')}</div>
                       </div>
                     </div>
                   ) : currentJob.status === 'failed' ? (
@@ -1169,11 +1268,12 @@ export default function ImageStudioPortal() {
                             return (
                               <div
                                 key={asset.id}
-                                className="group flex w-full max-w-[min(100%,420px)] flex-col overflow-hidden rounded-2xl border border-border/70 bg-background/85 shadow-sm"
+                                className="portal-result-card group"
                               >
-                                <button
+                                <Button
                                   type="button"
-                                  className="image-studio-checkerboard relative aspect-[4/3] w-full overflow-hidden text-left"
+                                  variant="ghost"
+                                  className="portal-result-image image-studio-checkerboard"
                                   onClick={() => openPreview(asset, currentJob.prompt)}
                                   title={t('imageStudioPortal.viewFullscreen')}
                                 >
@@ -1181,7 +1281,7 @@ export default function ImageStudioPortal() {
                                     <img
                                       src={src}
                                       alt={asset.filename}
-                                      className="size-full object-cover transition-transform duration-300 group-hover:scale-[1.015]"
+                                      className="portal-result-original"
                                     />
                                   ) : (
                                     <div className="flex size-full items-center justify-center text-muted-foreground">
@@ -1194,7 +1294,7 @@ export default function ImageStudioPortal() {
                                       {t('imageStudioPortal.viewFullscreen')}
                                     </span>
                                   </div>
-                                </button>
+                                </Button>
                                 <div className="flex items-center justify-between gap-2 border-t border-border/60 px-3 py-2">
                                   <span className="truncate text-[11px] text-muted-foreground">
                                     {asset.actual_size || (asset.width && asset.height ? `${asset.width}x${asset.height}` : asset.model)}
@@ -1205,10 +1305,11 @@ export default function ImageStudioPortal() {
                                       variant="ghost"
                                       className="size-7"
                                       onClick={() => openPreview(asset, currentJob.prompt)}
+                                      aria-label={t('imageStudioPortal.viewFullscreen')}
                                     >
                                       <Expand className="size-3.5" />
                                     </Button>
-                                    <Button size="icon-sm" variant="ghost" className="size-7" onClick={() => void downloadAsset(asset)}>
+                                    <Button size="icon-sm" variant="ghost" className="size-7" onClick={() => void downloadAsset(asset)} aria-label={t('images.download')}>
                                       <Download className="size-3.5" />
                                     </Button>
                                   </div>
@@ -1218,36 +1319,32 @@ export default function ImageStudioPortal() {
                           })}
                         </div>
                       )}
-                      <p className="text-[11px] text-muted-foreground">{t('imageStudioPortal.clickToPreview')}</p>
+                      <p className="portal-result-hint">{t('imageStudioPortal.design.fullImageHint')}</p>
                     </div>
                   )
                 ) : (
-                  <div className="flex w-full max-w-md flex-col items-center gap-3 text-center animate-image-studio-fade-in">
-                    <div className="flex size-14 items-center justify-center rounded-2xl border border-border/70 bg-background/80 shadow-sm">
-                      <ImageIcon className="size-6 text-primary/70" />
-                    </div>
-                    <div>
-                      <div className="text-sm font-semibold text-foreground">{t('imageStudioPortal.emptyResult')}</div>
-                      <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                        {t('imageStudioPortal.emptyResultHint')}
-                      </p>
-                    </div>
-                    <div className="flex flex-wrap justify-center gap-1.5">
-                      <span className="rounded-md border border-border/70 bg-background/70 px-2 py-1 text-[10px] font-medium text-muted-foreground">
-                        {t('images.textToImage')}
-                      </span>
-                      <span className="rounded-md border border-border/70 bg-background/70 px-2 py-1 text-[10px] font-medium text-muted-foreground">
-                        {t('images.imageToImage')}
-                      </span>
-                      <span className="rounded-md border border-border/70 bg-background/70 px-2 py-1 text-[10px] font-medium text-muted-foreground">
-                        {t('imageStudioPortal.fromGallery')}
-                      </span>
-                    </div>
-                  </div>
+                  <PortalInspiration onSelect={applyInspiration} />
                 )}
               </div>
             </Card>
+            <section className="portal-recent" aria-label={t('imageStudioPortal.design.recentTitle')}>
+              <div className="portal-recent-heading"><h2>{t('imageStudioPortal.design.recentTitle')}</h2><NavLink to="/image-studio/history">{t('imageStudioPortal.design.allHistory')}<ArrowRight className="size-3.5" /></NavLink></div>
+              {historyLoading && historyJobs.length === 0 ? <p className="portal-recent-empty">{t('common.loading')}</p> : historyJobs.length === 0 ? <p className="portal-recent-empty">{t('imageStudioPortal.design.recentEmpty')}</p> : (
+                <div className="portal-recent-grid">
+                  {historyJobs.slice(0, RECENT_JOB_COUNT).map(job => {
+                    const asset = job.assets?.[0]
+                    const src = asset ? imageSrc(asset, assetURLs) : ''
+                    return <Button key={job.id} type="button" variant="ghost" className="portal-recent-item" onClick={() => { setCurrentJob(job); setInspirationOpen(false); selectMobilePanel('canvas') }}>
+                      <span className="portal-recent-thumb">{src ? <img src={src} alt="" loading="lazy" /> : <ImageIcon className="size-4" />}</span>
+                      <span className="portal-recent-description"><span>{job.prompt}</span><small><span className={cn('portal-status-dot', `portal-status-${job.status}`)} />{statusLabel(job.status)}</small></span>
+                    </Button>
+                  })}
+                </div>
+              )}
+            </section>
+            </div>
           </div>
+          </>
         ) : null}
 
         {activeView === 'history' ? (

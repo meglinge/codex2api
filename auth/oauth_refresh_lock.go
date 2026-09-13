@@ -356,23 +356,38 @@ func (s *Store) reloadOAuthCredentialsAfterLock(
 	}
 	refreshToken := strings.TrimSpace(row.GetCredential("refresh_token"))
 	accessToken := strings.TrimSpace(row.GetCredential("access_token"))
+	sessionToken := strings.TrimSpace(row.GetCredential("session_token"))
+	acc.mu.RLock()
+	sessionChanged := sessionToken != strings.TrimSpace(acc.SessionToken)
+	acc.mu.RUnlock()
 	refreshChanged := refreshToken != "" && refreshToken != strings.TrimSpace(lockedRefreshToken)
 	accessChanged := accessToken != "" && accessToken != strings.TrimSpace(lockedAccessToken)
-	if !refreshChanged && !accessChanged {
+	if !refreshChanged && !accessChanged && !sessionChanged {
+		acc.mu.Lock()
+		if acc.CredentialGeneration > row.CredentialGeneration {
+			acc.mu.Unlock()
+			return false, false, fmt.Errorf("凭据版本在重载期间已变更")
+		}
+		acc.CredentialGeneration = row.CredentialGeneration
+		acc.mu.Unlock()
 		return false, false, nil
 	}
 
-	sessionToken := strings.TrimSpace(row.GetCredential("session_token"))
 	expiresAt := parseOAuthCredentialExpiry(row.GetCredential("expires_at"))
 
 	acc.mu.Lock()
+	if acc.CredentialGeneration > row.CredentialGeneration {
+		acc.mu.Unlock()
+		return false, false, fmt.Errorf("凭据版本在重载期间已变更")
+	}
+	acc.CredentialGeneration = row.CredentialGeneration
 	if refreshToken != "" {
 		acc.RefreshToken = refreshToken
 	}
 	if accessToken != "" {
 		acc.AccessToken = accessToken
 	}
-	if sessionToken != "" {
+	if sessionToken != "" || sessionChanged {
 		acc.SessionToken = sessionToken
 	}
 	if !expiresAt.IsZero() {

@@ -50,6 +50,7 @@ import type {
   AccountsPageParams,
   ClaudeCredentialExportEntry,
 } from "../types";
+import SubscriptionBadge from "../components/SubscriptionBadge";
 import AccountUsageModal from "../components/AccountUsageModal";
 import ClaudeConnectionTestModal from "../components/ClaudeConnectionTestModal";
 import AccountDetailSheet from "../components/AccountDetailSheet";
@@ -2473,7 +2474,7 @@ function ClaudeAccountRow({
             ) : (
               <span className="text-[12px] text-muted-foreground">-</span>
             )}
-            {!isAPIKey ? <ClaudeExpiryBadge expiresAt={acc.subscription_expires_at} planType={acc.plan_type} /> : null}
+            {!isAPIKey ? <SubscriptionBadge accountId={acc.id} subscription={acc.subscription} /> : null}
           </div>
         </TableCell>
       ) : null}
@@ -2629,49 +2630,6 @@ function ClaudePriorityBadge({ acc }: { acc: AccountRow }) {
       P {value}
     </span>
   );
-}
-
-// ClaudeExpiryBadge 订阅到期提醒(与 Codex ExpiryBadge 同款阈值:≤3d 红、≤7d 琥珀、已过期灰)。
-function ClaudeExpiryBadge({ expiresAt, planType }: { expiresAt?: string; planType?: string }) {
-  const { t, i18n } = useTranslation();
-  if (!expiresAt) return null;
-  const plan = (planType || "").toLowerCase().trim();
-  if (plan === "" || plan === "free") return null;
-  const timestamp = Date.parse(expiresAt);
-  if (Number.isNaN(timestamp)) return null;
-  const days = Math.floor((timestamp - Date.now()) / 86_400_000);
-  const localDate = new Date(timestamp).toLocaleDateString(i18n.language);
-  if (days < 0) {
-    return (
-      <span
-        title={t("accounts.subscriptionExpiredTitle", { date: localDate })}
-        className="inline-flex items-center rounded-md bg-zinc-200 px-1.5 py-0.5 text-[11px] font-medium text-zinc-700 ring-1 ring-inset ring-zinc-400/30 dark:bg-zinc-700/50 dark:text-zinc-300 dark:ring-zinc-500/30"
-      >
-        {t("accounts.subscriptionExpiredDays", { days: -days })}
-      </span>
-    );
-  }
-  if (days <= 3) {
-    return (
-      <span
-        title={t("accounts.subscriptionExpiresTitle", { date: localDate })}
-        className="inline-flex items-center rounded-md bg-red-100 px-1.5 py-0.5 text-[11px] font-semibold text-red-700 ring-1 ring-inset ring-red-500/30 dark:bg-red-500/20 dark:text-red-300 dark:ring-red-400/30"
-      >
-        {days === 0 ? t("accounts.subscriptionExpiresToday") : t("accounts.subscriptionExpiresDays", { days })}
-      </span>
-    );
-  }
-  if (days <= 7) {
-    return (
-      <span
-        title={t("accounts.subscriptionExpiresTitle", { date: localDate })}
-        className="inline-flex items-center rounded-md bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-700 ring-1 ring-inset ring-amber-500/30 dark:bg-amber-500/20 dark:text-amber-300 dark:ring-amber-400/30"
-      >
-        {t("accounts.subscriptionExpiresDays", { days })}
-      </span>
-    );
-  }
-  return null;
 }
 
 // ClaudeChipList 标签芯片(与 Codex ChipList 同款:最多 3 个 + N,弱化配色不抢状态色)。

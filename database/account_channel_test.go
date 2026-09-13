@@ -237,3 +237,38 @@ func TestSQLiteListAccountListProjectionCarriesClaudeAuthKind(t *testing.T) {
 		t.Fatalf("refresh token presence marker = %q", got)
 	}
 }
+
+// 列表投影必须带出订阅筛选依赖的三个键，否则账号页"订阅状态"筛选会把全部账号判成未知。
+func TestListAccountListProjectionCarriesSubscriptionKeys(t *testing.T) {
+	ctx := context.Background()
+	db, err := New("sqlite", filepath.Join(t.TempDir(), "subscription-projection.db"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer db.Close()
+	id, err := db.InsertAccountWithCredentials(ctx, "sub-proj", map[string]interface{}{
+		"plan_type":                "plus",
+		"subscription_expires_at":  "2026-10-05T07:17:05Z",
+		"subscription_sync_state":  "confirmed",
+		"subscription_grace_until": "2026-10-12T00:00:00Z",
+	}, "")
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	rows, err := db.ListAccountListProjection(ctx, "")
+	if err != nil {
+		t.Fatalf("projection: %v", err)
+	}
+	for _, row := range rows {
+		if row.ID != id {
+			continue
+		}
+		if row.GetCredential("subscription_expires_at") != "2026-10-05T07:17:05Z" ||
+			row.GetCredential("subscription_sync_state") != "confirmed" ||
+			row.GetCredential("subscription_grace_until") != "2026-10-12T00:00:00Z" {
+			t.Fatalf("projection credentials = %v", row.Credentials)
+		}
+		return
+	}
+	t.Fatal("inserted account missing from projection")
+}

@@ -133,6 +133,15 @@ npm run typecheck
 npm run build
 ```
 
+修改降智检测的 SVG 导出时，还需运行真实浏览器回归（首次运行先安装 Chromium）：
+
+```bash
+npx playwright install chromium
+npm run test:svg
+```
+
+可通过 `QUALITY_TEST_SVG_SAMPLE=/absolute/path/pelican.html npm run test:svg` 额外验证本地鹈鹕样例；样例文件不会写入仓库。
+
 2. **代码风格**
 
 - 使用 2 空格缩进

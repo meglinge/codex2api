@@ -11,10 +11,11 @@ import (
 )
 
 const (
-	portableCompactionEnvelopePrefix = "sub2api-emulated-compaction-v1:"
-	portableCompactionSummaryOpen    = "<summary>"
-	portableCompactionSummaryClose   = "</summary>"
-	responsesCompactionSummaryPrefix = "[Conversation summary from earlier turns]\n"
+	portableCompactionEnvelopePrefix      = "sub2api-emulated-compaction-v1:"
+	localPortableCompactionEnvelopePrefix = "codex2api-emulated-compaction-v1:"
+	portableCompactionSummaryOpen         = "<summary>"
+	portableCompactionSummaryClose        = "</summary>"
+	responsesCompactionSummaryPrefix      = "[Conversation summary from earlier turns]\n"
 )
 
 func isResponsesCompactionItemType(itemType string) bool {
@@ -28,6 +29,9 @@ func isResponsesCompactionItemType(itemType string) bool {
 
 func decodePortableCompactionSummary(encryptedContent string) (string, bool) {
 	encoded, ok := strings.CutPrefix(encryptedContent, portableCompactionEnvelopePrefix)
+	if !ok {
+		encoded, ok = strings.CutPrefix(encryptedContent, localPortableCompactionEnvelopePrefix)
+	}
 	if !ok || encoded == "" || len(encoded) > base64.StdEncoding.EncodedLen(security.MaxRequestBodySize) {
 		return "", false
 	}
@@ -108,7 +112,7 @@ func normalizePortableResponsesCompactionItems(body map[string]any) bool {
 // emulated compaction envelopes before account affinity is resolved. Opaque
 // encrypted compaction state remains untouched and therefore source-affine.
 func normalizePortableResponsesCompactionHistory(rawBody []byte) ([]byte, bool) {
-	if len(rawBody) == 0 || !bytes.Contains(rawBody, []byte(portableCompactionEnvelopePrefix)) {
+	if len(rawBody) == 0 || (!bytes.Contains(rawBody, []byte(portableCompactionEnvelopePrefix)) && !bytes.Contains(rawBody, []byte(localPortableCompactionEnvelopePrefix))) {
 		return rawBody, false
 	}
 

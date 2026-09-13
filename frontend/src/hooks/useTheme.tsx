@@ -6,7 +6,10 @@ export type Theme = 'light' | 'dark'
 /** User preference: fixed light/dark, or follow OS. */
 export type ThemeMode = 'light' | 'dark' | 'system'
 
+export type WebsiteThemeStyle = 'github' | 'vercel' | 'google' | 'apple' | 'notion' | 'stripe' | 'spotify' | 'slack'
+
 export type ColorTheme =
+  | WebsiteThemeStyle
   | 'default'
   | 'claude'
   | 'chatgpt'
@@ -27,10 +30,19 @@ export type ColorTheme =
   | 'quiet-light'
   | 'ayu-light'
   | 'noctis-lux'
+  | 'ocean'
+  | 'forest'
+  | 'lavender'
+  | 'amber'
+  | 'espresso'
+  | 'sakura'
+  | 'mint'
+  | 'midnight'
 
-export type ThemeGroup = 'recommended' | 'light' | 'dark' | 'editor'
+export type ThemeGroup = 'recommended' | 'website' | 'light' | 'dark' | 'editor'
 
 export interface ThemePreviewSwatch {
+  sidebar?: string
   primary: string
   bg: string
   surface: string
@@ -43,6 +55,7 @@ export interface ColorThemeDef {
   descriptionKey: string
   group: ThemeGroup
   recommended?: boolean
+  uiStyle?: WebsiteThemeStyle
   previewLight: ThemePreviewSwatch
   previewDark: ThemePreviewSwatch
   /** @deprecated use previewLight — kept for callers that still read flat fields */
@@ -142,6 +155,322 @@ export const COLOR_THEMES: ColorThemeDef[] = [
       bg: 'hsl(0 0% 8%)',
       surface: 'hsl(0 0% 12%)',
       muted: 'hsl(0 0% 19%)',
+    },
+  }),
+  def({
+    id: 'github',
+    nameKey: 'common.theme.github',
+    descriptionKey: 'themeSettings.themeDesc.github',
+    group: 'website',
+    uiStyle: 'github',
+    recommended: true,
+    previewLight: {
+      primary: '#1f883d',
+      bg: '#f6f8fa',
+      surface: '#ffffff',
+      muted: '#eaeef2',
+      sidebar: '#f6f8fa',
+    },
+    previewDark: {
+      primary: '#3fb950',
+      bg: '#0d1117',
+      surface: '#161b22',
+      muted: '#21262d',
+      sidebar: '#0d1117',
+    },
+  }),
+  def({
+    id: 'vercel',
+    nameKey: 'common.theme.vercel',
+    descriptionKey: 'themeSettings.themeDesc.vercel',
+    group: 'website',
+    uiStyle: 'vercel',
+    recommended: true,
+    previewLight: {
+      primary: '#171717',
+      bg: '#fafafa',
+      surface: '#ffffff',
+      muted: '#ededed',
+      sidebar: '#ffffff',
+    },
+    previewDark: {
+      primary: '#ededed',
+      bg: '#000000',
+      surface: '#0a0a0a',
+      muted: '#1a1a1a',
+      sidebar: '#000000',
+    },
+  }),
+  def({
+    id: 'google',
+    nameKey: 'common.theme.google',
+    descriptionKey: 'themeSettings.themeDesc.google',
+    group: 'website',
+    uiStyle: 'google',
+    previewLight: {
+      primary: '#0b57d0',
+      bg: '#f8fafd',
+      surface: '#ffffff',
+      muted: '#e9eef6',
+      sidebar: '#edf2fa',
+    },
+    previewDark: {
+      primary: '#a8c7fa',
+      bg: '#131314',
+      surface: '#1e1f20',
+      muted: '#282a2c',
+      sidebar: '#1a1b1e',
+    },
+  }),
+  def({
+    id: 'apple',
+    nameKey: 'common.theme.apple',
+    descriptionKey: 'themeSettings.themeDesc.apple',
+    group: 'website',
+    uiStyle: 'apple',
+    previewLight: {
+      primary: '#0071e3',
+      bg: '#f5f5f7',
+      surface: '#ffffff',
+      muted: '#eaeaec',
+      sidebar: '#f5f5f7',
+    },
+    previewDark: {
+      primary: '#2997ff',
+      bg: '#000000',
+      surface: '#1d1d1f',
+      muted: '#2b2b2d',
+      sidebar: '#111113',
+    },
+  }),
+  def({
+    id: 'notion',
+    nameKey: 'common.theme.notion',
+    descriptionKey: 'themeSettings.themeDesc.notion',
+    group: 'website',
+    uiStyle: 'notion',
+    previewLight: {
+      primary: '#37352f',
+      bg: '#ffffff',
+      surface: '#ffffff',
+      muted: '#f1f1ef',
+      sidebar: '#f7f7f5',
+    },
+    previewDark: {
+      primary: '#e3e2de',
+      bg: '#191919',
+      surface: '#202020',
+      muted: '#2c2c2c',
+      sidebar: '#202020',
+    },
+  }),
+  def({
+    id: 'stripe',
+    nameKey: 'common.theme.stripe',
+    descriptionKey: 'themeSettings.themeDesc.stripe',
+    group: 'website',
+    uiStyle: 'stripe',
+    previewLight: {
+      primary: '#635bff',
+      bg: '#f6f9fc',
+      surface: '#ffffff',
+      muted: '#e9eef5',
+      sidebar: '#f3f6fb',
+    },
+    previewDark: {
+      primary: '#a59bff',
+      bg: '#0a1020',
+      surface: '#141e32',
+      muted: '#202c43',
+      sidebar: '#10172a',
+    },
+  }),
+  def({
+    id: 'spotify',
+    nameKey: 'common.theme.spotify',
+    descriptionKey: 'themeSettings.themeDesc.spotify',
+    group: 'website',
+    uiStyle: 'spotify',
+    previewLight: {
+      primary: '#087a35',
+      bg: '#f6f8f6',
+      surface: '#ffffff',
+      muted: '#e6eee8',
+      sidebar: '#edf3ef',
+    },
+    previewDark: {
+      primary: '#1ed760',
+      bg: '#121212',
+      surface: '#181818',
+      muted: '#282828',
+      sidebar: '#000000',
+    },
+  }),
+  def({
+    id: 'slack',
+    nameKey: 'common.theme.slack',
+    descriptionKey: 'themeSettings.themeDesc.slack',
+    group: 'website',
+    uiStyle: 'slack',
+    previewLight: {
+      primary: '#4a154b',
+      bg: '#f8f7fa',
+      surface: '#ffffff',
+      muted: '#eeedf1',
+      sidebar: '#4a154b',
+    },
+    previewDark: {
+      primary: '#d6a5e2',
+      bg: '#1a1d21',
+      surface: '#222529',
+      muted: '#2d3035',
+      sidebar: '#350d36',
+    },
+  }),
+  def({
+    id: 'ocean',
+    nameKey: 'common.theme.ocean',
+    descriptionKey: 'themeSettings.themeDesc.ocean',
+    group: 'light',
+    recommended: true,
+    previewLight: {
+      primary: 'hsl(202 82% 35%)',
+      bg: 'hsl(202 50% 96%)',
+      surface: 'hsl(202 35% 99%)',
+      muted: 'hsl(202 32% 91%)',
+    },
+    previewDark: {
+      primary: 'hsl(195 78% 64%)',
+      bg: 'hsl(207 44% 10%)',
+      surface: 'hsl(207 38% 14%)',
+      muted: 'hsl(207 28% 20%)',
+    },
+  }),
+  def({
+    id: 'forest',
+    nameKey: 'common.theme.forest',
+    descriptionKey: 'themeSettings.themeDesc.forest',
+    group: 'light',
+    recommended: true,
+    previewLight: {
+      primary: 'hsl(145 40% 30%)',
+      bg: 'hsl(90 24% 95%)',
+      surface: 'hsl(90 25% 98%)',
+      muted: 'hsl(108 18% 89%)',
+    },
+    previewDark: {
+      primary: 'hsl(139 35% 66%)',
+      bg: 'hsl(145 22% 10%)',
+      surface: 'hsl(145 19% 14%)',
+      muted: 'hsl(143 16% 21%)',
+    },
+  }),
+  def({
+    id: 'lavender',
+    nameKey: 'common.theme.lavender',
+    descriptionKey: 'themeSettings.themeDesc.lavender',
+    group: 'light',
+    previewLight: {
+      primary: 'hsl(267 42% 44%)',
+      bg: 'hsl(266 40% 97%)',
+      surface: 'hsl(270 40% 99%)',
+      muted: 'hsl(269 28% 92%)',
+    },
+    previewDark: {
+      primary: 'hsl(269 65% 77%)',
+      bg: 'hsl(266 24% 12%)',
+      surface: 'hsl(267 22% 17%)',
+      muted: 'hsl(267 18% 24%)',
+    },
+  }),
+  def({
+    id: 'amber',
+    nameKey: 'common.theme.amber',
+    descriptionKey: 'themeSettings.themeDesc.amber',
+    group: 'light',
+    previewLight: {
+      primary: 'hsl(35 85% 31%)',
+      bg: 'hsl(43 48% 96%)',
+      surface: 'hsl(42 50% 99%)',
+      muted: 'hsl(42 31% 89%)',
+    },
+    previewDark: {
+      primary: 'hsl(42 85% 63%)',
+      bg: 'hsl(35 17% 11%)',
+      surface: 'hsl(35 16% 15%)',
+      muted: 'hsl(35 14% 22%)',
+    },
+  }),
+  def({
+    id: 'espresso',
+    nameKey: 'common.theme.espresso',
+    descriptionKey: 'themeSettings.themeDesc.espresso',
+    group: 'dark',
+    previewLight: {
+      primary: 'hsl(22 38% 35%)',
+      bg: 'hsl(26 26% 94%)',
+      surface: 'hsl(30 27% 98%)',
+      muted: 'hsl(28 20% 87%)',
+    },
+    previewDark: {
+      primary: 'hsl(28 46% 70%)',
+      bg: 'hsl(20 22% 10%)',
+      surface: 'hsl(22 20% 14%)',
+      muted: 'hsl(22 17% 21%)',
+    },
+  }),
+  def({
+    id: 'sakura',
+    nameKey: 'common.theme.sakura',
+    descriptionKey: 'themeSettings.themeDesc.sakura',
+    group: 'light',
+    previewLight: {
+      primary: 'hsl(345 54% 43%)',
+      bg: 'hsl(350 52% 97%)',
+      surface: 'hsl(345 45% 99%)',
+      muted: 'hsl(347 33% 92%)',
+    },
+    previewDark: {
+      primary: 'hsl(346 68% 74%)',
+      bg: 'hsl(340 23% 11%)',
+      surface: 'hsl(340 22% 16%)',
+      muted: 'hsl(339 18% 23%)',
+    },
+  }),
+  def({
+    id: 'mint',
+    nameKey: 'common.theme.mint',
+    descriptionKey: 'themeSettings.themeDesc.mint',
+    group: 'light',
+    previewLight: {
+      primary: 'hsl(164 67% 27%)',
+      bg: 'hsl(157 38% 96%)',
+      surface: 'hsl(155 38% 99%)',
+      muted: 'hsl(157 27% 90%)',
+    },
+    previewDark: {
+      primary: 'hsl(158 52% 65%)',
+      bg: 'hsl(166 33% 9%)',
+      surface: 'hsl(164 28% 13%)',
+      muted: 'hsl(164 23% 20%)',
+    },
+  }),
+  def({
+    id: 'midnight',
+    nameKey: 'common.theme.midnight',
+    descriptionKey: 'themeSettings.themeDesc.midnight',
+    group: 'dark',
+    previewLight: {
+      primary: 'hsl(230 60% 45%)',
+      bg: 'hsl(228 45% 96%)',
+      surface: 'hsl(226 45% 99%)',
+      muted: 'hsl(228 29% 91%)',
+    },
+    previewDark: {
+      primary: 'hsl(218 84% 74%)',
+      bg: 'hsl(228 45% 7%)',
+      surface: 'hsl(228 37% 12%)',
+      muted: 'hsl(228 30% 19%)',
     },
   }),
   def({
@@ -434,7 +763,7 @@ export const COLOR_THEMES: ColorThemeDef[] = [
   }),
 ]
 
-export const THEME_GROUP_ORDER: ThemeGroup[] = ['recommended', 'light', 'dark', 'editor']
+export const THEME_GROUP_ORDER: ThemeGroup[] = ['recommended', 'website', 'light', 'dark', 'editor']
 
 export function getThemePreviewSwatch(item: ColorThemeDef, mode: Theme): ThemePreviewSwatch {
   return mode === 'dark' ? item.previewDark : item.previewLight

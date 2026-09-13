@@ -15,9 +15,12 @@ const (
 )
 
 // ModelPricingOverride 是单个模型的定价覆盖（设置存储与同步 URL 载荷共用同一形态）。
-// 价格单位：USD / 1M tokens。字段为 0（未填）时该项回退代码默认价，实现"部分覆盖"。
+// Token 价格单位：USD / 1M tokens。Token 字段为 0 时回退代码默认价。
+// ImageUnitPrice 则为 USD / 成功图片，按张模式要求显式正单价。
 // 优先级：custom > synced > 代码默认。
 type ModelPricingOverride struct {
+	UserBillingMode  string  `json:"user_billing_mode,omitempty"`
+	ImageUnitPrice   float64 `json:"image_unit_price,omitempty"` // USD per successful image; token rates remain upstream cost.
 	ImageInput       float64 `json:"image_input,omitempty"`
 	CachedImageInput float64 `json:"cached_image_input,omitempty"`
 	Source           string  `json:"source,omitempty"`
@@ -72,7 +75,7 @@ func NormalizeModelPricingOverride(model string, o ModelPricingOverride) ModelPr
 
 // IsEmpty 判断覆盖是否不含任何价格（全 0）。
 func (o ModelPricingOverride) IsEmpty() bool {
-	return o.ImageInput == 0 && o.CachedImageInput == 0 && o.Input == 0 && o.CachedInput == 0 && o.CacheWrite5m == 0 && o.CacheWrite1h == 0 && o.Output == 0 &&
+	return o.UserBillingMode == "" && o.ImageUnitPrice == 0 && o.ImageInput == 0 && o.CachedImageInput == 0 && o.Input == 0 && o.CachedInput == 0 && o.CacheWrite5m == 0 && o.CacheWrite1h == 0 && o.Output == 0 &&
 		o.InputPriority == 0 && o.CachedInputPriority == 0 && o.OutputPriority == 0 &&
 		o.InputLong == 0 && o.CachedInputLong == 0 && o.OutputLong == 0 &&
 		o.InputLongPriority == 0 && o.CachedInputLongPriority == 0 && o.OutputLongPriority == 0 &&
@@ -81,6 +84,12 @@ func (o ModelPricingOverride) IsEmpty() bool {
 
 // applyNonZero 把覆盖里非 0 的价格字段写入 p（就地）。0 字段保持 p 原值（代码默认）。
 func (o ModelPricingOverride) applyNonZero(p *ModelPricing) {
+	if o.UserBillingMode != "" {
+		p.UserBillingMode = o.UserBillingMode
+	}
+	if o.ImageUnitPrice > 0 {
+		p.ImageUnitPrice = o.ImageUnitPrice
+	}
 	if o.ImageInput > 0 {
 		p.ImageInputPricePerMToken = o.ImageInput
 	}
@@ -141,6 +150,8 @@ func ModelPricingOverrideFromPricing(p *ModelPricing, source string) ModelPricin
 		return ModelPricingOverride{Source: source}
 	}
 	return ModelPricingOverride{
+		UserBillingMode:            p.UserBillingMode,
+		ImageUnitPrice:             p.ImageUnitPrice,
 		ImageInput:                 p.ImageInputPricePerMToken,
 		CachedImageInput:           p.CacheReadImagePricePerMToken,
 		Source:                     source,
@@ -229,6 +240,9 @@ func SetModelPricingOverrides(m map[string]ModelPricingOverride) {
 	norm := make(map[string]ModelPricingOverride, len(m))
 	for k, v := range m {
 		key := strings.ToLower(strings.TrimSpace(k))
+		if err := ValidateModelUserBilling(key, v); err != nil {
+			continue
+		}
 		v = NormalizeModelPricingOverride(key, v)
 		if key == "" || v.IsEmpty() {
 			continue
@@ -316,6 +330,9 @@ func ParseModelPricingOverridesJSON(s string) (map[string]ModelPricingOverride, 
 	out := make(map[string]ModelPricingOverride, len(raw))
 	for k, v := range raw {
 		key := strings.ToLower(strings.TrimSpace(k))
+		if err := ValidateModelUserBilling(key, v); err != nil {
+			return nil, fmt.Errorf("%s: %w", key, err)
+		}
 		v = NormalizeModelPricingOverride(key, v)
 		if key == "" || v.IsEmpty() {
 			continue

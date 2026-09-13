@@ -1,3 +1,4 @@
+import { ImageBillingCost } from '../components/image-studio/ImageBillingCost'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { createPortal } from 'react-dom'
@@ -20,6 +21,8 @@ import { DEFAULT_PAGE_SIZE_OPTIONS, usePersistedPageSize } from '../hooks/usePer
 import type { APIKeyRow, OpsErrorSummary, SystemSettings, UsageAPIKeyStat, UsageEndpointStat, UsageFeatureStats, UsageLog, UsageModelStat, UsageStats, PromptFilterLog, PromptPolicyIncidentDetailResponse } from '../types'
 import { cn, formatCompactEmail } from '../lib/utils'
 import { formatUsageNumber as formatTokens } from '../lib/usageFormat'
+import { buildModelShareData, formatSharePercent, type ModelShareMetric } from '../lib/usageInsights'
+import './usage-insights.css'
 import { getUsageTokenBreakdown } from '../lib/usageTokenDisplay'
 import { formatBeijingTime } from '../utils/time'
 import { Card, CardContent } from '@/components/ui/card'
@@ -34,7 +37,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { Activity, Box, Clock, Zap, AlertTriangle, Search, Brain, DatabaseZap, DatabaseBackup, X, Image as ImageIcon, Info, CircleDollarSign, BarChart3, KeyRound, Route, SlidersHorizontal, ShieldAlert, RefreshCw, ChevronDown, RotateCcw } from 'lucide-react'
+import { Activity, Box, Clock, Zap, Sparkles, AlertTriangle, Search, Brain, DatabaseZap, DatabaseBackup, X, Image as ImageIcon, Info, CircleDollarSign, BarChart3, KeyRound, Route, SlidersHorizontal, ShieldAlert, RefreshCw, ChevronDown, RotateCcw, PlugZap, FlaskConical } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 
@@ -78,17 +81,26 @@ function ReasoningEffortBadge({ effort }: { effort: string }) {
   )
 }
 
+// 网关自身发起的请求按 internal_reason 细分:测连 / 降智检测 / 超窗摘要,
+// 其余未知原因统一显示为"内部请求"。
+const INTERNAL_REQUEST_PRESENTATION: Record<string, { labelKey: string; tooltipKey: string; Icon: typeof Brain }> = {
+  connection_test: { labelKey: 'usage.internalConnectionTest', tooltipKey: 'usage.internalConnectionTestTooltip', Icon: PlugZap },
+  quality_test: { labelKey: 'usage.internalQualityTest', tooltipKey: 'usage.internalQualityTestTooltip', Icon: FlaskConical },
+  overflow_compact_summary: { labelKey: 'usage.internalOverflowSummary', tooltipKey: 'usage.internalRequestTooltip', Icon: Brain },
+}
+
 function InternalRequestBadge({ log }: { log: UsageLog }) {
   const { t } = useTranslation()
   const reason = log.internal_reason?.trim()
   if (!reason) return null
 
-  const label = reason === 'overflow_compact_summary'
-    ? t('usage.internalOverflowSummary')
-    : t('usage.internalRequest')
-  const title = log.parent_request_id?.trim()
-    ? t('usage.internalRequestParentTooltip', { parentRequestId: log.parent_request_id.trim() })
-    : t('usage.internalRequestTooltip')
+  const presentation = INTERNAL_REQUEST_PRESENTATION[reason]
+  const Icon = presentation?.Icon ?? Brain
+  const label = presentation ? t(presentation.labelKey) : t('usage.internalRequest')
+  const parentRequestId = log.parent_request_id?.trim()
+  const title = parentRequestId
+    ? t('usage.internalRequestParentTooltip', { parentRequestId })
+    : t(presentation?.tooltipKey ?? 'usage.internalRequestTooltip')
 
   return (
     <Badge
@@ -96,7 +108,7 @@ function InternalRequestBadge({ log }: { log: UsageLog }) {
       className="gap-0.5 whitespace-nowrap border-transparent bg-fuchsia-500/12 text-[11px] font-semibold text-fuchsia-700 dark:bg-fuchsia-500/20 dark:text-fuchsia-300"
       title={title}
     >
-      <Brain className="size-3" />
+      <Icon className="size-3" />
       {label}
     </Badge>
   )
@@ -248,6 +260,9 @@ function formatUsageAPIKeyLabel(name?: string, maskedKey?: string): string {
   return `${trimmedKey.slice(0, 4)}...${trimmedKey.slice(-4)}`
 }
 
+// 表格里可点击进入筛选的单元格(账号/模型):悬停变主色并加下划线提示可点。
+const usageClickableFilterClass = 'cursor-pointer transition-colors hover:text-primary hover:underline underline-offset-2 decoration-dotted'
+
 function formatUsageAccountLabel(log: UsageLog): string {
   // 邮箱优先：身份账号一律显示邮箱，账号名仅作为无邮箱账号（如 relay API-key 账号）的兜底。
   // 避免 AT 导入未命名时的占位名（at-account-N 等）盖过真实邮箱身份。
@@ -339,6 +354,7 @@ function formatServiceTierLabel(t: ReturnType<typeof useTranslation>['t'], tier?
 
 function UsageCostCell({ log }: { log: UsageLog }) {
   const { t } = useTranslation()
+  if (log.user_billing_mode === 'per_image') return <ImageBillingCost count={log.billed_image_count} unitPrice={log.image_unit_price} userBilled={log.user_billed} accountBilled={log.account_billed} />
   const accountBilled = safeNumber(log.account_billed)
   const userBilled = safeNumber(log.user_billed)
   const totalCost = safeNumber(log.total_cost)
@@ -463,284 +479,164 @@ function CostTooltipRow({ label, value, valueClassName = 'font-medium text-white
   )
 }
 
-interface ModelPieDatum {
-  model: string
-  value: number
-  requests: number
-  amount: number
-  share: number
-}
-
-function buildModelPieData(stats: UsageModelStat[], useAmount: boolean, otherLabel: string): ModelPieDatum[] {
-  const base = stats
-    .map((item) => ({
-      model: item.model || 'unknown',
-      value: useAmount ? safeNumber(item.user_billed) : safeNumber(item.requests),
-      requests: safeNumber(item.requests),
-      amount: safeNumber(item.user_billed),
-      share: 0,
-    }))
-    .filter((item) => item.value > 0)
-
-  const total = base.reduce((sum, item) => sum + item.value, 0)
-  if (total <= 0) return []
-
-  const visible = base.slice(0, 4)
-  const overflow = base.slice(4)
-  if (overflow.length > 0) {
-    visible.push({
-      model: otherLabel,
-      value: overflow.reduce((sum, item) => sum + item.value, 0),
-      requests: overflow.reduce((sum, item) => sum + item.requests, 0),
-      amount: overflow.reduce((sum, item) => sum + item.amount, 0),
-      share: 0,
-    })
-  }
-
-  return visible.map((item) => ({
-    ...item,
-    share: (item.value / total) * 100,
-  }))
-}
-
-function ModelSharePie({
-  stats,
-  showFullUsageNumbers,
-}: {
+function ModelStatsPanel({ stats, showFullUsageNumbers }: {
   stats: UsageModelStat[]
   showFullUsageNumbers: boolean
 }) {
   const { t } = useTranslation()
-  const totalAmount = stats.reduce((sum, item) => sum + safeNumber(item.user_billed), 0)
-  const totalRequests = stats.reduce((sum, item) => sum + safeNumber(item.requests), 0)
-  const useAmount = totalAmount > 0
-  const pieData = buildModelPieData(stats, useAmount, t('usage.modelStatsOther'))
-  const centerValue = useAmount ? formatCostCardValue(totalAmount) : formatTokens(totalRequests, showFullUsageNumbers)
-  const metricLabel = useAmount ? t('usage.modelPieAmount') : t('usage.modelPieRequests')
-
-  if (pieData.length === 0) {
-    return (
-      <div className={modelPieShellClass}>
-        <div className="flex min-h-[150px] flex-1 items-center justify-center px-3 text-center text-sm text-muted-foreground">
-          {t('usage.noModelStats')}
-        </div>
-      </div>
-    )
-  }
+  const [selectedMetric, setSelectedMetric] = useState<ModelShareMetric | null>(null)
+  const rankingRef = useRef<HTMLDivElement>(null)
+  const hasAmount = stats.some((item) => safeNumber(item.user_billed) > 0)
+  const metric = selectedMetric ?? (hasAmount ? 'amount' : 'requests')
+  const { items, total } = buildModelShareData(stats, metric, t('usage.modelStatsOther'))
+  const metricLabel = t(metric === 'amount' ? 'usage.modelPieAmount' : 'usage.modelPieRequests')
+  const centerValue = metric === 'amount' ? formatCostCardValue(total) : formatTokens(total, showFullUsageNumbers)
+  const chartValue = centerValue.length > 10 ? `${metric === 'amount' ? '$' : ''}${formatTokens(total, false)}` : centerValue
 
   return (
-    <div className={modelPieShellClass}>
-      <div className="mb-1.5 flex items-baseline justify-between gap-3">
-        <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{t('usage.modelPieTitle')}</div>
-        <div className="text-[11px] font-medium text-muted-foreground/80">{metricLabel}</div>
-      </div>
-      <div className="relative h-[150px] max-xl:h-[140px]">
-        <ResponsiveContainer width="100%" height="100%">
-          <PieChart>
-            <Pie
-              data={pieData}
-              dataKey="value"
-              nameKey="model"
-              cx="50%"
-              cy="50%"
-              innerRadius="54%"
-              outerRadius="84%"
-              paddingAngle={0}
-              strokeWidth={0}
-            >
-              {pieData.map((_, index) => (
-                <Cell key={index} fill={modelPieColors[index % modelPieColors.length]} />
-              ))}
-            </Pie>
-            <RechartsTooltip
-              cursor={false}
-              formatter={(value, name) => [
-                useAmount ? formatCostCardValue(Number(value ?? 0)) : formatTokens(Number(value ?? 0), showFullUsageNumbers),
-                String(name ?? ''),
-              ]}
-              contentStyle={{
-                backgroundColor: 'var(--color-card)',
-                border: '1px solid var(--color-border)',
-                borderRadius: 12,
-                boxShadow: '0 16px 36px rgba(15, 23, 42, 0.14)',
-                fontSize: 12,
-              }}
-              itemStyle={{ color: 'var(--color-foreground)' }}
-            />
-          </PieChart>
-        </ResponsiveContainer>
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-          <div className="max-w-[112px] text-center">
-            <div className="truncate font-geist-mono text-[15px] font-semibold tabular-nums tracking-tight text-foreground">
-              {centerValue}
-            </div>
-            <div className="mt-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{metricLabel}</div>
-          </div>
-        </div>
-      </div>
-      <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 max-sm:grid-cols-1">
-        {pieData.map((item, index) => (
-          <div key={`${item.model}-${index}`} className="flex items-center gap-2 text-xs">
-            <span
-              className="size-2.5 shrink-0 rounded-full"
-              style={{ background: modelPieColors[index % modelPieColors.length] }}
-            />
-            <span className="min-w-0 flex-1 truncate text-muted-foreground" title={item.model}>{item.model}</span>
-            <span className="shrink-0 font-geist-mono text-[11px] font-medium tabular-nums text-foreground">{item.share.toFixed(1)}%</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function ModelStatsPanel({
-  stats,
-  showFullUsageNumbers,
-}: {
-  stats: UsageModelStat[]
-  showFullUsageNumbers: boolean
-}) {
-  const { t } = useTranslation()
-  const accent: PanelAccentKey = 'blue'
-  const totalRequests = stats.reduce((sum, item) => sum + safeNumber(item.requests), 0)
-  const maxRequests = Math.max(1, ...stats.map((item) => safeNumber(item.requests)))
-
-  return (
-    <PanelShell>
+    <PanelShell className="usage-model-panel">
       <PanelHeader
-        accent={accent}
+        accent="blue"
         icon={<BarChart3 />}
         title={t('usage.modelStatsTitle')}
         description={t('usage.modelStatsDesc')}
+        trailing={items.length > 0 ? (
+          <div className="usage-metric-toggle" role="group" aria-label={t('usage.modelPieTitle')}>
+            {(['amount', 'requests'] as const).map((value) => (
+              <button key={value} type="button" aria-pressed={metric === value} onClick={() => {
+                setSelectedMetric(value)
+                if (rankingRef.current) rankingRef.current.scrollTop = 0
+              }}>
+                {t(value === 'amount' ? 'usage.modelPieAmount' : 'usage.modelPieRequests')}
+              </button>
+            ))}
+          </div>
+        ) : undefined}
       />
-
-      {stats.length === 0 ? (
-        <EmptyPanel accent={accent} icon={<BarChart3 />} text={t('usage.noModelStats')} />
+      {items.length === 0 ? (
+        <EmptyPanel accent="blue" icon={<BarChart3 />} text={t('usage.noModelStats')} />
       ) : (
-        <div className="grid grid-cols-[minmax(0,1fr)_minmax(220px,260px)] gap-4 max-lg:grid-cols-1">
-          <div className="space-y-3">
-            {stats.slice(0, 5).map((item) => {
-              const share = totalRequests > 0 ? (item.requests / totalRequests) * 100 : 0
-              return (
-                <div key={item.model} className="space-y-1.5">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <ModelLogo model={item.model} variant="soft" size={22} className="shrink-0" />
-                        <div className="truncate text-sm font-semibold leading-tight tracking-tight text-foreground" title={item.model}>
-                          {item.model}
-                        </div>
-                      </div>
-                      <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 pl-[30px] text-xs text-muted-foreground">
-                        <span className="tabular-nums">{t('usage.modelStatsRequests')} {formatTokens(item.requests, showFullUsageNumbers)}</span>
-                        <span aria-hidden="true" className="text-border">·</span>
-                        <span className="tabular-nums">{t('usage.modelStatsTokens')} {formatTokens(item.tokens, showFullUsageNumbers)}</span>
-                        {item.error_count > 0 && (
-                          <>
-                            <span aria-hidden="true" className="text-border">·</span>
-                            <span className="tabular-nums text-amber-600 dark:text-amber-400">{t('usage.modelStatsErrors')} {formatTokens(item.error_count, showFullUsageNumbers)}</span>
-                          </>
-                        )}
-                      </div>
+        <>
+          <div className="usage-model-layout">
+            <figure className="usage-model-figure">
+              <div className="usage-model-chart" title={centerValue} role="img" aria-label={`${t('usage.modelPieTitle')} · ${metricLabel} · ${centerValue}`}>
+                {total > 0 ? (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart accessibilityLayer={false}>
+                      <Pie data={items} dataKey="value" nameKey="model" cx="50%" cy="50%" innerRadius="74%" outerRadius="94%" strokeWidth={0} isAnimationActive={false}>
+                        {items.map((item, index) => <Cell key={item.key} fill={modelPieColors[index % modelPieColors.length]} />)}
+                      </Pie>
+                      <RechartsTooltip
+                        cursor={false}
+                        formatter={(value, name) => [metric === 'amount' ? formatCostCardValue(Number(value ?? 0)) : formatTokens(Number(value ?? 0), showFullUsageNumbers), String(name ?? '')]}
+                        contentStyle={{ backgroundColor: 'var(--color-card)', border: '1px solid var(--color-border)', borderRadius: 12, fontSize: 12 }}
+                        itemStyle={{ color: 'var(--color-foreground)' }}
+                      />
+                    </PieChart>
+                  </ResponsiveContainer>
+                ) : <div className="usage-model-chart-empty" />}
+                <div className="usage-model-chart-center">
+                  <span className="usage-eyebrow">{t('usage.modelSubtotal')}</span>
+                  <strong>{chartValue}</strong>
+                  <span>{metricLabel}</span>
+                </div>
+              </div>
+            </figure>
+            <div ref={rankingRef} className="usage-model-ranking" tabIndex={0} role="region" aria-label={t('usage.modelStatsTitle')}>
+              <div className="usage-ranking-heading">
+                <span>{t('usage.tableModel')}</span>
+                <span>{metricLabel} · %</span>
+              </div>
+              {items.map((item, index) => (
+                <div key={item.key} className="usage-model-row">
+                  <div className="usage-model-row-main">
+                    <div className="usage-model-name">
+                      <span className="usage-model-dot" aria-hidden="true" style={{ background: modelPieColors[index % modelPieColors.length] }} />
+                      {!item.isOther && <ModelLogo model={item.model} size={20} className="shrink-0" />}
+                      <span title={item.model}>{item.model}</span>
                     </div>
-                    <div className="shrink-0 text-right">
-                      <div className="font-geist-mono text-[13px] font-semibold tabular-nums tracking-tight text-emerald-600 dark:text-emerald-400">
-                        {formatCostCardValue(item.user_billed)}
-                      </div>
-                      <div className="mt-0.5 font-geist-mono text-[11px] tabular-nums text-muted-foreground">{share.toFixed(1)}%</div>
+                    <div className="usage-model-value">
+                      <strong>{metric === 'amount' ? formatCostCardValue(item.amount) : formatTokens(item.requests, showFullUsageNumbers)}</strong>
+                      <span>{formatSharePercent(item.share)}</span>
                     </div>
                   </div>
-                  <AccentBar accent={accent} ratio={safeNumber(item.requests) / maxRequests} />
+                  <div className="usage-row-meta">
+                    <span>{t('usage.modelStatsRequests')} <b>{formatTokens(item.requests, showFullUsageNumbers)}</b></span>
+                    <span>{t('usage.modelStatsTokens')} <b>{formatTokens(item.tokens, showFullUsageNumbers)}</b></span>
+                    {item.errors > 0 && <span className="text-amber-600 dark:text-amber-400">{t('usage.modelStatsErrors')} {formatTokens(item.errors, showFullUsageNumbers)}</span>}
+                  </div>
+                  <div className="usage-share-track" aria-hidden="true">
+                    <div style={{ width: `${item.share}%`, background: modelPieColors[index % modelPieColors.length] }} />
+                  </div>
                 </div>
-              )
-            })}
+              ))}
+            </div>
           </div>
-          <ModelSharePie stats={stats} showFullUsageNumbers={showFullUsageNumbers} />
-        </div>
+          <div className="usage-panel-footer usage-model-note">
+            <Info aria-hidden="true" />
+            <span>{t('usage.modelStatsScope')}</span>
+          </div>
+        </>
       )}
     </PanelShell>
   )
 }
 
-function FeatureStatsPanel({
-  stats,
-  totalRequests,
-  showFullUsageNumbers,
-}: {
+function FeatureStatsPanel({ stats, totalRequests, showFullUsageNumbers }: {
   stats?: UsageFeatureStats
   totalRequests: number
   showFullUsageNumbers: boolean
 }) {
   const { t } = useTranslation()
-  const accent: PanelAccentKey = 'cyan'
-  const safeStats = stats ?? {
-    stream_requests: 0,
-    sync_requests: 0,
-    fast_requests: 0,
-    cache_hit_requests: 0,
-    reasoning_requests: 0,
-    image_requests: 0,
-    retry_requests: 0,
-    error_requests: 0,
-  }
-  const items = [
-    { label: t('usage.featureStream'), value: safeStats.stream_requests, color: '#6366f1' },
-    { label: t('usage.featureSync'), value: safeStats.sync_requests, color: '#64748b' },
-    { label: t('usage.featureFast'), value: safeStats.fast_requests, color: '#3b82f6' },
-    { label: t('usage.featureCache'), value: safeStats.cache_hit_requests, color: '#06b6d4' },
-    { label: t('usage.featureReasoning'), value: safeStats.reasoning_requests, color: '#f59e0b' },
-    { label: t('usage.featureImage'), value: safeStats.image_requests, color: '#d946ef' },
-    { label: t('usage.featureRetry'), value: safeStats.retry_requests, color: '#f97316' },
-    { label: t('usage.featureError'), value: safeStats.error_requests, color: '#ef4444' },
-  ]
+  const stream = Math.max(0, safeNumber(stats?.stream_requests))
+  const sync = Math.max(0, safeNumber(stats?.sync_requests))
+  const share = (value: number) => totalRequests > 0 ? Math.max(0, Math.min(100, value / totalRequests * 100)) : 0
+  const features = [
+    { key: 'featureCache', value: stats?.cache_hit_requests, icon: <DatabaseZap />, accent: 'cyan' },
+    { key: 'featureReasoning', value: stats?.reasoning_requests, icon: <Brain />, accent: 'violet' },
+    { key: 'featureFast', value: stats?.fast_requests, icon: <Zap />, accent: 'blue' },
+    { key: 'featureImage', value: stats?.image_requests, icon: <ImageIcon />, accent: 'amber' },
+  ] as const
 
   return (
-    <PanelShell>
-      <PanelHeader
-        accent={accent}
-        icon={<Activity />}
-        title={t('usage.featureStatsTitle')}
-        description={t('usage.featureStatsDesc')}
-      />
-
-      <div className="grid flex-1 grid-cols-2 gap-2.5 max-sm:grid-cols-1">
-        {items.map((item) => {
-          const pct = totalRequests > 0 ? (item.value / totalRequests) * 100 : 0
+    <PanelShell className="usage-feature-panel">
+      <PanelHeader accent="cyan" icon={<Activity />} title={t('usage.featureStatsTitle')} description={t('usage.featureStatsDesc')} />
+      <div className="usage-transport">
+        <div className="usage-transport-values">
+          {[{ key: 'featureStream', value: stream }, { key: 'featureSync', value: sync }].map((item) => (
+            <div key={item.key}>
+              <span className="usage-transport-label"><i aria-hidden="true" />{t(`usage.${item.key}`)}</span>
+              <div><strong>{formatTokens(item.value, showFullUsageNumbers)}</strong><span>{formatSharePercent(share(item.value))}</span></div>
+            </div>
+          ))}
+        </div>
+        <div className="usage-transport-track" aria-hidden="true">
+          <span style={{ width: `${share(stream)}%` }} />
+          <span style={{ width: `${share(sync)}%` }} />
+        </div>
+      </div>
+      <div className="usage-feature-heading"><span className="usage-eyebrow">{t('usage.featureTraits')}</span><span>{t('usage.featureOverlapHint')}</span></div>
+      <div className="usage-feature-grid">
+        {features.map((item) => {
+          const value = Math.max(0, safeNumber(item.value))
           return (
-            <div
-              key={item.label}
-              className="group/tile relative flex flex-col justify-between overflow-hidden rounded-xl border px-3 py-2.5 transition-all duration-200 hover:-translate-y-0.5"
-              style={{
-                background: `color-mix(in srgb, ${item.color} 9%, transparent)`,
-                borderColor: `color-mix(in srgb, ${item.color} 26%, transparent)`,
-              }}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="flex min-w-0 items-center gap-1.5 text-[12px] font-medium text-foreground/80">
-                  <span
-                    aria-hidden="true"
-                    className="size-1.5 shrink-0 rounded-full"
-                    style={{ background: item.color }}
-                  />
-                  <span className="truncate">{item.label}</span>
-                </span>
-                <span className="shrink-0 font-geist-mono text-[10px] font-semibold tabular-nums text-foreground/55">
-                  {pct.toFixed(1)}%
-                </span>
+            <div key={item.key} className="usage-feature-item">
+              <span aria-hidden="true" className={cn('usage-feature-icon', PANEL_ACCENTS[item.accent].chip)}>{item.icon}</span>
+              <div className="usage-feature-content">
+                <span>{t(`usage.${item.key}`)}</span>
+                <div><strong>{formatTokens(value, showFullUsageNumbers)}</strong><span>{formatSharePercent(share(value))}</span></div>
               </div>
-              <div className="mt-1 font-geist-mono text-[20px] font-bold leading-tight tabular-nums text-foreground">
-                {formatTokens(item.value, showFullUsageNumbers)}
-              </div>
-              <div className="mt-2 h-[3px] overflow-hidden rounded-full bg-foreground/[0.06]">
-                <div
-                  className="h-full rounded-full transition-[width] duration-500 ease-out"
-                  style={{
-                    width: `${Math.min(100, pct)}%`,
-                    background: `linear-gradient(90deg, color-mix(in srgb, ${item.color} 92%, transparent), color-mix(in srgb, ${item.color} 55%, transparent))`,
-                  }}
-                />
-              </div>
+            </div>
+          )
+        })}
+      </div>
+      <div className="usage-panel-footer usage-status-strip">
+        {[{ key: 'featureRetry', value: stats?.retry_requests, icon: <RefreshCw />, tone: 'text-amber-600 dark:text-amber-400' }, { key: 'featureError', value: stats?.error_requests, icon: <AlertTriangle />, tone: 'text-rose-600 dark:text-rose-400' }].map((item) => {
+          const value = Math.max(0, safeNumber(item.value))
+          return (
+            <div key={item.key} className={value > 0 ? item.tone : undefined}>
+              <span className="usage-status-label"><span aria-hidden="true">{item.icon}</span>{t(`usage.${item.key}`)}</span>
+              <strong>{formatTokens(value, showFullUsageNumbers)}</strong><span>{formatSharePercent(share(value))}</span>
             </div>
           )
         })}
@@ -835,18 +731,17 @@ function DistributionPanel({
 }) {
   const { t } = useTranslation()
   const visibleItems = items.slice(0, limit)
-  const maxRequests = Math.max(1, ...items.map((item) => safeNumber(item.requests)))
 
   return (
     <PanelShell>
-      <PanelHeader accent={accent} icon={icon} title={title} description={description} />
+      <PanelHeader accent={accent} icon={icon} title={title} description={description} trailing={<span className="usage-panel-badge">{t('usage.requestShare')}</span>} />
 
       {visibleItems.length === 0 ? (
         <EmptyPanel accent={accent} icon={icon} text={emptyText} />
       ) : (
-        <div className="space-y-3.5">
+        <div className="usage-distribution-list">
           {visibleItems.map((item, index) => (
-            <div key={item.key} className="space-y-1.5">
+            <div key={item.key} className="usage-distribution-row">
               <div className="flex items-start justify-between gap-3">
                 <div className="flex min-w-0 items-start gap-2.5">
                   <RankBadge accent={accent} rank={index + 1} />
@@ -875,11 +770,11 @@ function DistributionPanel({
                   </div>
                 </div>
                 <span className="ml-1 inline-block min-w-[3.25rem] shrink-0 text-right font-geist-mono text-[13px] font-semibold tabular-nums tracking-tight text-foreground">
-                  {formatPercent(item.requests, totalRequests)}
+                  {formatSharePercent(totalRequests > 0 ? safeNumber(item.requests) / totalRequests * 100 : 0)}
                 </span>
               </div>
               <div className="pl-[30px]">
-                <AccentBar accent={accent} ratio={safeNumber(item.requests) / maxRequests} thickness="h-2" minWidth={5} />
+                <AccentBar accent={accent} ratio={totalRequests > 0 ? safeNumber(item.requests) / totalRequests : 0} />
               </div>
             </div>
           ))}
@@ -1439,171 +1334,56 @@ function StreamBadge({ stream }: { stream: boolean }) {
     </Badge>
   )
 }
-// Premium Minimal: a single-accent (primary) ramp. Instead of 20 competing hues,
-// the donut + legend read as one calm material with descending opacity, so it is
-// automatically correct under every theme-* palette (it only ever uses --color-primary).
 const modelPieColors = [
-  'color-mix(in oklab, var(--color-primary) 92%, transparent)',
-  'color-mix(in oklab, var(--color-primary) 70%, transparent)',
-  'color-mix(in oklab, var(--color-primary) 50%, transparent)',
-  'color-mix(in oklab, var(--color-primary) 34%, transparent)',
-  'color-mix(in oklab, var(--color-primary) 22%, transparent)',
+  'var(--color-primary)',
+  'var(--color-chart-2, #8b7bd8)',
+  'var(--color-chart-3, #3aa7a3)',
+  'var(--color-chart-4, #dba552)',
+  'var(--color-chart-5, #dc829d)',
+  'var(--color-muted-foreground)',
 ]
-const modelPieShellClass = 'flex min-h-[196px] flex-col rounded-xl border border-border bg-muted/20 p-3 max-lg:min-h-0'
 
-// ============================================================================
-// Shared "Unified Accent System" infrastructure for the four analysis panels.
-// Each panel carries one accent identity (model=blue, feature=cyan,
-// endpoint=violet, apiKey=amber) flowing through its icon chip, header
-// underline, gradient capsule bars and rank badges. Every accent is expressed
-// only through theme-safe light+dark token pairs, so the panels stay correct
-// across dark mode and every theme-* palette (no bare single-mode color).
-// ============================================================================
-type PanelAccent = {
-  /** icon chip background + foreground (light + dark) */
-  chip: string
-  /** soft ring around the icon chip */
-  ring: string
-  /** thin header underline rule (gradient fades out to the right) */
-  underline: string
-  /** gradient fill for AccentBar capsules */
-  bar: string
-  /** rank chip background + foreground for the top rows */
-  rank: string
+const PANEL_ACCENTS = {
+  blue: { chip: 'bg-primary/10 text-primary', bar: 'bg-primary' },
+  cyan: { chip: 'bg-cyan-500/10 text-cyan-700 dark:text-cyan-300', bar: 'bg-cyan-500' },
+  violet: { chip: 'bg-violet-500/10 text-violet-600 dark:text-violet-300', bar: 'bg-violet-400' },
+  amber: { chip: 'bg-amber-500/10 text-amber-700 dark:text-amber-300', bar: 'bg-amber-400' },
 }
-
-const PANEL_ACCENTS: Record<'blue' | 'cyan' | 'violet' | 'amber', PanelAccent> = {
-  blue: {
-    chip: 'bg-blue-500/12 text-blue-600 dark:bg-blue-500/20 dark:text-blue-300',
-    ring: 'ring-1 ring-inset ring-blue-500/20 dark:ring-blue-500/30',
-    underline: 'from-blue-500/45 via-blue-500/20 to-transparent dark:from-blue-400/45 dark:via-blue-400/20',
-    bar: 'from-blue-500/85 to-blue-500/45 dark:from-blue-400/90 dark:to-blue-400/45',
-    rank: 'bg-blue-500/14 text-blue-600 ring-1 ring-inset ring-blue-500/20 dark:bg-blue-500/22 dark:text-blue-300 dark:ring-blue-500/30',
-  },
-  cyan: {
-    chip: 'bg-cyan-500/12 text-cyan-600 dark:bg-cyan-500/20 dark:text-cyan-300',
-    ring: 'ring-1 ring-inset ring-cyan-500/20 dark:ring-cyan-500/30',
-    underline: 'from-cyan-500/45 via-cyan-500/20 to-transparent dark:from-cyan-400/45 dark:via-cyan-400/20',
-    bar: 'from-cyan-500/85 to-cyan-500/45 dark:from-cyan-400/90 dark:to-cyan-400/45',
-    rank: 'bg-cyan-500/14 text-cyan-600 ring-1 ring-inset ring-cyan-500/20 dark:bg-cyan-500/22 dark:text-cyan-300 dark:ring-cyan-500/30',
-  },
-  violet: {
-    chip: 'bg-violet-500/12 text-violet-600 dark:bg-violet-500/20 dark:text-violet-300',
-    ring: 'ring-1 ring-inset ring-violet-500/20 dark:ring-violet-500/30',
-    underline: 'from-violet-500/45 via-violet-500/20 to-transparent dark:from-violet-400/45 dark:via-violet-400/20',
-    bar: 'from-violet-500/85 to-violet-500/45 dark:from-violet-400/90 dark:to-violet-400/45',
-    rank: 'bg-violet-500/14 text-violet-600 ring-1 ring-inset ring-violet-500/20 dark:bg-violet-500/22 dark:text-violet-300 dark:ring-violet-500/30',
-  },
-  amber: {
-    chip: 'bg-amber-500/12 text-amber-600 dark:bg-amber-500/20 dark:text-amber-300',
-    ring: 'ring-1 ring-inset ring-amber-500/20 dark:ring-amber-500/30',
-    underline: 'from-amber-500/45 via-amber-500/20 to-transparent dark:from-amber-400/45 dark:via-amber-400/20',
-    bar: 'from-amber-500/85 to-amber-500/45 dark:from-amber-400/90 dark:to-amber-400/45',
-    rank: 'bg-amber-500/14 text-amber-600 ring-1 ring-inset ring-amber-500/20 dark:bg-amber-500/22 dark:text-amber-300 dark:ring-amber-500/30',
-  },
-}
-
 type PanelAccentKey = keyof typeof PANEL_ACCENTS
 
-// PanelShell — Card wrapper with the StatCard hover lift, shared by all panels.
-// The Card primitive carries bg-card/border/shadow so glass mode + every
-// theme-* palette adapt automatically.
-function PanelShell({ className = '', children }: { className?: string; children: ReactNode }) {
-  return (
-    <Card className={`group/panel h-full py-0 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md ${className}`}>
-      <CardContent className="flex h-full flex-col p-5">{children}</CardContent>
-    </Card>
-  )
+function PanelShell({ className, children }: { className?: string; children: ReactNode }) {
+  return <Card className={cn('usage-insight-panel', className)}><CardContent className="usage-insight-content">{children}</CardContent></Card>
 }
 
-// PanelHeader — pixel-consistent header: accent icon chip (with soft ring),
-// title + description, and a thin accent underline rule beneath the row.
-function PanelHeader({
-  accent,
-  icon,
-  title,
-  description,
-  trailing,
-}: {
+function PanelHeader({ accent, icon, title, description, trailing }: {
   accent: PanelAccentKey
   icon: ReactNode
   title: string
   description: string
   trailing?: ReactNode
 }) {
-  const a = PANEL_ACCENTS[accent]
   return (
-    <div className="mb-4">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 items-start gap-3">
-          <div
-            aria-hidden="true"
-            className={`flex size-10 shrink-0 items-center justify-center rounded-xl transition-transform duration-200 group-hover/panel:scale-[1.04] ${a.chip} ${a.ring} [&_svg]:size-[18px]`}
-          >
-            {icon}
-          </div>
-          <div className="min-w-0">
-            <h3 className="truncate text-[15px] font-semibold tracking-tight text-foreground">{title}</h3>
-            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{description}</p>
-          </div>
-        </div>
-        {trailing ? <div className="shrink-0">{trailing}</div> : null}
-      </div>
-      <div className={`mt-3 h-px w-full rounded-full bg-gradient-to-r ${a.underline}`} />
+    <div className="usage-panel-header">
+      <div className={cn('usage-panel-icon', PANEL_ACCENTS[accent].chip)} aria-hidden="true">{icon}</div>
+      <div className="usage-panel-title"><h3>{title}</h3><p title={description}>{description}</p></div>
+      {trailing && <div className="usage-panel-actions">{trailing}</div>}
     </div>
   )
 }
 
-// AccentBar — the single unified bar treatment: a rounded-full gradient capsule
-// on a neutral, slightly recessed bg-muted track with rounded caps.
-function AccentBar({
-  accent,
-  ratio,
-  thickness = 'h-1.5',
-  minWidth = 4,
-}: {
-  accent: PanelAccentKey
-  /** 0..1 fill ratio (clamped); width derived against the panel max */
-  ratio: number
-  thickness?: string
-  minWidth?: number
-}) {
-  const pct = Math.max(minWidth, Math.min(100, ratio * 100))
-  return (
-    <div className={`${thickness} overflow-hidden rounded-full bg-muted ring-1 ring-inset ring-border/50`}>
-      <div
-        className={`h-full rounded-full bg-gradient-to-r transition-[width] duration-500 ease-out ${PANEL_ACCENTS[accent].bar}`}
-        style={{ width: `${pct}%` }}
-      />
-    </div>
-  )
+function AccentBar({ accent, ratio }: { accent: PanelAccentKey; ratio: number }) {
+  return <div className="usage-share-track" aria-hidden="true"><div className={PANEL_ACCENTS[accent].bar} style={{ width: `${Math.max(0, Math.min(100, ratio * 100))}%` }} /></div>
 }
 
-// RankBadge — #1/#2/#3 markers in the panel accent; neutral chip for 4+.
-function RankBadge({ accent, rank }: { accent: PanelAccentKey; rank: number }) {
-  const isTop = rank <= 3
-  const cls = isTop ? PANEL_ACCENTS[accent].rank : 'bg-muted text-muted-foreground'
-  return (
-    <span
-      aria-hidden="true"
-      className={`flex size-5 shrink-0 items-center justify-center rounded-md text-[11px] font-bold leading-none tabular-nums ${cls}`}
-    >
-      {rank}
-    </span>
-  )
+function RankBadge({ rank }: { accent: PanelAccentKey; rank: number }) {
+  return <span aria-hidden="true" className="usage-rank-badge">{String(rank).padStart(2, '0')}</span>
 }
 
-// EmptyPanel — unified empty state used by every panel.
 function EmptyPanel({ accent, icon, text }: { accent: PanelAccentKey; icon: ReactNode; text: string }) {
   return (
-    <div className="flex min-h-[140px] flex-1 flex-col items-center justify-center gap-2.5 rounded-xl border border-dashed border-border/70 px-4 text-center">
-      <div
-        aria-hidden="true"
-        className={`flex size-9 items-center justify-center rounded-lg opacity-70 ${PANEL_ACCENTS[accent].chip} [&_svg]:size-[16px]`}
-      >
-        {icon}
-      </div>
-      <p className="text-[13px] text-muted-foreground">{text}</p>
+    <div className="usage-panel-empty">
+      <div aria-hidden="true" className={cn('usage-panel-icon', PANEL_ACCENTS[accent].chip)}>{icon}</div>
+      <p>{text}</p>
     </div>
   )
 }
@@ -1876,7 +1656,10 @@ export default function Usage() {
   const [filterEndpoint, setFilterEndpoint] = useState('')
   const [filterApiKeyId, setFilterApiKeyId] = useState('')
   const [filterAccountId, setFilterAccountId] = useState(getInitialUsageAccountID)
+  // 从表格行点击进入账号筛选时记住邮箱/名称,筛选 chip 显示可读身份而不是裸 ID;URL 带入的只有 ID。
+  const [filterAccountLabel, setFilterAccountLabel] = useState('')
   const [filterFast, setFilterFast] = useState('')
+  const [filterUltra, setFilterUltra] = useState('')
   const [filterType, setFilterType] = useState<UsageTypeFilter>('')
   const [filterErrorKind, setFilterErrorKind] = useState('')
   const [filterRetry, setFilterRetry] = useState<UsageRetryFilter>('')
@@ -1913,24 +1696,6 @@ export default function Usage() {
     if (searchTimer.current) clearTimeout(searchTimer.current)
   }, [])
 
-  // 仅加载轻量统计（秒级）—— 联动同页 timeRange,与下方请求记录的范围保持一致
-  const loadStats = useCallback(async () => {
-    const { start, end } = resolveRangeISO(timeRange, customRange)
-    const [stats, settings] = await Promise.all([
-      api.getUsageStats({ start, end, channel: channel || undefined }),
-      api.getSettings().catch((): SystemSettings | null => null),
-    ])
-    return { stats, settings }
-  }, [timeRange, customRange, channel])
-
-  const { data, loading, error, reload, reloadSilently } = useDataLoader<{
-    stats: UsageStats | null
-    settings: SystemSettings | null
-  }>({
-    initialData: { stats: null, settings: null },
-    load: loadStats,
-  })
-
   const loadAPIKeys = useCallback(async () => {
     try {
       const response = await api.getAPIKeys()
@@ -1942,7 +1707,9 @@ export default function Usage() {
     }
   }, [])
 
-  const buildLogFilterParams = useCallback(() => {
+  // 维度筛选(时间范围 + 账号/密钥/模型/端点/搜索/形态):顶部区间卡片与下方请求记录共用。
+  // 状态类筛选(成功/错误/状态码)单独拼进列表参数,不影响卡片——卡片本身就按成功/错误拆分。
+  const buildDimensionFilterParams = useCallback(() => {
     const { start, end } = resolveRangeISO(timeRange, customRange)
     return {
       start,
@@ -1953,17 +1720,41 @@ export default function Usage() {
       apiKeyId: filterApiKeyId || undefined,
       accountId: filterAccountId || undefined,
       fast: filterFast || undefined,
+      ultra: filterUltra || undefined,
       stream: filterType === 'stream' ? 'true' : filterType === 'sync' ? 'false' : undefined,
       compact: filterType === 'compact' ? 'true' : undefined,
       hasCompactionHistory: filterType === 'history' ? 'true' : undefined,
       channel: channel || undefined,
-      status: filterStatus && filterStatus !== 'error' ? filterStatus : undefined,
-      errorOnly: filterStatus === 'error' ? 'true' : undefined,
-      errorKind: filterErrorKind || undefined,
       retry: filterRetry || undefined,
       viaWebsocket: filterTransport === 'ws' ? 'true' : filterTransport === 'http' ? 'false' : undefined,
     }
-  }, [timeRange, customRange, searchQuery, filterModel, filterEndpoint, filterApiKeyId, filterAccountId, filterFast, filterType, channel, filterStatus, filterErrorKind, filterRetry, filterTransport])
+  }, [timeRange, customRange, searchQuery, filterModel, filterEndpoint, filterApiKeyId, filterAccountId, filterFast, filterUltra, filterType, channel, filterRetry, filterTransport])
+
+  const buildLogFilterParams = useCallback(() => {
+    return {
+      ...buildDimensionFilterParams(),
+      status: filterStatus && filterStatus !== 'error' ? filterStatus : undefined,
+      errorOnly: filterStatus === 'error' ? 'true' : undefined,
+      errorKind: filterErrorKind || undefined,
+    }
+  }, [buildDimensionFilterParams, filterStatus, filterErrorKind])
+
+  // 选中某个账号(或密钥/模型/搜索)后,卡片只统计命中的请求;累计字段始终全局。
+  const loadStats = useCallback(async () => {
+    const [stats, settings] = await Promise.all([
+      api.getUsageStats(buildDimensionFilterParams()),
+      api.getSettings().catch((): SystemSettings | null => null),
+    ])
+    return { stats, settings }
+  }, [buildDimensionFilterParams])
+
+  const { data, loading, error, reload, reloadSilently } = useDataLoader<{
+    stats: UsageStats | null
+    settings: SystemSettings | null
+  }>({
+    initialData: { stats: null, settings: null },
+    load: loadStats,
+  })
 
   // 服务端分页加载日志
   const loadLogs = useCallback(async () => {
@@ -2073,6 +1864,19 @@ export default function Usage() {
   const rangeAccountBilled = stats?.today_account_billed ?? 0
   const rangeUserBilled = stats?.today_user_billed ?? 0
   const modelStats = stats?.model_stats ?? []
+  // 统计现在跟随模型/账号等筛选,选中某个模型后 model_stats 只剩它自己;
+  // 下拉选项按渠道累积本会话见过的模型,避免筛选一次就把其它模型从下拉里挤掉。
+  const seenModelsRef = useRef<Record<string, string[]>>({})
+  const seenModels = useMemo(() => {
+    const bucket = seenModelsRef.current[channel] ?? []
+    const merged = [...bucket]
+    for (const item of modelStats) {
+      const key = (item.model || '').trim()
+      if (key && key !== 'unknown' && !merged.includes(key)) merged.push(key)
+    }
+    seenModelsRef.current[channel] = merged
+    return merged
+  }, [modelStats, channel])
   // 下拉选项跟随渠道过滤：codex 只列 Codex manifest 目录，grok 只列 Grok 账号声明模型，
   // 全部渠道两者都列；再并上当前范围实际用过的模型（统计已按渠道过滤），去重后目录顺序优先。
   const modelFilterOptions = useMemo(() => {
@@ -2089,12 +1893,13 @@ export default function Usage() {
       const key = m.trim()
       if (key && !seen.has(key)) { seen.add(key); merged.push(key) }
     }
-    for (const item of modelStats) {
-      const key = (item.model || '').trim()
-      if (key && key !== 'unknown' && !seen.has(key)) { seen.add(key); merged.push(key) }
+    for (const key of seenModels) {
+      if (!seen.has(key)) { seen.add(key); merged.push(key) }
     }
+    // 从表格行点进来的模型可能不在目录里,补进选项让下拉能显示当前选中值。
+    if (filterModel && !seen.has(filterModel)) merged.push(filterModel)
     return merged
-  }, [modelOptions, grokModelOptions, claudeModelOptions, modelStats, channel])
+  }, [modelOptions, grokModelOptions, claudeModelOptions, seenModels, channel, filterModel])
   const featureStats = stats?.feature_stats
   const endpointStats = stats?.endpoint_stats ?? []
   const apiKeyStats = stats?.api_key_stats ?? []
@@ -2108,6 +1913,7 @@ export default function Usage() {
     filterEndpoint,
     filterType,
     filterFast,
+    filterUltra,
     filterErrorKind,
     filterRetry,
     filterTransport,
@@ -2121,6 +1927,7 @@ export default function Usage() {
     || filterAccountId
     || filterType
     || filterFast
+    || filterUltra
     || filterErrorKind
     || filterRetry
     || filterTransport,
@@ -2131,6 +1938,7 @@ export default function Usage() {
     { value: 'error', label: t('usage.statusErrors'), tone: 'text-red-600 dark:text-red-300' },
     { value: '4xx', label: '4xx', tone: 'text-amber-600 dark:text-amber-300' },
     { value: '5xx', label: '5xx', tone: 'text-red-600 dark:text-red-300' },
+    { value: '500', label: '500', tone: 'text-red-600 dark:text-red-300' },
     { value: '401', label: '401', tone: 'text-red-600 dark:text-red-300' },
     { value: '429', label: '429', tone: 'text-amber-600 dark:text-amber-300' },
     { value: '499', label: '499', tone: 'text-slate-600 dark:text-slate-300' },
@@ -2156,13 +1964,35 @@ export default function Usage() {
     setFilterEndpoint('')
     setFilterApiKeyId('')
     setFilterAccountId('')
+    setFilterAccountLabel('')
     setFilterType('')
     setFilterFast('')
+    setFilterUltra('')
     setFilterErrorKind('')
     setFilterRetry('')
     setFilterTransport('')
     setPage(1)
   }
+
+  // 表格行的账号/模型可点击:点一下按它筛选,再点同一个取消。
+  const toggleAccountFilter = useCallback((log: UsageLog) => {
+    if (!(log.account_id > 0)) return
+    const nextId = String(log.account_id)
+    if (filterAccountId === nextId) {
+      setFilterAccountId('')
+      setFilterAccountLabel('')
+    } else {
+      setFilterAccountId(nextId)
+      setFilterAccountLabel(log.account_email?.trim() || log.account_name?.trim() || '')
+    }
+    setPage(1)
+  }, [filterAccountId])
+  const toggleModelFilter = useCallback((model: string | undefined) => {
+    const next = (model || '').trim()
+    if (!next) return
+    setFilterModel((current) => (current === next ? '' : next))
+    setPage(1)
+  }, [])
 
   return (
     <StateShell
@@ -2298,17 +2128,12 @@ export default function Usage() {
         </div>
 
         {showAnalysis && (
-          <>
-            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-              <ModelStatsPanel stats={modelStats} showFullUsageNumbers={showFullUsageNumbers} />
-              <FeatureStatsPanel stats={featureStats} totalRequests={rangeRequests} showFullUsageNumbers={showFullUsageNumbers} />
-            </div>
-
-            <div className="grid grid-cols-2 gap-3 max-lg:grid-cols-1">
-              <EndpointStatsPanel stats={endpointStats} totalRequests={rangeRequests} showFullUsageNumbers={showFullUsageNumbers} />
-              <APIKeyStatsPanel stats={apiKeyStats} totalRequests={rangeRequests} showFullUsageNumbers={showFullUsageNumbers} />
-            </div>
-          </>
+          <section className="usage-insights" aria-label={t('usage.usageAnalysis')}>
+            <ModelStatsPanel stats={modelStats} showFullUsageNumbers={showFullUsageNumbers} />
+            <FeatureStatsPanel stats={featureStats} totalRequests={rangeRequests} showFullUsageNumbers={showFullUsageNumbers} />
+            <EndpointStatsPanel stats={endpointStats} totalRequests={rangeRequests} showFullUsageNumbers={showFullUsageNumbers} />
+            <APIKeyStatsPanel stats={apiKeyStats} totalRequests={rangeRequests} showFullUsageNumbers={showFullUsageNumbers} />
+          </section>
         )}
 
         {/* Logs table */}
@@ -2567,11 +2392,13 @@ export default function Usage() {
               {filterAccountId ? (
                 <button
                   type="button"
-                  onClick={() => { setFilterAccountId(''); setPage(1) }}
+                  onClick={() => { setFilterAccountId(''); setFilterAccountLabel(''); setPage(1) }}
                   className="mt-2 inline-flex h-8 items-center gap-1 rounded-lg border border-primary/30 bg-primary/10 px-2.5 text-[13px] font-medium text-primary transition-colors hover:bg-primary/15"
                   title={t('usage.accountIdFilterTitle', { id: filterAccountId })}
                 >
-                  {t('usage.accountIdFilter', { id: filterAccountId })}
+                  {filterAccountLabel
+                    ? t('usage.accountFilter', { account: filterAccountLabel })
+                    : t('usage.accountIdFilter', { id: filterAccountId })}
                   <X className="size-3.5" />
                 </button>
               ) : null}
@@ -2646,12 +2473,13 @@ export default function Usage() {
                       { label: 'WebSocket', value: 'ws' },
                     ]}
                   />
+                  <div className="flex min-w-0 gap-2">
                   {showFastFilter ? (
                     <button
                       type="button"
                       onClick={() => { setFilterFast(filterFast === 'true' ? '' : 'true'); setPage(1) }}
                       className={cn(
-                        'inline-flex h-8 items-center justify-center gap-1 rounded-lg border px-2.5 text-[13px] font-medium transition-colors',
+                        'inline-flex h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border px-2.5 text-[13px] font-medium transition-colors',
                         filterFast === 'true'
                           ? 'border-blue-500/40 bg-blue-500/12 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400'
                           : 'border-border bg-background text-muted-foreground hover:bg-muted/50 hover:text-foreground',
@@ -2661,6 +2489,21 @@ export default function Usage() {
                       Fast
                     </button>
                   ) : null}
+                  <button
+                    type="button"
+                    title={t('usage.ultraModeHint')}
+                    onClick={() => { setFilterUltra(filterUltra === 'true' ? '' : 'true'); setPage(1) }}
+                    className={cn(
+                      'inline-flex h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border px-2.5 text-[13px] font-medium transition-colors',
+                      filterUltra === 'true'
+                        ? 'border-violet-500/40 bg-violet-500/12 text-violet-600 dark:bg-violet-500/20 dark:text-violet-300'
+                        : 'border-border bg-background text-muted-foreground hover:bg-muted/50 hover:text-foreground',
+                    )}
+                  >
+                    <Sparkles className="size-3.5" />
+                    Ultra
+                  </button>
+                  </div>
                 </div>
               ) : null}
             </div>
@@ -2705,7 +2548,15 @@ export default function Usage() {
                             </Badge>
                           ) : null}
                           {visibleColumns.model && (
-                            <Badge variant="outline" className={usageTableBadgeClass}>
+                            <Badge
+                              variant="outline"
+                              className={`${usageTableBadgeClass} ${usageClickableFilterClass} ${log.ultra ? 'usage-ultra-model' : ''} ${filterModel === log.model ? 'border-primary/50 text-primary' : ''}`}
+                              role="button"
+                              tabIndex={0}
+                              title={`${log.ultra ? `${t('usage.ultraModeHint')} · ` : ''}${t('usage.filterByModelHint', { model: log.model || '-' })}`}
+                              onClick={() => toggleModelFilter(log.model)}
+                              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleModelFilter(log.model) } }}
+                            >
                               {(log.channel === 'codex' || log.channel === 'grok' || log.channel === 'antigravity' || log.channel === 'claude') && (
                                 <ChannelLogo
                                   channel={log.channel}
@@ -2750,7 +2601,16 @@ export default function Usage() {
                           {visibleColumns.account && (
                             <div className="truncate" title={formatUsageAccountTitle(log)}>
                               <span className="font-semibold text-foreground/80">{t('usage.tableAccount')}: </span>
-                              {formatUsageAccountLabel(log)}
+                              {log.account_id > 0 ? (
+                                <button
+                                  type="button"
+                                  className={`${usageClickableFilterClass} ${filterAccountId === String(log.account_id) ? 'text-primary' : ''}`}
+                                  title={t('usage.filterByAccountHint', { account: formatUsageAccountTitle(log) })}
+                                  onClick={() => toggleAccountFilter(log)}
+                                >
+                                  {formatUsageAccountLabel(log)}
+                                </button>
+                              ) : formatUsageAccountLabel(log)}
                             </div>
                           )}
                           {visibleColumns.apiKey && (
@@ -2923,7 +2783,15 @@ export default function Usage() {
                                 ws
                               </Badge>
                             )}
-                            <Badge variant="outline" className={usageTableBadgeClass}>
+                            <Badge
+                              variant="outline"
+                              className={`${usageTableBadgeClass} ${usageClickableFilterClass} ${log.ultra ? 'usage-ultra-model' : ''} ${filterModel === log.model ? 'border-primary/50 text-primary' : ''}`}
+                              role="button"
+                              tabIndex={0}
+                              title={`${log.ultra ? `${t('usage.ultraModeHint')} · ` : ''}${t('usage.filterByModelHint', { model: log.model || '-' })}`}
+                              onClick={() => toggleModelFilter(log.model)}
+                              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleModelFilter(log.model) } }}
+                            >
                               {(log.channel === 'codex' || log.channel === 'grok' || log.channel === 'antigravity' || log.channel === 'claude') && (
                                 <ChannelLogo
                                   channel={log.channel}
@@ -2958,9 +2826,20 @@ export default function Usage() {
                           </div>
                         </TableCell>}
                         {visibleColumns.account && <TableCell className={`${usageTableTextClass} text-muted-foreground`}>
-                          <span className="block max-w-[180px] truncate whitespace-nowrap" title={formatUsageAccountTitle(log)}>
-                            {formatUsageAccountLabel(log)}
-                          </span>
+                          {log.account_id > 0 ? (
+                            <button
+                              type="button"
+                              className={`block max-w-[180px] truncate whitespace-nowrap text-left ${usageClickableFilterClass} ${filterAccountId === String(log.account_id) ? 'text-primary' : ''}`}
+                              title={t('usage.filterByAccountHint', { account: formatUsageAccountTitle(log) })}
+                              onClick={() => toggleAccountFilter(log)}
+                            >
+                              {formatUsageAccountLabel(log)}
+                            </button>
+                          ) : (
+                            <span className="block max-w-[180px] truncate whitespace-nowrap" title={formatUsageAccountTitle(log)}>
+                              {formatUsageAccountLabel(log)}
+                            </span>
+                          )}
                         </TableCell>}
                         {visibleColumns.apiKey && <TableCell className={`${usageTableTextClass} text-muted-foreground`}>
                           <span className="block max-w-[180px] truncate whitespace-nowrap font-mono text-[12px]" title={formatUsageAPIKeyLabel(log.api_key_name, log.api_key_masked) || t('usage.unknownApiKey')}>

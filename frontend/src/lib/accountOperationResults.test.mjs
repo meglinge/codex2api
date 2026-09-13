@@ -200,3 +200,14 @@ test("resolveChannelBatchTestAccountIDs keeps Codex and Grok tests isolated", ()
     [2, 1],
   );
 });
+
+test("usage refresh results retain both refreshed and failed accounts", () => {
+  const results = new Map();
+  collectAccountOperationResult(results, { type: "start", action: "batch_usage_refresh" });
+  collectAccountOperationResult(results, { type: "progress", action: "batch_usage_refresh", account_id: 1, status: "success", http_status: 200, message: "用量已更新" });
+  collectAccountOperationResult(results, { type: "progress", action: "batch_usage_refresh", account_id: 2, status: "failed", http_status: 401, error: "WHAM 上游返回 401" });
+  const snapshot = snapshotAccountOperationResults(results);
+  assert.deepEqual(snapshot.map(({ accountId, status }) => [accountId, status]), [[2, "failed"], [1, "success"]]);
+  assert.equal(summarizeAccountOperationResults(snapshot).failed, 1);
+  assert.equal(snapshot[0].httpStatus, 401);
+});

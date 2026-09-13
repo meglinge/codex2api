@@ -701,6 +701,11 @@ export default function AccountDetailSheet({
                     {formatBeijingTime(account.created_at)}
                   </span>
                 </MetricCard>
+                {account.codex_last_refresh_at ? (
+                  <MetricCard label={t("accounts.lastTokenRefresh")}>
+                    <span className="text-[12px]">{formatBeijingTime(account.codex_last_refresh_at)}</span>
+                  </MetricCard>
+                ) : null}
                 <MetricCard label={t("accounts.updatedAt")}>
                   <div className="space-y-0.5 text-[12px]">
                     <div>{formatRelativeTime(account.updated_at)}</div>
@@ -714,6 +719,14 @@ export default function AccountDetailSheet({
                 </MetricCard>
               </div>
             </Section>
+
+            {account.codex_refresh_error ? (
+              <Section title={t("accounts.tokenRefreshNotice")}>
+                <p className="break-words rounded-xl border border-amber-500/20 bg-amber-500/10 p-3 text-xs text-amber-900 dark:text-amber-200">
+                  {account.codex_refresh_error}
+                </p>
+              </Section>
+            ) : null}
 
             {((account.tags ?? []).length > 0 || groups.length > 0) && (
               <Section title={t("accounts.detailOrganization")}>

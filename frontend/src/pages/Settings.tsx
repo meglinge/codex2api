@@ -2299,6 +2299,8 @@ export default function Settings() {
     const normalized = {
       ...cacheNormalized,
       codex_images_main_model: cacheNormalized.codex_images_main_model ?? '',
+      codex_telemetry_enabled: cacheNormalized.codex_telemetry_enabled ?? false,
+      codex_telemetry_timing_debug: cacheNormalized.codex_telemetry_timing_debug ?? false,
       billing_tier_policy: normalizeBillingTierPolicyValue(cacheNormalized.billing_tier_policy),
       first_token_mode: normalizeFirstTokenModeValue(cacheNormalized.first_token_mode),
       models_list_read_max_bytes:
@@ -2333,6 +2335,7 @@ export default function Settings() {
 	    usage_probe_responses_fallback_enabled: true,
 	    recovery_probe_interval_minutes: 30,
     lazy_mode: false,
+    codex_oauth_keepalive_enabled: false,
     pg_max_conns: 50,
     redis_pool_size: 30,
     auto_clean_unauthorized: false,
@@ -2349,6 +2352,8 @@ export default function Settings() {
     auto_reset_credits_before_expiry_min: 60,
     auto_activate_5h_window_enabled: false,
     codex_force_websocket: false,
+    codex_telemetry_enabled: false,
+    codex_telemetry_timing_debug: false,
     codex_request_compression: true,
     codex_ws_weak_network_mode: false,
     codex_ws_keepalive_enabled: false,
@@ -3459,6 +3464,13 @@ export default function Settings() {
                           }}
                         />
                       </SettingField>
+                      <SettingField label={t('settings.codexOAuthKeepalive')} description={t('settings.codexOAuthKeepaliveDesc')} layout="switch">
+                        <Switch
+                          aria-label={t('settings.codexOAuthKeepalive')}
+                          checked={settingsForm.codex_oauth_keepalive_enabled}
+                          onCheckedChange={(checked) => autoSaveBooleanField('codex_oauth_keepalive_enabled', checked)}
+                        />
+                      </SettingField>
                       {inviteGuideEnabled !== null && (
                         <SettingField
                           label={t('settings.inviteGuide')}
@@ -4193,6 +4205,24 @@ export default function Settings() {
                           <span className="font-mono text-xs text-muted-foreground">{syncedCliVersion}</span>
                         )}
                       </div>
+                    </SettingField>
+                    <SettingField
+                      label={t('settings.codexTelemetry')}
+                      description={t('settings.codexTelemetryDesc')}
+                    >
+                      <Switch
+                        checked={settingsForm.codex_telemetry_enabled}
+                        onCheckedChange={(checked) => autoSaveBooleanField('codex_telemetry_enabled', checked)}
+                      />
+                    </SettingField>
+                    <SettingField
+                      label={t('settings.codexTelemetryTiming')}
+                      description={t('settings.codexTelemetryTimingDesc')}
+                    >
+                      <Switch
+                        checked={settingsForm.codex_telemetry_timing_debug}
+                        onCheckedChange={(checked) => autoSaveBooleanField('codex_telemetry_timing_debug', checked)}
+                      />
                     </SettingField>
                     {/* CLI 版本自动同步：开关 + 间隔成对横排，行高一致 */}
                     <div className="sm:col-span-2 grid gap-0 overflow-hidden rounded-lg border border-border/60 bg-muted/15 sm:grid-cols-2 sm:divide-x sm:divide-border/60">

@@ -287,7 +287,7 @@ func (h *Handler) apiKeyScopeUsageTracker() *apiKeyScopeUsageTracker {
 }
 
 // recordAPIKeyScopeUsage 在用量落库前把这笔消耗登记进本地增量。计费口径与
-// InsertUsageLog 完全一致(共用 database.UsageLogBilledCost)。
+// InsertUsageLog 完全一致(共用 database.UsageLogUserBilledCost)。
 // 运行态缓存跨实例共享(Redis)时同时写一份分钟桶,让其它实例也看得到这笔消耗。
 func (h *Handler) recordAPIKeyScopeUsage(input *database.UsageLogInput) {
 	if h == nil || input == nil || input.APIKeyID <= 0 || input.AccountID <= 0 {
@@ -297,7 +297,7 @@ func (h *Handler) recordAPIKeyScopeUsage(input *database.UsageLogInput) {
 		return
 	}
 	tokens := int64(input.TotalTokens)
-	cost := database.UsageLogBilledCost(input)
+	cost := database.UsageLogUserBilledCost(input)
 	tracker := h.apiKeyScopeUsageTracker()
 	if !tracker.isTracked(input.APIKeyID) {
 		return

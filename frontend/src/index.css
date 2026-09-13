@@ -1,4 +1,6 @@
 @import "tailwindcss";
+@import "./website-theme-colors.css";
+@import "./website-theme-ui.css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -839,6 +841,342 @@
     --sidebar-background: 190 100% 10%;
   }
 
+  /* Ocean (light / dark palette) */
+  .theme-ocean {
+    --color-background: hsl(202 50% 96%);
+    --color-foreground: hsl(207 45% 18%);
+    --color-card: hsl(202 35% 99%);
+    --color-card-foreground: hsl(207 45% 18%);
+    --color-popover: hsl(202 35% 99%);
+    --color-popover-foreground: hsl(207 45% 18%);
+    --color-primary: hsl(202 82% 35%);
+    --color-primary-foreground: hsl(0 0% 100%);
+    --color-secondary: hsl(202 32% 91%);
+    --color-secondary-foreground: hsl(207 45% 18%);
+    --color-muted: hsl(202 32% 91%);
+    --color-muted-foreground: hsl(207 20% 39%);
+    --color-accent: hsl(202 45% 89%);
+    --color-accent-foreground: hsl(207 45% 18%);
+    --color-border: hsl(202 28% 80%);
+    --color-input: hsl(202 28% 80%);
+    --color-ring: hsl(202 82% 35%);
+    --sidebar-background: 202 42% 94%;
+  }
+  .dark.theme-ocean {
+    --color-background: hsl(207 44% 10%);
+    --color-foreground: hsl(203 30% 90%);
+    --color-card: hsl(207 38% 14%);
+    --color-card-foreground: hsl(203 30% 90%);
+    --color-popover: hsl(207 38% 14%);
+    --color-popover-foreground: hsl(203 30% 90%);
+    --color-primary: hsl(195 78% 64%);
+    --color-primary-foreground: hsl(207 44% 10%);
+    --color-secondary: hsl(207 28% 20%);
+    --color-secondary-foreground: hsl(203 30% 90%);
+    --color-muted: hsl(207 28% 20%);
+    --color-muted-foreground: hsl(203 24% 72%);
+    --color-accent: hsl(204 39% 23%);
+    --color-accent-foreground: hsl(203 30% 90%);
+    --color-border: hsl(205 28% 30%);
+    --color-input: hsl(205 28% 30%);
+    --color-ring: hsl(195 78% 64%);
+    --sidebar-background: 207 44% 9%;
+  }
+
+  /* Forest (light / dark palette) */
+  .theme-forest {
+    --color-background: hsl(90 24% 95%);
+    --color-foreground: hsl(145 25% 18%);
+    --color-card: hsl(90 25% 98%);
+    --color-card-foreground: hsl(145 25% 18%);
+    --color-popover: hsl(90 25% 98%);
+    --color-popover-foreground: hsl(145 25% 18%);
+    --color-primary: hsl(145 40% 30%);
+    --color-primary-foreground: hsl(0 0% 100%);
+    --color-secondary: hsl(108 18% 89%);
+    --color-secondary-foreground: hsl(145 25% 18%);
+    --color-muted: hsl(108 18% 89%);
+    --color-muted-foreground: hsl(135 13% 37%);
+    --color-accent: hsl(120 22% 86%);
+    --color-accent-foreground: hsl(145 25% 18%);
+    --color-border: hsl(116 17% 76%);
+    --color-input: hsl(116 17% 76%);
+    --color-ring: hsl(145 40% 30%);
+    --sidebar-background: 102 22% 92%;
+  }
+  .dark.theme-forest {
+    --color-background: hsl(145 22% 10%);
+    --color-foreground: hsl(110 20% 88%);
+    --color-card: hsl(145 19% 14%);
+    --color-card-foreground: hsl(110 20% 88%);
+    --color-popover: hsl(145 19% 14%);
+    --color-popover-foreground: hsl(110 20% 88%);
+    --color-primary: hsl(139 35% 66%);
+    --color-primary-foreground: hsl(145 22% 10%);
+    --color-secondary: hsl(143 16% 21%);
+    --color-secondary-foreground: hsl(110 20% 88%);
+    --color-muted: hsl(143 16% 21%);
+    --color-muted-foreground: hsl(125 15% 70%);
+    --color-accent: hsl(143 24% 24%);
+    --color-accent-foreground: hsl(110 20% 88%);
+    --color-border: hsl(140 12% 30%);
+    --color-input: hsl(140 12% 30%);
+    --color-ring: hsl(139 35% 66%);
+    --sidebar-background: 145 22% 8%;
+  }
+
+  /* Lavender (light / dark palette) */
+  .theme-lavender {
+    --color-background: hsl(266 40% 97%);
+    --color-foreground: hsl(267 27% 21%);
+    --color-card: hsl(270 40% 99%);
+    --color-card-foreground: hsl(267 27% 21%);
+    --color-popover: hsl(270 40% 99%);
+    --color-popover-foreground: hsl(267 27% 21%);
+    --color-primary: hsl(267 42% 44%);
+    --color-primary-foreground: hsl(0 0% 100%);
+    --color-secondary: hsl(269 28% 92%);
+    --color-secondary-foreground: hsl(267 27% 21%);
+    --color-muted: hsl(269 28% 92%);
+    --color-muted-foreground: hsl(267 15% 42%);
+    --color-accent: hsl(269 38% 89%);
+    --color-accent-foreground: hsl(267 27% 21%);
+    --color-border: hsl(268 25% 82%);
+    --color-input: hsl(268 25% 82%);
+    --color-ring: hsl(267 42% 44%);
+    --sidebar-background: 269 35% 95%;
+  }
+  .dark.theme-lavender {
+    --color-background: hsl(266 24% 12%);
+    --color-foreground: hsl(268 32% 91%);
+    --color-card: hsl(267 22% 17%);
+    --color-card-foreground: hsl(268 32% 91%);
+    --color-popover: hsl(267 22% 17%);
+    --color-popover-foreground: hsl(268 32% 91%);
+    --color-primary: hsl(269 65% 77%);
+    --color-primary-foreground: hsl(266 24% 12%);
+    --color-secondary: hsl(267 18% 24%);
+    --color-secondary-foreground: hsl(268 32% 91%);
+    --color-muted: hsl(267 18% 24%);
+    --color-muted-foreground: hsl(268 23% 73%);
+    --color-accent: hsl(268 28% 29%);
+    --color-accent-foreground: hsl(268 32% 91%);
+    --color-border: hsl(267 21% 34%);
+    --color-input: hsl(267 21% 34%);
+    --color-ring: hsl(269 65% 77%);
+    --sidebar-background: 266 25% 10%;
+  }
+
+  /* Amber (light / dark palette) */
+  .theme-amber {
+    --color-background: hsl(43 48% 96%);
+    --color-foreground: hsl(30 32% 19%);
+    --color-card: hsl(42 50% 99%);
+    --color-card-foreground: hsl(30 32% 19%);
+    --color-popover: hsl(42 50% 99%);
+    --color-popover-foreground: hsl(30 32% 19%);
+    --color-primary: hsl(35 85% 31%);
+    --color-primary-foreground: hsl(0 0% 100%);
+    --color-secondary: hsl(42 31% 89%);
+    --color-secondary-foreground: hsl(30 32% 19%);
+    --color-muted: hsl(42 31% 89%);
+    --color-muted-foreground: hsl(33 19% 37%);
+    --color-accent: hsl(42 48% 86%);
+    --color-accent-foreground: hsl(30 32% 19%);
+    --color-border: hsl(40 28% 77%);
+    --color-input: hsl(40 28% 77%);
+    --color-ring: hsl(35 85% 31%);
+    --sidebar-background: 43 42% 93%;
+  }
+  .dark.theme-amber {
+    --color-background: hsl(35 17% 11%);
+    --color-foreground: hsl(43 30% 88%);
+    --color-card: hsl(35 16% 15%);
+    --color-card-foreground: hsl(43 30% 88%);
+    --color-popover: hsl(35 16% 15%);
+    --color-popover-foreground: hsl(43 30% 88%);
+    --color-primary: hsl(42 85% 63%);
+    --color-primary-foreground: hsl(35 17% 11%);
+    --color-secondary: hsl(35 14% 22%);
+    --color-secondary-foreground: hsl(43 30% 88%);
+    --color-muted: hsl(35 14% 22%);
+    --color-muted-foreground: hsl(38 20% 70%);
+    --color-accent: hsl(37 27% 25%);
+    --color-accent-foreground: hsl(43 30% 88%);
+    --color-border: hsl(36 15% 32%);
+    --color-input: hsl(36 15% 32%);
+    --color-ring: hsl(42 85% 63%);
+    --sidebar-background: 35 18% 9%;
+  }
+
+  /* Espresso (light / dark palette) */
+  .theme-espresso {
+    --color-background: hsl(26 26% 94%);
+    --color-foreground: hsl(22 25% 20%);
+    --color-card: hsl(30 27% 98%);
+    --color-card-foreground: hsl(22 25% 20%);
+    --color-popover: hsl(30 27% 98%);
+    --color-popover-foreground: hsl(22 25% 20%);
+    --color-primary: hsl(22 38% 35%);
+    --color-primary-foreground: hsl(0 0% 100%);
+    --color-secondary: hsl(28 20% 87%);
+    --color-secondary-foreground: hsl(22 25% 20%);
+    --color-muted: hsl(28 20% 87%);
+    --color-muted-foreground: hsl(23 15% 38%);
+    --color-accent: hsl(26 27% 83%);
+    --color-accent-foreground: hsl(22 25% 20%);
+    --color-border: hsl(26 18% 76%);
+    --color-input: hsl(26 18% 76%);
+    --color-ring: hsl(22 38% 35%);
+    --sidebar-background: 26 24% 91%;
+  }
+  .dark.theme-espresso {
+    --color-background: hsl(20 22% 10%);
+    --color-foreground: hsl(30 25% 89%);
+    --color-card: hsl(22 20% 14%);
+    --color-card-foreground: hsl(30 25% 89%);
+    --color-popover: hsl(22 20% 14%);
+    --color-popover-foreground: hsl(30 25% 89%);
+    --color-primary: hsl(28 46% 70%);
+    --color-primary-foreground: hsl(20 22% 10%);
+    --color-secondary: hsl(22 17% 21%);
+    --color-secondary-foreground: hsl(30 25% 89%);
+    --color-muted: hsl(22 17% 21%);
+    --color-muted-foreground: hsl(27 18% 71%);
+    --color-accent: hsl(23 27% 25%);
+    --color-accent-foreground: hsl(30 25% 89%);
+    --color-border: hsl(24 18% 31%);
+    --color-input: hsl(24 18% 31%);
+    --color-ring: hsl(28 46% 70%);
+    --sidebar-background: 20 24% 8%;
+  }
+
+  /* Sakura (light / dark palette) */
+  .theme-sakura {
+    --color-background: hsl(350 52% 97%);
+    --color-foreground: hsl(340 27% 21%);
+    --color-card: hsl(345 45% 99%);
+    --color-card-foreground: hsl(340 27% 21%);
+    --color-popover: hsl(345 45% 99%);
+    --color-popover-foreground: hsl(340 27% 21%);
+    --color-primary: hsl(345 54% 43%);
+    --color-primary-foreground: hsl(0 0% 100%);
+    --color-secondary: hsl(347 33% 92%);
+    --color-secondary-foreground: hsl(340 27% 21%);
+    --color-muted: hsl(347 33% 92%);
+    --color-muted-foreground: hsl(341 18% 40%);
+    --color-accent: hsl(347 46% 89%);
+    --color-accent-foreground: hsl(340 27% 21%);
+    --color-border: hsl(346 29% 81%);
+    --color-input: hsl(346 29% 81%);
+    --color-ring: hsl(345 54% 43%);
+    --sidebar-background: 350 45% 95%;
+  }
+  .dark.theme-sakura {
+    --color-background: hsl(340 23% 11%);
+    --color-foreground: hsl(345 30% 91%);
+    --color-card: hsl(340 22% 16%);
+    --color-card-foreground: hsl(345 30% 91%);
+    --color-popover: hsl(340 22% 16%);
+    --color-popover-foreground: hsl(345 30% 91%);
+    --color-primary: hsl(346 68% 74%);
+    --color-primary-foreground: hsl(340 23% 11%);
+    --color-secondary: hsl(339 18% 23%);
+    --color-secondary-foreground: hsl(345 30% 91%);
+    --color-muted: hsl(339 18% 23%);
+    --color-muted-foreground: hsl(341 24% 73%);
+    --color-accent: hsl(341 29% 27%);
+    --color-accent-foreground: hsl(345 30% 91%);
+    --color-border: hsl(339 21% 33%);
+    --color-input: hsl(339 21% 33%);
+    --color-ring: hsl(346 68% 74%);
+    --sidebar-background: 340 25% 9%;
+  }
+
+  /* Mint (light / dark palette) */
+  .theme-mint {
+    --color-background: hsl(157 38% 96%);
+    --color-foreground: hsl(165 34% 17%);
+    --color-card: hsl(155 38% 99%);
+    --color-card-foreground: hsl(165 34% 17%);
+    --color-popover: hsl(155 38% 99%);
+    --color-popover-foreground: hsl(165 34% 17%);
+    --color-primary: hsl(164 67% 27%);
+    --color-primary-foreground: hsl(0 0% 100%);
+    --color-secondary: hsl(157 27% 90%);
+    --color-secondary-foreground: hsl(165 34% 17%);
+    --color-muted: hsl(157 27% 90%);
+    --color-muted-foreground: hsl(164 20% 36%);
+    --color-accent: hsl(158 35% 86%);
+    --color-accent-foreground: hsl(165 34% 17%);
+    --color-border: hsl(160 26% 77%);
+    --color-input: hsl(160 26% 77%);
+    --color-ring: hsl(164 67% 27%);
+    --sidebar-background: 157 34% 93%;
+  }
+  .dark.theme-mint {
+    --color-background: hsl(166 33% 9%);
+    --color-foreground: hsl(155 27% 89%);
+    --color-card: hsl(164 28% 13%);
+    --color-card-foreground: hsl(155 27% 89%);
+    --color-popover: hsl(164 28% 13%);
+    --color-popover-foreground: hsl(155 27% 89%);
+    --color-primary: hsl(158 52% 65%);
+    --color-primary-foreground: hsl(166 33% 9%);
+    --color-secondary: hsl(164 23% 20%);
+    --color-secondary-foreground: hsl(155 27% 89%);
+    --color-muted: hsl(164 23% 20%);
+    --color-muted-foreground: hsl(160 21% 70%);
+    --color-accent: hsl(164 33% 23%);
+    --color-accent-foreground: hsl(155 27% 89%);
+    --color-border: hsl(163 22% 30%);
+    --color-input: hsl(163 22% 30%);
+    --color-ring: hsl(158 52% 65%);
+    --sidebar-background: 166 35% 7%;
+  }
+
+  /* Midnight (light / dark palette) */
+  .theme-midnight {
+    --color-background: hsl(228 45% 96%);
+    --color-foreground: hsl(228 42% 20%);
+    --color-card: hsl(226 45% 99%);
+    --color-card-foreground: hsl(228 42% 20%);
+    --color-popover: hsl(226 45% 99%);
+    --color-popover-foreground: hsl(228 42% 20%);
+    --color-primary: hsl(230 60% 45%);
+    --color-primary-foreground: hsl(0 0% 100%);
+    --color-secondary: hsl(228 29% 91%);
+    --color-secondary-foreground: hsl(228 42% 20%);
+    --color-muted: hsl(228 29% 91%);
+    --color-muted-foreground: hsl(226 23% 40%);
+    --color-accent: hsl(231 40% 88%);
+    --color-accent-foreground: hsl(228 42% 20%);
+    --color-border: hsl(228 29% 81%);
+    --color-input: hsl(228 29% 81%);
+    --color-ring: hsl(230 60% 45%);
+    --sidebar-background: 228 38% 94%;
+  }
+  .dark.theme-midnight {
+    --color-background: hsl(228 45% 7%);
+    --color-foreground: hsl(226 40% 92%);
+    --color-card: hsl(228 37% 12%);
+    --color-card-foreground: hsl(226 40% 92%);
+    --color-popover: hsl(228 37% 12%);
+    --color-popover-foreground: hsl(226 40% 92%);
+    --color-primary: hsl(218 84% 74%);
+    --color-primary-foreground: hsl(228 45% 7%);
+    --color-secondary: hsl(228 30% 19%);
+    --color-secondary-foreground: hsl(226 40% 92%);
+    --color-muted: hsl(228 30% 19%);
+    --color-muted-foreground: hsl(224 30% 73%);
+    --color-accent: hsl(228 42% 23%);
+    --color-accent-foreground: hsl(226 40% 92%);
+    --color-border: hsl(227 29% 29%);
+    --color-input: hsl(227 29% 29%);
+    --color-ring: hsl(218 84% 74%);
+    --sidebar-background: 228 46% 6%;
+  }
+
   * {
     @apply border-border;
   }
@@ -1476,4 +1814,111 @@
 [data-slot='dialog-content']::-webkit-scrollbar-thumb:hover,
 .thin-scrollbar::-webkit-scrollbar-thumb:hover {
   background-color: color-mix(in oklab, var(--color-muted-foreground) 65%, transparent);
+}
+
+/* Codex Ultra 档的模型徽章:半透明玻璃质感 + 星空紫蓝渐变 + 闪烁星点
+   (对应 Codex 客户端的 Ultra 进度条视觉)。放在 layer 之外,稳定压过
+   Badge 自带的 outline 底色/文字色工具类。 */
+@keyframes usage-ultra-flow {
+  0% { background-position: 0 0, 0% 50%; }
+  100% { background-position: 0 0, 200% 50%; }
+}
+
+@keyframes usage-ultra-twinkle {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+
+.usage-ultra-model {
+  position: relative;
+  isolation: isolate;
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.42);
+  /* 顶层是玻璃高光,底层是流动的星空渐变;两层各自控制尺寸与位移。 */
+  background-image:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.34) 0%, rgba(255, 255, 255, 0.08) 48%, rgba(255, 255, 255, 0) 100%),
+    linear-gradient(
+      100deg,
+      rgba(49, 52, 150, 0.88) 0%,
+      rgba(79, 70, 229, 0.85) 22%,
+      rgba(124, 58, 237, 0.86) 48%,
+      rgba(168, 85, 247, 0.84) 64%,
+      rgba(91, 70, 210, 0.86) 82%,
+      rgba(49, 52, 150, 0.88) 100%
+    );
+  background-size: 100% 100%, 200% 100%;
+  background-position: 0 0, 0% 50%;
+  background-clip: padding-box;
+  backdrop-filter: blur(6px) saturate(1.4);
+  -webkit-backdrop-filter: blur(6px) saturate(1.4);
+  animation: usage-ultra-flow 7s linear infinite;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.38),
+    inset 0 -1px 0 rgba(60, 40, 140, 0.18),
+    0 2px 10px rgba(99, 76, 224, 0.28);
+  text-shadow: 0 1px 1px rgba(30, 20, 80, 0.35);
+}
+
+.dark .usage-ultra-model {
+  border-color: rgba(196, 181, 253, 0.32);
+  background-image:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.22) 0%, rgba(255, 255, 255, 0.05) 48%, rgba(255, 255, 255, 0) 100%),
+    linear-gradient(
+      100deg,
+      rgba(44, 46, 128, 0.8) 0%,
+      rgba(70, 66, 196, 0.78) 22%,
+      rgba(118, 70, 230, 0.8) 48%,
+      rgba(160, 100, 240, 0.78) 64%,
+      rgba(86, 68, 200, 0.8) 82%,
+      rgba(44, 46, 128, 0.8) 100%
+    );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.25),
+    0 2px 12px rgba(124, 92, 246, 0.35);
+}
+
+.usage-ultra-model:hover {
+  color: #fff;
+  filter: brightness(1.06) saturate(1.1);
+}
+
+.usage-ultra-model::before,
+.usage-ultra-model::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  border-radius: inherit;
+  background-repeat: no-repeat;
+  animation: usage-ultra-twinkle 2.6s ease-in-out infinite;
+}
+
+.usage-ultra-model::before {
+  background-image:
+    radial-gradient(circle, rgba(255, 255, 255, 0.95) 0 1px, transparent 1.6px),
+    radial-gradient(circle, rgba(255, 255, 255, 0.8) 0 0.8px, transparent 1.4px),
+    radial-gradient(circle, rgba(255, 255, 255, 0.9) 0 1px, transparent 1.6px),
+    radial-gradient(circle, rgba(255, 255, 255, 0.7) 0 0.8px, transparent 1.4px);
+  background-size: 4px 4px, 3px 3px, 4px 4px, 3px 3px;
+  background-position: 12% 28%, 34% 70%, 61% 22%, 86% 64%;
+}
+
+.usage-ultra-model::after {
+  background-image:
+    radial-gradient(circle, rgba(255, 255, 255, 0.85) 0 0.8px, transparent 1.4px),
+    radial-gradient(circle, rgba(255, 255, 255, 0.9) 0 1px, transparent 1.6px),
+    radial-gradient(circle, rgba(255, 255, 255, 0.75) 0 0.8px, transparent 1.4px);
+  background-size: 3px 3px, 4px 4px, 3px 3px;
+  background-position: 22% 72%, 48% 30%, 74% 78%;
+  animation-delay: -1.3s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .usage-ultra-model,
+  .usage-ultra-model::before,
+  .usage-ultra-model::after {
+    animation: none;
+  }
 }

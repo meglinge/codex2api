@@ -516,19 +516,23 @@ func responsesToGeminiInternal(raw []byte, project, model string) (map[string]an
 				if role == "" {
 					role = "user"
 				}
-				text, textErr := responseItemText(m["content"])
-				if textErr != nil {
-					return nil, textErr
+				parts, partsErr := responseItemParts(m["content"], role == "user")
+				if partsErr != nil {
+					return nil, partsErr
 				}
 				switch role {
 				case "assistant":
-					add("model", text)
+					addParts("model", parts)
 				case "system", "developer":
-					if strings.TrimSpace(text) != "" {
-						systemParts = append(systemParts, text)
+					for _, p := range parts {
+						if pm, ok := p.(map[string]any); ok {
+							if t, ok := pm["text"].(string); ok && strings.TrimSpace(t) != "" {
+								systemParts = append(systemParts, t)
+							}
+						}
 					}
 				case "user":
-					add("user", text)
+					addParts("user", parts)
 				default:
 					return nil, antigravityOAuthUnsupported("message role " + role)
 				}
@@ -556,13 +560,19 @@ func responsesToGeminiInternal(raw []byte, project, model string) (map[string]an
 				if callID == "" || name == "" {
 					return nil, antigravityOAuthUnsupported("orphan function_call_output")
 				}
-				output, outputErr := antigravityFunctionOutputText(m["output"])
+				output, images, outputErr := antigravityFunctionOutput(m["output"])
 				if outputErr != nil {
 					return nil, outputErr
 				}
-				addParts("user", []any{map[string]any{"functionResponse": map[string]any{
-					"name": name, "response": map[string]any{"result": output}, "id": callID,
-				}}})
+				functionResponse := map[string]any{
+					"name":     name,
+					"response": map[string]any{"result": output},
+					"id":       callID,
+				}
+				if len(images) > 0 {
+					functionResponse["parts"] = images
+				}
+				addParts("user", []any{map[string]any{"functionResponse": functionResponse}})
 			case "reasoning":
 				// Codex and the Anthropic bridge echo previous reasoning items
 				// back as conversation history. Their payload is an opaque
@@ -772,35 +782,46 @@ func antigravityGeminiFunctionArguments(raw any) (any, error) {
 	return raw, nil
 }
 
-func antigravityFunctionOutputText(raw any) (string, error) {
+func antigravityFunctionOutput(raw any) (string, []any, error) {
 	if raw == nil {
-		return "", nil
+		return "", nil, nil
 	}
 	if text, ok := raw.(string); ok {
-		return text, nil
+		return text, nil, nil
 	}
 	if parts, ok := raw.([]any); ok {
 		texts := make([]string, 0, len(parts))
+		images := make([]any, 0)
 		for _, part := range parts {
 			partValue, ok := part.(map[string]any)
 			if !ok {
-				return "", antigravityOAuthUnsupported("non-text function_call_output parts")
+				return "", nil, antigravityOAuthUnsupported("non-map function_call_output parts")
 			}
 			partType := lowerStringField(partValue, "type")
-			if partType != "" && partType != "input_text" && partType != "output_text" && partType != "text" {
-				return "", antigravityOAuthUnsupported("function_call_output part type " + partType)
-			}
-			if text, ok := partValue["text"].(string); ok {
-				texts = append(texts, text)
+			switch partType {
+			case "", "input_text", "output_text", "text":
+				if text, ok := partValue["text"].(string); ok {
+					texts = append(texts, text)
+				} else if text, ok := partValue["content"].(string); ok {
+					texts = append(texts, text)
+				}
+			case "input_image", "image_url":
+				inlinePart, err := antigravityExtractInlineImagePart(partValue)
+				if err != nil {
+					return "", nil, err
+				}
+				images = append(images, inlinePart)
+			default:
+				return "", nil, antigravityOAuthUnsupported("function_call_output part type " + partType)
 			}
 		}
-		return strings.Join(texts, "\n"), nil
+		return strings.Join(texts, "\n"), images, nil
 	}
 	encoded, err := json.Marshal(raw)
 	if err != nil {
-		return "", fmt.Errorf("encode function_call_output: %w", err)
+		return "", nil, fmt.Errorf("encode function_call_output: %w", err)
 	}
-	return string(encoded), nil
+	return string(encoded), nil, nil
 }
 
 func antigravityGeminiNeedsToolSignature(model string) bool {
@@ -1258,6 +1279,85 @@ func antigravityOAuthUnsupported(feature string) error {
 		Type:       ErrorTypeInvalidRequest,
 		HTTPStatus: http.StatusBadRequest,
 	}
+}
+
+func responseItemParts(v any, allowImages bool) ([]any, error) {
+	if s, ok := v.(string); ok {
+		if strings.TrimSpace(s) == "" {
+			return nil, nil
+		}
+		return []any{map[string]any{"text": s}}, nil
+	}
+	arr, _ := v.([]any)
+	var parts []any
+	for _, x := range arr {
+		m, ok := x.(map[string]any)
+		if !ok {
+			return nil, antigravityOAuthUnsupported("non-map content parts")
+		}
+		partType := lowerStringField(m, "type")
+		switch partType {
+		case "", "input_text", "output_text", "text":
+			text := ""
+			if s, ok := m["text"].(string); ok {
+				text = s
+			} else if s, ok := m["content"].(string); ok {
+				text = s
+			}
+			if strings.TrimSpace(text) != "" {
+				parts = append(parts, map[string]any{"text": text})
+			}
+		case "input_image", "image_url":
+			if !allowImages {
+				return nil, antigravityOAuthUnsupported("images in non-user messages")
+			}
+			inlinePart, err := antigravityExtractInlineImagePart(m)
+			if err != nil {
+				return nil, err
+			}
+			parts = append(parts, inlinePart)
+		default:
+			return nil, antigravityOAuthUnsupported("content part type " + partType)
+		}
+	}
+	return parts, nil
+}
+
+func antigravityExtractInlineImagePart(m map[string]any) (map[string]any, error) {
+	var rawURL string
+	if u, ok := m["image_url"].(string); ok {
+		rawURL = strings.TrimSpace(u)
+	} else if obj, ok := m["image_url"].(map[string]any); ok {
+		if u, ok := obj["url"].(string); ok {
+			rawURL = strings.TrimSpace(u)
+		}
+	}
+	if rawURL == "" {
+		if u, ok := m["url"].(string); ok {
+			rawURL = strings.TrimSpace(u)
+		}
+	}
+	if rawURL == "" {
+		return nil, antigravityOAuthUnsupported("image part without image_url")
+	}
+	if strings.HasPrefix(rawURL, "data:") {
+		rest := strings.TrimPrefix(rawURL, "data:")
+		mediaType, data, ok := strings.Cut(rest, ";base64,")
+		if !ok || strings.TrimSpace(data) == "" {
+			return nil, antigravityOAuthUnsupported("invalid base64 image data URI")
+		}
+		mimeType := strings.TrimSpace(mediaType)
+		if mimeType == "" {
+			mimeType = "image/png"
+		}
+		return map[string]any{
+			"inlineData": map[string]any{
+				"mimeType": mimeType,
+				"data":     data,
+			},
+		}, nil
+	}
+	return nil, antigravityOAuthUnsupported("remote image URLs in Antigravity OAuth adapter; use data URI")
 }
 
 func responseItemText(v any) (string, error) {

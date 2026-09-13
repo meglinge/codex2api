@@ -43,11 +43,15 @@ var grokDroppedTopLevelFields = map[string]struct{}{
 // 钳制、无工具时撤掉 tool_choice，并顺带算出轮次序号与模型名。
 // 请求体非法 JSON 或顶层不是对象时原样返回，交由上游报错。
 func prepareGrokUpstreamBody(body []byte) grokPreflightResult {
+	return prepareGrokUpstreamBodyWithCompaction(body, nil)
+}
+
+func prepareGrokUpstreamBodyWithCompaction(body []byte, preservedCompaction compactionProvenanceDigests) grokPreflightResult {
 	if lifted, changed := liftGrokAdditionalTools(body); changed {
-		return prepareGrokUpstreamBody(lifted)
+		return prepareGrokUpstreamBodyWithCompaction(lifted, preservedCompaction)
 	}
 	if guarded, changed := addGrokGiantToolInstructions(body); changed {
-		return prepareGrokUpstreamBody(guarded)
+		return prepareGrokUpstreamBodyWithCompaction(guarded, preservedCompaction)
 	}
 	result := grokPreflightResult{Body: body, TurnIndex: 1}
 	if !gjson.ValidBytes(body) {
@@ -112,7 +116,7 @@ func prepareGrokUpstreamBody(body []byte) grokPreflightResult {
 				// 省掉"先建数组缓冲、再整体搬进外层"的一次全量复制。
 				grokWriteObjectKey(&out, &first, key)
 				mark := out.Len()
-				inputChanged, turns := grokWriteRebuiltInput(&out, value, register)
+				inputChanged, turns := grokWriteRebuiltInput(&out, value, register, preservedCompaction)
 				turnIndex = turns
 				if inputChanged {
 					changed = true
@@ -461,7 +465,7 @@ func grokNormalizeToolChoiceRaw(choice gjson.Result, toolsEmpty, webSearchDroppe
 // grokWriteRebuiltInput 逐项处理 input[] 并直接写入 out：干净项原样拷贝 raw 字节，
 // 只有需要重建的项才走重写。顺带数出 user 消息数作为轮次序号，
 // 省掉一趟独立的全量遍历。
-func grokWriteRebuiltInput(out *bytes.Buffer, input gjson.Result, register grokAliasRegister) (changed bool, turns int) {
+func grokWriteRebuiltInput(out *bytes.Buffer, input gjson.Result, register grokAliasRegister, preservedCompaction compactionProvenanceDigests) (changed bool, turns int) {
 	out.WriteByte('[')
 	first := true
 	input.ForEach(func(_, item gjson.Result) bool {
@@ -469,7 +473,7 @@ func grokWriteRebuiltInput(out *bytes.Buffer, input gjson.Result, register grokA
 			out.WriteByte(',')
 		}
 		first = false
-		itemChanged, isUserMessage := grokWriteHistoryItem(out, item, register)
+		itemChanged, isUserMessage := grokWriteHistoryItem(out, item, register, preservedCompaction)
 		if itemChanged {
 			changed = true
 		}
@@ -484,7 +488,7 @@ func grokWriteRebuiltInput(out *bytes.Buffer, input gjson.Result, register grokA
 
 // grokWriteHistoryItem 把单个历史项写入 out，返回 (是否改写, 是否计入轮次)。
 // 无需改写时原样拷贝 raw 字节。
-func grokWriteHistoryItem(out *bytes.Buffer, item gjson.Result, register grokAliasRegister) (bool, bool) {
+func grokWriteHistoryItem(out *bytes.Buffer, item gjson.Result, register grokAliasRegister, preservedCompaction compactionProvenanceDigests) (bool, bool) {
 	verbatim := func() (bool, bool) {
 		out.WriteString(item.Raw)
 		return false, grokRawItemIsUserMessage(item)
@@ -493,8 +497,17 @@ func grokWriteHistoryItem(out *bytes.Buffer, item gjson.Result, register grokAli
 		return verbatim()
 	}
 	itemType := grokResolveHistoryItemType(item)
-	// 外来压缩密文 Grok 解不了，整项换成纯文本边界消息（developer 角色，不计轮次）。
-	if itemType == "compaction" {
+	// Keep an opaque item only when this request proved that the selected Grok
+	// account produced that exact digest. A known sibling does not authorize
+	// unknown items in the same input array.
+	encryptedCompaction := gjsonResultHasEncryptedCompaction(item) && strings.TrimSpace(item.Get("encrypted_content").String()) != ""
+	if encryptedCompaction && len(preservedCompaction) > 0 {
+		digest := compactionContentDigest(strings.TrimSpace(item.Get("encrypted_content").String()))
+		if _, known := preservedCompaction[digest]; known {
+			return verbatim()
+		}
+	}
+	if itemType == "compaction" || encryptedCompaction {
 		encoded, err := json.Marshal(grokBoundaryMessage())
 		if err != nil {
 			return verbatim()

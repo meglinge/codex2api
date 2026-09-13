@@ -5,6 +5,8 @@ import "strings"
 const longContextThreshold = 272000
 
 type ModelPricing struct {
+	UserBillingMode                 string
+	ImageUnitPrice                  float64
 	ImageInputPricePerMToken        float64
 	CacheReadImagePricePerMToken    float64
 	InputPricePerMToken             float64
@@ -326,12 +328,14 @@ func usageLogBillingServiceTier(log *UsageLogInput) string {
 	return log.ServiceTier
 }
 
-// UsageLogBilledCost 返回一条待写入用量事件的计费金额(美元),与 InsertUsageLog 落库时
-// 写进 account_billed / user_billed 的口径完全一致。热路径上需要在日志落库前就拿到
-// 这笔消耗时(如 scope 维度限额的本地增量修正)调用它,避免两处计费逻辑漂移。
+// UsageLogBilledCost returns upstream token cost. User quotas and scope budgets
+// must use UsageLogUserBilledCost, which also supports per-image fees.
 func UsageLogBilledCost(log *UsageLogInput) float64 {
 	if log == nil {
 		return 0
+	}
+	if log.billingSnapshot != nil {
+		return log.billingSnapshot.accountCost
 	}
 	return UsageLogCostBreakdown(log).TotalCost
 }

@@ -157,7 +157,7 @@ func TestClaudeTestHandlerEmitsDiagnosticsForSuccessAndFailure(t *testing.T) {
 			}
 			resp := &http.Response{StatusCode: tc.status, Header: headers, Body: io.NopCloser(strings.NewReader(tc.body))}
 			outcome := ""
-			h.handleClaudeConnectionTest(c, account, resp, "claude-haiku-4-5", time.Now(), "force", true, false, &outcome, 1)
+			h.handleClaudeConnectionTest(c, account, resp, "claude-haiku-4-5", time.Now(), "force", true, false, &outcome, 1, false, internalReasonConnectionTest, "")
 			var events []testEvent
 			for _, line := range strings.Split(w.Body.String(), "\n") {
 				if !strings.HasPrefix(line, "data: ") {

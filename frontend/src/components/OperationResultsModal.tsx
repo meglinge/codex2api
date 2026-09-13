@@ -134,9 +134,11 @@ export default function OperationResultsModal({
     t("accounts.operationResultsTotal");
 
   const title =
-    state?.action === "batch_refresh"
-      ? t("accounts.operationRefreshResultsTitle")
-      : t("accounts.operationTestResultsTitle");
+    state?.action === "batch_usage_refresh"
+      ? t("accounts.operationUsageRefreshResultsTitle")
+      : state?.action === "batch_refresh"
+        ? t("accounts.operationRefreshResultsTitle")
+        : t("accounts.operationTestResultsTitle");
 
   const statusLabel = (status: string) => {
     switch (status) {

@@ -64,9 +64,12 @@ const (
 )
 
 type RuntimeSettings struct {
-	ClientCompatMode     string
-	CodexMinCLIVersion   string
-	CodexUserAgentConfig string
+	ClientCompatMode      string
+	CodexMinCLIVersion    string
+	CodexUserAgentConfig  string
+	CodexTelemetryEnabled bool
+	// CodexTelemetryTimingDebug 打开模拟遥测的临时计时探针（仅打日志，默认关闭）。
+	CodexTelemetryTimingDebug bool
 	// CodexImagesMainModel 为空时沿用环境变量或内置生图文本驱动模型。
 	CodexImagesMainModel  string
 	StreamFlushPolicy     string
@@ -172,6 +175,8 @@ func DefaultRuntimeSettings() RuntimeSettings {
 		ClientCompatMode:                 defaultClientCompatMode,
 		CodexMinCLIVersion:               defaultCodexMinCLIVersion,
 		CodexUserAgentConfig:             DefaultCodexUserAgentConfigJSON(),
+		CodexTelemetryEnabled:            false,
+		CodexTelemetryTimingDebug:        false,
 		StreamFlushPolicy:                defaultStreamFlushPolicy,
 		StreamFlushIntervalMS:            defaultStreamFlushIntervalMS,
 		FirstTokenMode:                   defaultFirstTokenMode,
@@ -341,6 +346,8 @@ func ApplyRuntimeSettingsFromSystem(settings *database.SystemSettings) RuntimeSe
 		next.ClientCompatMode = settings.ClientCompatMode
 		next.CodexMinCLIVersion = settings.CodexMinCLIVersion
 		next.CodexUserAgentConfig = settings.CodexUserAgentConfig
+		next.CodexTelemetryEnabled = settings.CodexTelemetryEnabled
+		next.CodexTelemetryTimingDebug = settings.CodexTelemetryTimingDebug
 		next.CodexImagesMainModel = settings.CodexImagesMainModel
 		next.StreamFlushPolicy = settings.StreamFlushPolicy
 		next.StreamFlushIntervalMS = settings.StreamFlushIntervalMS

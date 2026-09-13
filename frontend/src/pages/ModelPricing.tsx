@@ -1,5 +1,5 @@
 import { isImage25Model } from '../lib/imageStudioModels'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   AlertTriangle,
@@ -12,11 +12,16 @@ import {
   RotateCcw,
   Save,
   Search,
-  Sparkles,
-  Wand2,
   X,
   ChevronsUpDown,
-  AlertCircle,
+  Activity,
+  CircleDollarSign,
+  Clock3,
+  Database,
+  Layers,
+  ListFilter,
+  Pencil,
+  SlidersHorizontal,
   Undo2,
 } from 'lucide-react'
 
@@ -26,10 +31,13 @@ import ModelLogo from '../components/ModelLogo'
 import Modal from '../components/Modal'
 import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
-import { StatTile } from '../components/StatTile'
+import PricingSyncPanel from '../components/model-pricing/PricingSyncPanel'
+import './model-pricing.css'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Switch } from '@/components/ui/switch'
+import { SegmentedPillGroup } from '@/components/ui/segmented-pill-group'
+import { DraftNumberInput } from '@/components/ui/draft-number-input'
+import { supportsImageBilling } from '../lib/imageBilling'
 import { cn } from '@/lib/utils'
 import { useToast } from '../hooks/useToast'
 import { postAdminSSE } from '../hooks/useOperationProgress'
@@ -94,9 +102,9 @@ type FieldDef = {
 const PRIMARY_FIELDS: FieldDef[] = [
   { key: 'input', labelKey: 'settings.pricing.input', shortKey: 'settings.pricing.shortInput', tone: 'neutral' },
   { key: 'cached_input', labelKey: 'settings.pricing.cached', shortKey: 'settings.pricing.shortCached', tone: 'neutral' },
+  { key: 'output', labelKey: 'settings.pricing.output', shortKey: 'settings.pricing.shortOutput', tone: 'neutral' },
   { key: 'cache_write_5m', labelKey: 'settings.pricing.cacheWrite5m', shortKey: 'settings.pricing.shortCacheWrite5m', tone: 'neutral' },
   { key: 'cache_write_1h', labelKey: 'settings.pricing.cacheWrite1h', shortKey: 'settings.pricing.shortCacheWrite1h', tone: 'neutral' },
-  { key: 'output', labelKey: 'settings.pricing.output', shortKey: 'settings.pricing.shortOutput', tone: 'neutral' },
 ]
 
 const IMAGE_FIELDS: FieldDef[] = [
@@ -129,6 +137,7 @@ function normalizePrice(value: unknown): number {
 }
 
 function isDirty(draft: ModelPricingOverride | undefined, saved: ModelPricingOverride | undefined): boolean {
+  if ((draft?.user_billing_mode || 'token') !== (saved?.user_billing_mode || 'token') || normalizePrice(draft?.image_unit_price) !== normalizePrice(saved?.image_unit_price)) return true
   for (const field of ALL_FIELDS) {
     if (normalizePrice(draft?.[field.key]) !== normalizePrice(saved?.[field.key])) return true
   }
@@ -159,7 +168,7 @@ function formatPriceDisplay(value: number): string {
 function getOutputMultiplier(input: number, output: number): string | null {
   if (input <= 0 || output <= 0) return null
   const ratio = output / input
-  return `${ratio.toFixed(1).replace(/\.0$/, '')}x`
+  return ratio.toFixed(1).replace(/\.0$/, '')
 }
 
 const PREFERRED_MODEL_ORDER = ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'] as const
@@ -233,15 +242,7 @@ function sourceMeta(source: string): { labelKey: string; className: string; dot:
   }
 }
 
-function PriceField({
-  field,
-  value,
-  savedValue,
-  changed,
-  dense,
-  onChange,
-  onRevert,
-}: {
+function PriceField({ field, value, savedValue, changed, dense, onChange, onRevert }: {
   field: FieldDef
   value: number
   savedValue?: number
@@ -251,68 +252,26 @@ function PriceField({
   onRevert?: () => void
 }) {
   const { t } = useTranslation()
-
+  const inputId = useId()
   return (
-    <label
-      className={cn(
-        'group relative flex min-w-0 flex-col rounded-xl border bg-background/80 transition-all',
-        dense ? 'gap-1.5 p-2.5 sm:p-3' : 'gap-2 p-3 sm:p-3.5',
-        changed
-          ? 'border-amber-500/40 bg-amber-500/5 ring-1 ring-amber-500/30'
-          : 'border-border/80 hover:border-border hover:bg-card',
-        'focus-within:border-primary/40 focus-within:ring-[3px] focus-within:ring-primary/15',
-      )}
-    >
-      <div className="flex items-center justify-between gap-1.5">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <span className={cn('size-1.5 shrink-0 rounded-full', TONE_DOT[field.tone])} aria-hidden />
-          <span className="truncate text-[11px] font-semibold tracking-wide text-muted-foreground">
-            {t(field.labelKey)}
-          </span>
-        </div>
-        {changed && onRevert ? (
-          <button
-            type="button"
-            onClick={(e) => {
-              e.preventDefault()
-              onRevert()
-            }}
-            title={savedValue !== undefined ? `还原为 $${savedValue}` : '还原'}
-            className="flex size-5 items-center justify-center rounded-md text-amber-600 transition-colors hover:bg-amber-500/20 dark:text-amber-400"
-          >
-            <Undo2 className="size-3" />
+    <div className={cn('pricing-field', changed && 'is-changed', dense && 'is-dense')}>
+      <div className="pricing-field-heading">
+        <label htmlFor={inputId}><span className={cn('pricing-field-dot', TONE_DOT[field.tone])} aria-hidden="true" />{t(field.labelKey)}</label>
+        {changed && onRevert && (
+          <button type="button" onClick={onRevert} aria-label={t('settings.pricing.revertPrice', { field: t(field.labelKey), value: savedValue ?? 0 })} title={t('settings.pricing.revertPrice', { field: t(field.labelKey), value: savedValue ?? 0 })}>
+            <Undo2 size={12} aria-hidden="true" />
           </button>
-        ) : null}
+        )}
       </div>
-      <div className="relative">
-        <span className="pointer-events-none absolute left-0 top-1/2 -translate-y-1/2 text-sm font-medium text-muted-foreground/70">
-          $
-        </span>
-        <input
-          type="number"
-          step="0.01"
-          min={0}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          className={cn(
-            'w-full border-0 bg-transparent pl-4 font-mono font-semibold tabular-nums tracking-tight text-foreground outline-none',
-            dense ? 'h-7 text-[15px]' : 'h-8 text-lg sm:text-[1.35rem]',
-            '[appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none',
-          )}
-        />
+      <div className="pricing-field-value"><span aria-hidden="true">$</span>
+        <DraftNumberInput id={inputId} value={value} integer={false} emptyValue={0} step="0.01" min={0} onValueChange={(next) => onChange(String(next))} />
       </div>
-      <span className="text-[10px] font-medium text-muted-foreground/70">/ 1M tok</span>
-    </label>
+      <span className="pricing-field-unit">{t('settings.pricing.perMillion')}</span>
+    </div>
   )
 }
 
-function ContextThresholdField({
-  value,
-  savedValue,
-  changed,
-  onChange,
-  onRevert,
-}: {
+function ContextThresholdField({ value, savedValue, changed, onChange, onRevert }: {
   value: number
   savedValue: number
   changed: boolean
@@ -320,44 +279,16 @@ function ContextThresholdField({
   onRevert: () => void
 }) {
   const { t } = useTranslation()
+  const inputId = useId()
   return (
-    <label
-      className={cn(
-        'group relative flex min-w-0 flex-col gap-1.5 rounded-xl border bg-background/80 p-2.5 transition-all sm:p-3',
-        changed
-          ? 'border-amber-500/40 bg-amber-500/5 ring-1 ring-amber-500/30'
-          : 'border-border/80 hover:bg-card',
-        'focus-within:border-primary/40 focus-within:ring-[3px] focus-within:ring-primary/15',
-      )}
-    >
-      <div className="flex items-center justify-between gap-1.5">
-        <span className="truncate text-[11px] font-semibold tracking-wide text-muted-foreground">
-          {t('settings.pricing.contextThreshold')}
-        </span>
-        {changed ? (
-          <button
-            type="button"
-            onClick={(event) => {
-              event.preventDefault()
-              onRevert()
-            }}
-            title={t('settings.pricing.revertThreshold', { value: savedValue })}
-            className="flex size-5 items-center justify-center rounded-md text-amber-600 transition-colors hover:bg-amber-500/20 dark:text-amber-400"
-          >
-            <Undo2 className="size-3" />
-          </button>
-        ) : null}
+    <div className={cn('pricing-field pricing-threshold', changed && 'is-changed')}>
+      <div className="pricing-field-heading">
+        <label htmlFor={inputId}>{t('settings.pricing.contextThreshold')}</label>
+        {changed && <button type="button" onClick={onRevert} aria-label={t('settings.pricing.revertThreshold', { value: savedValue })}><Undo2 size={12} aria-hidden="true" /></button>}
       </div>
-      <input
-        type="number"
-        step={1}
-        min={0}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="h-7 w-full border-0 bg-transparent font-mono text-[15px] font-semibold tabular-nums text-foreground outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
-      />
-      <span className="text-[10px] font-medium text-muted-foreground/70">tokens</span>
-    </label>
+      <div className="pricing-field-value"><DraftNumberInput id={inputId} value={value} min={0} emptyValue={0} step={1} onValueChange={(next) => onChange(String(next))} /></div>
+      <span className="pricing-field-unit">tokens</span>
+    </div>
   )
 }
 
@@ -368,101 +299,22 @@ function formatPreviewRate(rate: PricingPreviewRate) {
 function BillingRulePreview({ pricing }: { pricing: ModelPricingOverride }) {
   const { t } = useTranslation()
   const preview = buildModelPricingPreview(pricing)
-  const badge =
-    preview.mode === 'tiered'
-      ? t('settings.pricing.tiered')
-      : t('settings.pricing.singleTier')
-
+  const rates = [
+    { key: 'standard', label: 'settings.pricing.standardRate', rate: preview.standard },
+    ...(preview.image ? [{ key: 'image', label: 'settings.pricing.imageRate', rate: preview.image }] : []),
+    ...(preview.long ? [{ key: 'long', label: 'settings.pricing.longRate', rate: preview.long }] : []),
+    ...(preview.priority ? [{ key: 'priority', label: 'settings.pricing.priorityRate', rate: preview.priority }] : []),
+  ]
   return (
-    <section className='mt-4 rounded-xl border border-border/80 bg-muted/[0.18] p-3.5 sm:p-4'>
-      <div className='flex flex-wrap items-center justify-between gap-2'>
-        <div className='flex items-center gap-2'>
-          <span className='size-1.5 rounded-full bg-primary' aria-hidden />
-          <h5 className='text-[12px] font-semibold text-foreground'>
-            {t('settings.pricing.billingPreview')}
-          </h5>
-          <span className='rounded-full bg-background px-2 py-0.5 text-[10px] font-bold text-muted-foreground ring-1 ring-inset ring-border/70'>
-            {badge}
-          </span>
-        </div>
-        {preview.long ? (
-          <span className='text-[10px] font-medium text-muted-foreground'>
-            {t('settings.pricing.thresholdSummary', {
-              value: preview.threshold.toLocaleString(),
-            })}
-          </span>
-        ) : null}
+    <section className="pricing-rule-preview" aria-label={t('settings.pricing.billingPreview')}>
+      <div className="pricing-preview-heading"><span><Activity size={15} aria-hidden="true" />{t(pricing.user_billing_mode === 'per_image' ? 'settings.pricing.imageBilling.upstreamRates' : 'settings.pricing.billingPreview')}</span><span>{t(preview.mode === 'tiered' ? 'settings.pricing.tiered' : 'settings.pricing.singleTier')}</span></div>
+      <p className="pricing-preview-legend">{t('settings.pricing.previewLegend')}</p>
+      <div className="pricing-preview-rates">
+        {rates.map(({ key, label, rate }) => <div key={key} className={cn('pricing-preview-rate', key !== 'standard' && 'is-accent')}><span>{t(label)}</span><strong>{formatPreviewRate(rate)}</strong></div>)}
+        {preview.flexMultiplier ? <div className="pricing-preview-rate"><span>{t('settings.pricing.flexRate')}</span><strong>×{preview.flexMultiplier}</strong><small>{t('settings.pricing.flexHint')}</small></div> : null}
       </div>
-
-      <div className='mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4'>
-        <div className='rounded-lg border border-border/70 bg-background/70 px-3 py-2.5'>
-          <div className='text-[10px] font-semibold uppercase tracking-wide text-muted-foreground'>
-            {t('settings.pricing.standardRate')}
-          </div>
-          <div className='mt-1 font-mono text-xs font-semibold tabular-nums text-foreground'>
-            {formatPreviewRate(preview.standard)}
-          </div>
-          <div className='mt-0.5 text-[10px] text-muted-foreground'>
-            input / cache read / output · USD/M
-          </div>
-        </div>
-        {preview.image ? (
-          <div className='rounded-lg border border-border/70 bg-background/70 px-3 py-2.5'>
-            <div className='text-[10px] font-semibold text-muted-foreground'>{t('settings.pricing.imageRate')}</div>
-            <div className='mt-1 font-mono text-xs font-semibold'>{formatPreviewRate(preview.image)}</div>
-          </div>
-        ) : null}
-        {preview.long ? (
-          <div className='rounded-lg border border-primary/20 bg-primary/[0.04] px-3 py-2.5'>
-            <div className='text-[10px] font-semibold uppercase tracking-wide text-primary'>
-              {t('settings.pricing.longRate')}
-            </div>
-            <div className='mt-1 font-mono text-xs font-semibold tabular-nums text-foreground'>
-              {formatPreviewRate(preview.long)}
-            </div>
-            <div className='mt-0.5 text-[10px] text-muted-foreground'>
-              {t('settings.pricing.fromTokens', {
-                value: preview.threshold.toLocaleString(),
-              })}
-            </div>
-          </div>
-        ) : null}
-        {preview.priority ? (
-          <div className='rounded-lg border border-amber-500/20 bg-amber-500/[0.04] px-3 py-2.5'>
-            <div className='text-[10px] font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300'>
-              {t('settings.pricing.priorityRate')}
-            </div>
-            <div className='mt-1 font-mono text-xs font-semibold tabular-nums text-foreground'>
-              {formatPreviewRate(preview.priority)}
-            </div>
-            <div className='mt-0.5 text-[10px] text-muted-foreground'>
-              {t('settings.pricing.priorityHint')}
-            </div>
-          </div>
-        ) : null}
-        {preview.flexMultiplier ? (
-          <div className='rounded-lg border border-sky-500/20 bg-sky-500/[0.04] px-3 py-2.5'>
-            <div className='text-[10px] font-semibold uppercase tracking-wide text-sky-700 dark:text-sky-300'>
-              {t('settings.pricing.flexRate')}
-            </div>
-            <div className='mt-1 font-mono text-xs font-semibold tabular-nums text-foreground'>
-              ×{preview.flexMultiplier}
-            </div>
-            <div className='mt-0.5 text-[10px] text-muted-foreground'>
-              {t('settings.pricing.flexHint')}
-            </div>
-          </div>
-        ) : null}
-      </div>
-
-      <div className='mt-3 rounded-lg border border-dashed border-border/80 bg-background/55 px-3 py-2.5'>
-        <div className='text-[10px] font-semibold uppercase tracking-wide text-muted-foreground'>
-          {t('settings.pricing.expressionPreview')}
-        </div>
-        <code className='mt-1 block break-all font-mono text-[10px] leading-relaxed text-muted-foreground'>
-          {preview.expression}
-        </code>
-      </div>
+      {preview.long && <p className="pricing-preview-threshold"><Layers size={13} aria-hidden="true" />{t('settings.pricing.thresholdSummary', { value: preview.threshold.toLocaleString() })}</p>}
+      <details className="pricing-expression"><summary>{t('settings.pricing.expressionPreview')}<ChevronDown size={12} aria-hidden="true" /></summary><code>{preview.expression}</code></details>
     </section>
   )
 }
@@ -595,6 +447,7 @@ function ModelCatalogModal({
         <div className="relative">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
+            aria-label={t('settings.pricing.catalogSearch')}
             value={query}
             onChange={(e) => onQueryChange(e.target.value)}
             placeholder={t('settings.pricing.catalogSearch')}
@@ -644,6 +497,115 @@ function ModelCatalogModal({
   )
 }
 
+function PricingModelRow({ row: r, draft, expanded, advancedOpen, busy, isNew, highlighted, onToggle, onToggleAdvanced, onFieldChange, onRevertField, onSave, onReset, onDiscard }: {
+  row: Row
+  draft: ModelPricingOverride
+  expanded: boolean
+  advancedOpen: boolean
+  busy: boolean
+  isNew: boolean
+  highlighted: boolean
+  onToggle: () => void
+  onToggleAdvanced: () => void
+  onFieldChange: (key: keyof ModelPricingOverride, value: string) => void
+  onRevertField: (key: keyof ModelPricingOverride) => void
+  onSave: () => void
+  onReset: () => void
+  onDiscard: () => void
+}) {
+  const { t } = useTranslation()
+  const dirty = isDirty(draft, r.pricing)
+  const advDirty = isAdvancedDirty(draft, r.pricing)
+  const source = sourceMeta(r.source)
+  const inputVal = normalizePrice(draft.input)
+  const outputVal = normalizePrice(draft.output)
+  const multiplier = getOutputMultiplier(inputVal, outputVal)
+  const pricingModel = (r.canonical_model?.trim() || r.model.trim()).toLowerCase()
+  const imageModel = supportsImageBilling(pricingModel)
+  const perImage = imageModel && draft.user_billing_mode === 'per_image'
+  const primaryFields = imageModel ? [...PRIMARY_FIELDS.filter(field => !field.key.startsWith('cache_write')), ...(isImage25Model(pricingModel) ? IMAGE_FIELDS : [])] : PRIMARY_FIELDS
+  const supportsLongContextPricing = pricingModel !== 'gpt-6-astra' && !imageModel
+  const advancedFields = imageModel ? [] : supportsLongContextPricing ? ADVANCED_FIELDS : ADVANCED_FIELDS.filter(field => !field.key.includes('_long'))
+  const hasLongContextPricing = supportsLongContextPricing && (normalizePrice(draft.long_context_threshold_tokens) > 0 || normalizePrice(draft.input_long) > 0 || normalizePrice(draft.cached_input_long) > 0 || normalizePrice(draft.output_long) > 0)
+  const advancedGroups = [
+    { id: 'priority', label: 'settings.pricing.groupPriority', fields: advancedFields.filter(field => !field.key.includes('_long')) },
+    { id: 'long', label: 'settings.pricing.groupLong', fields: advancedFields.filter(field => field.key.endsWith('_long')) },
+    { id: 'long-priority', label: 'settings.pricing.groupLongPriority', fields: advancedFields.filter(field => field.key.includes('_long_priority')) },
+  ]
+  const editorId = `pricing-editor-${encodeURIComponent(r.model)}`
+  const advancedId = `${editorId}-advanced`
+  const priceInput = (field: FieldDef, dense = false) => <PriceField key={field.key} field={field} dense={dense} value={normalizePrice(draft[field.key])} savedValue={normalizePrice(r.pricing[field.key])} changed={normalizePrice(draft[field.key]) !== normalizePrice(r.pricing[field.key])} onChange={next => onFieldChange(field.key, next)} onRevert={() => onRevertField(field.key)} />
+
+  return (
+    <article id={`pricing-row-${r.model.toLowerCase()}`} data-model={r.model} aria-label={r.model} className={cn('pricing-model-row', expanded && 'is-expanded', dirty && 'is-dirty', highlighted && 'is-highlighted')}>
+      <button type="button" className="pricing-row-summary" onClick={onToggle} aria-expanded={expanded} aria-controls={editorId} aria-describedby={`${editorId}-summary`} aria-label={t('settings.pricing.editModel', { model: r.model })}>
+        <span className="pricing-model-identity">
+          <ModelLogo model={r.model} size={34} variant="ring" />
+          <span className="pricing-model-copy">
+            <span className="pricing-model-name">{r.model}{isNew && <span className="pricing-new-badge">{t('settings.pricing.newBadge')}</span>}</span>
+            <span className="pricing-model-meta">
+              <span className={cn('pricing-source-badge', source.className)}><i className={source.dot} />{t(source.labelKey)}</span>
+              {r.is_alias && r.canonical_model && <span className="pricing-alias" title={t('settings.pricing.aliasOf', { model: r.canonical_model })}><Link2 size={11} aria-hidden="true" />{r.canonical_model}</span>}
+              {dirty && <span className="pricing-dirty-label"><span />{t('settings.pricing.unsaved')}</span>}
+            </span>
+          </span>
+        </span>
+        {perImage ? (
+          <span className="pricing-image-summary"><strong>${formatPriceDisplay(normalizePrice(draft.image_unit_price))}<small>{t('settings.pricing.perImageUnit')}</small></strong><span>{t('settings.pricing.imageBilling.perImage')}</span></span>
+        ) : (
+          <span className="pricing-row-prices">
+            {([{ key: 'input', value: inputVal }, { key: 'cached', value: normalizePrice(draft.cached_input) }, { key: 'output', value: outputVal }] as const).map(({ key, value }) => <span key={key} className={cn('pricing-summary-price', key === 'output' && 'is-output')}><small>{t(`settings.pricing.${key}`)}</small><strong><span>$</span>{formatPriceDisplay(value)}</strong></span>)}
+          </span>
+        )}
+        <span className="pricing-row-edit"><span>{t(expanded ? 'settings.pricing.closeEditor' : 'settings.pricing.editPrices')}</span><ChevronDown size={16} className={expanded ? 'is-open' : ''} aria-hidden="true" /></span>
+        <span id={`${editorId}-summary`} className="sr-only">{perImage ? `${t('settings.pricing.imageBilling.unitPrice')}: $${formatPriceDisplay(normalizePrice(draft.image_unit_price))}` : t('settings.pricing.summaryPrices', { input: formatPriceDisplay(inputVal), cached: formatPriceDisplay(normalizePrice(draft.cached_input)), output: formatPriceDisplay(outputVal) })}. {t(source.labelKey)}. {dirty ? t('settings.pricing.unsaved') : ''} {isNew ? t('settings.pricing.newBadge') : ''} {r.is_alias && r.canonical_model ? t('settings.pricing.aliasOf', { model: r.canonical_model }) : ''}</span>
+      </button>
+      <div id={editorId} hidden={!expanded}>
+        {expanded && (
+          <div className="pricing-editor">
+            <div className="pricing-editor-heading"><span><SlidersHorizontal size={15} aria-hidden="true" />{t('settings.pricing.editPrices')}</span><span>{t('settings.pricing.editHint')}</span><span className="pricing-unit">{t('settings.pricing.unitHint')}</span></div>
+            {imageModel && (
+              <fieldset className="pricing-image-billing" disabled={busy} aria-label={t('settings.pricing.imageBilling.title')}>
+                <div><h5>{t('settings.pricing.imageBilling.title')}</h5><SegmentedPillGroup label={t('settings.pricing.imageBilling.title')} value={draft.user_billing_mode || 'token'} options={[{ value: 'token', label: t('settings.pricing.imageBilling.token') }, { value: 'per_image', label: t('settings.pricing.imageBilling.perImage') }]} onChange={mode => onFieldChange('user_billing_mode', mode)} /></div>
+                {perImage ? <div className="pricing-image-price"><label><span>{t('settings.pricing.imageBilling.unitPrice')}</span><DraftNumberInput aria-label={t('settings.pricing.imageBilling.unitPrice')} value={draft.image_unit_price || 0} integer={false} min={0} step="0.001" onValueChange={value => onFieldChange('image_unit_price', String(value))} /></label><p>{t('settings.pricing.imageBilling.hint')}</p></div> : <p>{t('settings.pricing.imageBilling.tokenHint')}</p>}
+              </fieldset>
+            )}
+            <div className="pricing-editor-layout">
+              <fieldset className="pricing-editor-fields" disabled={busy}>
+                <legend>{t(perImage ? 'settings.pricing.imageBilling.upstreamRates' : 'settings.pricing.groupStandard')}</legend>
+                <div className="pricing-base-fields">{primaryFields.map(field => priceInput(field))}</div>
+                {!imageModel && (
+                  <div className="pricing-advanced">
+                    <button type="button" onClick={onToggleAdvanced} aria-expanded={advancedOpen} aria-controls={advancedId} className="pricing-advanced-toggle">
+                      <span><ChevronDown size={14} className={advancedOpen ? 'is-open' : ''} aria-hidden="true" />{t('settings.pricing.advancedRates')}{advDirty && <><span className="pricing-dirty-dot" aria-hidden="true" /><span className="sr-only">{t('settings.pricing.hasAdvancedDirty')}</span></>}</span><span>{t(supportsLongContextPricing ? 'settings.pricing.advancedRatesHint' : 'settings.pricing.groupPriorityHint')}</span>
+                    </button>
+                    <div id={advancedId} hidden={!advancedOpen}>
+                      {advancedOpen && advancedGroups.filter(group => group.fields.length > 0).map(group => (
+                        <section key={group.id} className="pricing-advanced-group"><h5>{t(group.label)}</h5><div className="pricing-advanced-fields">{group.fields.map(field => priceInput(field, true))}</div>
+                          {group.id === 'long' && hasLongContextPricing && <ContextThresholdField value={Math.round(normalizePrice(draft.long_context_threshold_tokens))} savedValue={Math.round(normalizePrice(r.pricing.long_context_threshold_tokens))} changed={normalizePrice(draft.long_context_threshold_tokens) !== normalizePrice(r.pricing.long_context_threshold_tokens)} onChange={next => onFieldChange('long_context_threshold_tokens', next)} onRevert={() => onRevertField('long_context_threshold_tokens')} />}
+                        </section>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </fieldset>
+              <BillingRulePreview pricing={draft} />
+            </div>
+            <div className="pricing-editor-footer">
+              <div className="pricing-editor-notes">{r.is_alias && r.canonical_model ? <span><Link2 size={13} aria-hidden="true" />{t('settings.pricing.aliasOf', { model: r.canonical_model })}</span> : <span><Check size={13} aria-hidden="true" />{t(source.labelKey)}</span>}{multiplier && <span>{t('settings.pricing.outputRatio', { ratio: multiplier })}</span>}</div>
+              <div className="pricing-editor-actions">
+                {r.source !== 'default' && <Button size="sm" variant="ghost" disabled={busy} onClick={onReset}><RotateCcw className="size-3.5" />{t('settings.pricing.resetBtn')}</Button>}
+                {dirty && <Button size="sm" variant="outline" disabled={busy} onClick={onDiscard}><Undo2 className="size-3.5" />{t('settings.pricing.discardModel')}</Button>}
+                <Button size="sm" disabled={busy || !dirty} onClick={onSave}>{busy ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}{t(busy ? 'common.saving' : 'common.save')}</Button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </article>
+  )
+}
+
 export default function ModelPricing() {
   const { t } = useTranslation()
   const { showToast } = useToast()
@@ -681,6 +643,7 @@ export default function ModelPricing() {
   const [seenBump, setSeenBump] = useState(0)
   const [syncOpen, setSyncOpen] = useState(false)
   const [expandedAdvanced, setExpandedAdvanced] = useState<Record<string, boolean>>({})
+  const [expandedModels, setExpandedModels] = useState<Record<string, boolean>>({})
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -795,6 +758,7 @@ export default function ModelPricing() {
     const nextState: Record<string, boolean> = {}
     for (const r of rows) nextState[r.model] = !allExpanded
     setExpandedAdvanced(nextState)
+    if (!allExpanded) setExpandedModels(Object.fromEntries(rows.map(row => [row.model, true])))
   }
 
   const saveOfficialConfig = async () => {
@@ -826,13 +790,6 @@ export default function ModelPricing() {
       setOfficialSyncing(false)
     }
   }
-
-  const activePreset = useMemo(() => {
-    const url = syncUrl.trim()
-    if (url === '' || url === defaultUrl) return 'default'
-    if (modelsDevUrl && url === modelsDevUrl) return 'modelsdev'
-    return 'custom'
-  }, [defaultUrl, modelsDevUrl, syncUrl])
 
   const counts = useMemo(() => {
     let custom = 0
@@ -914,6 +871,7 @@ export default function ModelPricing() {
     setSourceFilter('all')
     setQuery('')
     setJumpedModel(model.toLowerCase())
+    setExpandedModels(prev => ({ ...prev, [model]: true }))
     requestAnimationFrame(() => {
       const el = document.getElementById(`pricing-row-${model.toLowerCase()}`)
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
@@ -977,694 +935,80 @@ export default function ModelPricing() {
     return rows.every((r) => expandedAdvanced[r.model])
   }, [expandedAdvanced, rows])
 
+  const clearFilters = () => {
+    setQuery('')
+    setSourceFilter('all')
+    setChannelFilter('all')
+  }
+  const metricItems = [
+    { id: 'all' as const, label: 'statTotal', sub: 'statTotalSub', value: counts.total, icon: Layers },
+    { id: 'custom' as const, label: 'statCustom', sub: 'statCustomSub', value: counts.custom, icon: Pencil },
+    { id: 'synced' as const, label: 'statSynced', sub: 'statSyncedSub', value: counts.synced, icon: CloudDownload },
+    { id: 'default' as const, label: 'statDefault', sub: 'statDefaultSub', value: counts.defaults, icon: Database },
+  ]
+
   return (
-    <div className="relative pb-16 w-full min-w-0">
+    <div className="model-pricing-page">
       <PageHeader
         title={t('settings.pricing.title')}
         description={t('settings.pricing.desc')}
+        titleAdornment={<span className="pricing-currency-badge"><CircleDollarSign size={13} aria-hidden="true" />USD</span>}
         onRefresh={() => void load()}
-        actions={
-          <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              className="gap-1.5"
-              onClick={() => { setCatalogQuery(''); setCatalogOpen(true) }}
-            >
-              <ChevronsUpDown className="size-3.5" />
-              {t('settings.pricing.catalogTitle')}
-              {newModels.size > 0 ? (
-                <span className="ml-0.5 inline-flex min-w-4 items-center justify-center rounded-full bg-rose-500/90 px-1 text-[10px] font-bold text-white">
-                  {newModels.size}
-                </span>
-              ) : null}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="gap-1.5"
-              onClick={() => setSyncOpen((v) => !v)}
-            >
-              <CloudDownload className="size-3.5" />
-              {t('settings.pricing.syncTitle')}
-              <ChevronDown className={cn('size-3.5 transition-transform', syncOpen && 'rotate-180')} />
-            </Button>
-          </div>
-        }
+        actions={<>
+          <Button variant="outline" size="sm" onClick={() => { setCatalogQuery(''); setCatalogOpen(true) }}><Layers className="size-3.5" />{t('settings.pricing.catalogTitle')}{newModels.size > 0 && <span className="pricing-new-count">{newModels.size}</span>}</Button>
+          <Button variant="outline" size="sm" onClick={() => setSyncOpen(true)} aria-haspopup="dialog"><CloudDownload className="size-3.5" />{t('settings.pricing.syncTitle')}</Button>
+        </>}
       />
-      <ModelCatalogModal
-        open={catalogOpen}
-        onClose={() => setCatalogOpen(false)}
-        rows={rows}
-        newModels={newModels}
-        query={catalogQuery}
-        onQueryChange={setCatalogQuery}
-        onJump={jumpToModel}
-        onRefresh={() => void refreshCatalogModels()}
-        refreshing={refreshingModels}
-        refreshProgress={refreshProgress}
-        onAcknowledge={acknowledgeNewModels}
-      />
-
-      <StateShell
-        variant="page"
-        loading={loading && rows.length === 0}
-        error={loadError && rows.length === 0 ? loadError : null}
-        onRetry={() => void load()}
-      >
-        <div className="space-y-5 sm:space-y-6">
-          {/* Source metrics */}
-          <div className="grid grid-cols-2 gap-2.5 sm:gap-4 xl:grid-cols-4">
-            <StatTile
-              label={t('settings.pricing.statTotal')}
-              value={counts.total}
-              sub={t('settings.pricing.unitHint')}
-              active={sourceFilter === 'all'}
-              onClick={() => setSourceFilter('all')}
-            />
-            <StatTile
-              label={t('settings.pricing.statCustom')}
-              value={counts.custom}
-              active={sourceFilter === 'custom'}
-              onClick={() => setSourceFilter('custom')}
-            />
-            <StatTile
-              label={t('settings.pricing.statSynced')}
-              value={counts.synced}
-              active={sourceFilter === 'synced'}
-              onClick={() => setSourceFilter('synced')}
-            />
-            <StatTile
-              label={t('settings.pricing.statDefault')}
-              value={counts.defaults}
-              active={sourceFilter === 'default'}
-              onClick={() => setSourceFilter('default')}
-            />
+      <ModelCatalogModal open={catalogOpen} onClose={() => setCatalogOpen(false)} rows={rows} newModels={newModels} query={catalogQuery} onQueryChange={setCatalogQuery} onJump={jumpToModel} onRefresh={() => void refreshCatalogModels()} refreshing={refreshingModels} refreshProgress={refreshProgress} onAcknowledge={acknowledgeNewModels} />
+      <PricingSyncPanel open={syncOpen} onClose={() => setSyncOpen(false)} syncUrl={syncUrl} onSyncUrlChange={setSyncUrl} urls={{ default: defaultUrl, modelsDev: modelsDevUrl, openAI: officialOpenAIUrl, xAI: officialXAIUrl, claude: officialClaudeUrl }} config={officialConfig} onConfigChange={setOfficialConfig} syncing={syncing} officialSyncing={officialSyncing} officialSaving={officialSaving} onSync={() => void sync()} onSyncOfficial={() => void syncOfficial()} onSaveOfficial={() => void saveOfficialConfig()} />
+      <StateShell variant="page" loading={loading && rows.length === 0} error={loadError && rows.length === 0 ? loadError : null} onRetry={() => void load()}>
+        <div className="pricing-overview">
+          <div className="pricing-metrics" role="group" aria-label={t('settings.pricing.sourceFilterLabel')}>
+            {metricItems.map(({ id, label, sub, value, icon: Icon }) => (
+              <button key={id} type="button" className="pricing-metric" data-source={id} aria-pressed={sourceFilter === id} onClick={() => setSourceFilter(id)}>
+                <span className="pricing-metric-icon"><Icon size={18} strokeWidth={1.6} aria-hidden="true" /></span>
+                <span className="pricing-metric-content"><span>{t(`settings.pricing.${label}`)}</span><strong>{value}<small>{t('settings.pricing.modelsUnit')}</small></strong><span className="pricing-metric-caption">{t(`settings.pricing.${sub}`)}</span></span>
+                <span className="pricing-metric-bar" aria-hidden="true"><i style={{ width: `${counts.total ? value / counts.total * 100 : 0}%` }} /></span>
+              </button>
+            ))}
           </div>
+          <div className="pricing-status-strip"><span><Clock3 size={13} aria-hidden="true" />{t(officialConfig.enabled ? 'settings.pricing.autoSyncEnabled' : 'settings.pricing.manualSync')}</span>{officialConfig.last_success_at && <span>{t('settings.pricing.lastOfficialSuccess')} · {new Date(officialConfig.last_success_at).toLocaleString()}</span>}<button type="button" onClick={() => setSyncOpen(true)}>{t('settings.pricing.manageSources')}<ArrowUpRight size={12} aria-hidden="true" /></button></div>
+        </div>
 
-          {/* Sync panel */}
-          <div
-            className={cn(
-              'grid transition-[grid-template-rows,opacity] duration-300 ease-out',
-              syncOpen ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
-            )}
-          >
-            <div className="min-h-0 overflow-hidden">
-              <section className="rounded-xl border border-border/80 bg-card p-4 shadow-sm sm:p-5">
-                <div className="flex flex-col gap-4 lg:flex-row lg:items-start">
-                  <div className="flex min-w-0 flex-1 gap-3">
-                    <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-inset ring-primary/15">
-                      <CloudDownload className="size-5" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <h3 className="text-base font-semibold tracking-tight text-foreground">
-                          {t('settings.pricing.syncTitle')}
-                        </h3>
-                        <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                          {activePreset === 'default'
-                            ? t('settings.pricing.presetDefault')
-                            : activePreset === 'modelsdev'
-                              ? 'models.dev'
-                              : t('settings.pricing.presetCustom')}
-                        </span>
-                      </div>
-                      <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
-                        {t('settings.pricing.syncSubtitle')}
-                      </p>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    className="self-start rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground lg:ml-auto"
-                    onClick={() => setSyncOpen(false)}
-                    aria-label={t('common.close')}
-                  >
-                    <X className="size-4" />
-                  </button>
-                </div>
+        <section className="pricing-toolbar" aria-label={t('settings.pricing.filtersTitle')}>
+          <div className="pricing-toolbar-top">
+            <div className="pricing-list-title"><h3>{t('settings.pricing.priceList')}</h3><span role="status">{t('settings.pricing.listCount', { shown: filteredRows.length, total: counts.total })}</span></div>
+            <div className="pricing-search"><Search size={16} aria-hidden="true" /><Input value={query} onChange={event => setQuery(event.target.value)} placeholder={t('settings.pricing.searchPlaceholder')} aria-label={t('settings.pricing.searchPlaceholder')} />{query && <button type="button" onClick={() => setQuery('')} aria-label={t('settings.pricing.clearSearch')}><X size={14} /></button>}</div>
+            <Button variant="ghost" size="sm" className="pricing-expand-all" onClick={toggleAllAdvanced} aria-label={t(isAllAdvancedExpanded ? 'settings.pricing.collapseAllAdvanced' : 'settings.pricing.expandAllAdvanced')}><ChevronsUpDown className="size-3.5" /><span>{t(isAllAdvancedExpanded ? 'settings.pricing.collapseAllAdvanced' : 'settings.pricing.expandAllAdvanced')}</span></Button>
+          </div>
+          <div className="pricing-filter-layout">
+            {activeChannels.length > 1 && <div className="pricing-filter-section"><span>{t('settings.pricing.channelFilterLabel')}</span><div className="pricing-filter-options" role="group" aria-label={t('settings.pricing.channelFilterLabel')}><button type="button" aria-pressed={channelFilter === 'all'} onClick={() => setChannelFilter('all')}>{t('settings.pricing.filterAll')}<span>{counts.total}</span></button>{activeChannels.map(channel => <button key={channel} type="button" aria-pressed={channelFilter === channel} onClick={() => setChannelFilter(channel)}><ChannelLogo channel={channel} size={14} />{CHANNEL_LABEL[channel]}<span>{channelCounts[channel]}</span></button>)}</div></div>}
+            <div className="pricing-filter-section"><span>{t('settings.pricing.sourceFilterLabel')}</span><div className="pricing-filter-options" role="group" aria-label={t('settings.pricing.sourceFilterLabel')}>{sourceFilters.map(item => <button key={item.id} type="button" aria-pressed={sourceFilter === item.id} data-source={item.id} onClick={() => setSourceFilter(item.id)}>{item.id === 'unsaved' && dirtyCount > 0 && <i className="pricing-dirty-dot" />}{item.label}<span>{item.count}</span></button>)}</div></div>
+          </div>
+          {(query || sourceFilter !== 'all' || channelFilter !== 'all') && <div className="pricing-active-filters"><ListFilter size={12} aria-hidden="true" /><span>{t('settings.pricing.filteredView')}</span><button type="button" onClick={clearFilters}>{t('settings.pricing.clearFilters')}<X size={12} aria-hidden="true" /></button></div>}
+        </section>
 
-                <div className="mt-5 space-y-3">
-					<div className="rounded-xl border border-primary/20 bg-primary/[0.03] p-4">
-						<div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-							<div>
-								<div className="flex flex-wrap items-center gap-2">
-									<h4 className="text-sm font-semibold text-foreground">{t('settings.pricing.officialTitle')}</h4>
-									<span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-700 dark:text-emerald-300">{t('settings.pricing.authoritative')}</span>
-								</div>
-								<p className="mt-1 text-xs leading-relaxed text-muted-foreground">{t('settings.pricing.officialDesc')}</p>
-								<div className="mt-2 flex flex-wrap gap-3 text-[11px] font-semibold">
-									<a href={officialOpenAIUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline">OpenAI <ArrowUpRight className="size-3" /></a>
-									<a href={officialXAIUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline">xAI <ArrowUpRight className="size-3" /></a>
-									<a href={officialClaudeUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline">Anthropic <ArrowUpRight className="size-3" /></a>
-								</div>
-							</div>
-							<Button className="shrink-0" onClick={() => void syncOfficial()} disabled={officialSyncing || (!officialConfig.include_openai && !officialConfig.include_grok && !officialConfig.include_claude)}>
-								{officialSyncing ? <Loader2 className="size-3.5 animate-spin" /> : <CloudDownload className="size-3.5" />}
-								{officialSyncing ? t('settings.pricing.syncing') : t('settings.pricing.officialSyncNow')}
-							</Button>
-						</div>
-						<div className="mt-4 grid gap-3 sm:grid-cols-2">
-							<label className="flex items-center justify-between gap-3 rounded-lg border border-border bg-background/80 px-3 py-2.5">
-								<span className="text-sm font-medium">OpenAI / Codex</span>
-								<Switch checked={officialConfig.include_openai} onCheckedChange={(checked) => setOfficialConfig((cfg) => ({ ...cfg, include_openai: checked }))} />
-							</label>
-							<label className="flex items-center justify-between gap-3 rounded-lg border border-border bg-background/80 px-3 py-2.5">
-								<span className="text-sm font-medium">xAI / Grok</span>
-								<Switch checked={officialConfig.include_grok} onCheckedChange={(checked) => setOfficialConfig((cfg) => ({ ...cfg, include_grok: checked }))} />
-							</label>
-							<label className="flex items-center justify-between gap-3 rounded-lg border border-border bg-background/80 px-3 py-2.5">
-								<span className="inline-flex items-center gap-1.5 text-sm font-medium"><ChannelLogo channel="claude" size={14} />Anthropic / Claude</span>
-								<Switch checked={officialConfig.include_claude} onCheckedChange={(checked) => setOfficialConfig((cfg) => ({ ...cfg, include_claude: checked }))} />
-							</label>
-						</div>
-						<div className="mt-3 flex flex-col gap-3 rounded-lg border border-border bg-background/80 p-3 sm:flex-row sm:items-center">
-							<label className="flex flex-1 items-center justify-between gap-3">
-								<span>
-									<span className="block text-sm font-medium">{t('settings.pricing.autoOfficialSync')}</span>
-									<span className="block text-[11px] text-muted-foreground">{t('settings.pricing.autoOfficialSyncHint')}</span>
-								</span>
-								<Switch checked={officialConfig.enabled} onCheckedChange={(enabled) => setOfficialConfig((cfg) => ({ ...cfg, enabled }))} />
-							</label>
-							<label className="flex items-center gap-2 text-xs text-muted-foreground">
-								{t('settings.pricing.intervalMinutes')}
-								<Input
-									type="number"
-									min={60}
-									max={10080}
-									className="h-9 w-28"
-									value={officialConfig.interval_minutes}
-									onChange={(event) => setOfficialConfig((cfg) => ({ ...cfg, interval_minutes: Number(event.target.value) }))}
-								/>
-							</label>
-							<Button variant="outline" size="sm" onClick={() => void saveOfficialConfig()} disabled={officialSaving || (!officialConfig.include_openai && !officialConfig.include_grok && !officialConfig.include_claude)}>
-								{officialSaving ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
-								{t('common.save')}
-							</Button>
-						</div>
-						{officialConfig.last_success_at ? (
-							<p className="mt-2 text-[11px] text-muted-foreground">{t('settings.pricing.lastOfficialSuccess')}: {new Date(officialConfig.last_success_at).toLocaleString()}</p>
-						) : null}
-						{officialConfig.last_error ? <p className="mt-1 break-all text-[11px] text-destructive">{officialConfig.last_error}</p> : null}
-						{officialConfig.last_warning ? <p className="mt-1 break-all text-[11px] text-amber-700 dark:text-amber-300">{t('settings.pricing.lastWarning')}: {officialConfig.last_warning}</p> : null}
-					</div>
-
-					<div className="pt-1 text-xs font-semibold text-muted-foreground">{t('settings.pricing.referenceTitle')}</div>
-                  <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center">
-                    <div className="relative min-w-0 flex-1">
-                      <Link2 className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-                      <Input
-                        className="h-11 rounded-xl border-border/80 bg-muted/20 pl-9 font-mono text-xs shadow-none"
-                        value={syncUrl}
-                        placeholder={defaultUrl}
-                        onChange={(e) => setSyncUrl(e.target.value)}
-                      />
-                    </div>
-                    <Button
-                      className="h-11 shrink-0 rounded-xl px-5"
-                      onClick={() => void sync()}
-                      disabled={syncing}
-                    >
-                      {syncing ? (
-                        <Loader2 className="size-3.5 animate-spin" />
-                      ) : (
-                        <ArrowUpRight className="size-3.5" />
-                      )}
-                      {syncing ? t('settings.pricing.syncing') : t('settings.pricing.syncNow')}
-                    </Button>
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-                      {t('settings.pricing.presets')}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setSyncUrl('')}
-                      className={cn(
-                        'inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold transition-all',
-                        activePreset === 'default'
-                          ? 'border-primary/30 bg-primary text-primary-foreground shadow-sm'
-                          : 'border-border bg-background text-muted-foreground hover:border-border hover:bg-muted/50 hover:text-foreground',
-                      )}
-                    >
-                      <Sparkles className="size-3" />
-                      {t('settings.pricing.presetDefault')}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSyncUrl(modelsDevUrl)}
-                      disabled={!modelsDevUrl}
-                      className={cn(
-                        'inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold transition-all disabled:opacity-40',
-                        activePreset === 'modelsdev'
-                          ? 'border-primary/30 bg-primary text-primary-foreground shadow-sm'
-                          : 'border-border bg-background text-muted-foreground hover:border-border hover:bg-muted/50 hover:text-foreground',
-                      )}
-                    >
-                      <Wand2 className="size-3" />
-                      models.dev
-                    </button>
-                  </div>
-
-                  <p className="rounded-xl border border-dashed border-border/80 bg-muted/25 px-3.5 py-3 text-[12px] leading-relaxed text-muted-foreground">
-                    {t('settings.pricing.hint')}
-                  </p>
-                </div>
+        {filteredRows.length === 0 ? (
+          <div className="pricing-empty"><Search size={28} strokeWidth={1.5} aria-hidden="true" /><h3>{t('settings.pricing.emptyTitle')}</h3><p>{t(query || sourceFilter !== 'all' || channelFilter !== 'all' ? 'settings.pricing.emptyFiltered' : 'settings.pricing.emptyDesc')}</p>{(query || sourceFilter !== 'all' || channelFilter !== 'all') && <Button variant="outline" size="sm" onClick={clearFilters}>{t('settings.pricing.clearFilters')}</Button>}</div>
+        ) : (
+          <div className="pricing-model-groups">
+            {groupedRows.map(group => (
+              <section key={group.channel} className="pricing-channel-group" aria-label={CHANNEL_LABEL[group.channel]}>
+                <div className="pricing-channel-heading"><ChannelLogo channel={group.channel} size={18} /><h3>{CHANNEL_LABEL[group.channel]}</h3><span>{group.rows.length}</span><small>{t('settings.pricing.unitHint')}</small></div>
+                <div className="pricing-column-head" aria-hidden="true"><span>{t('settings.pricing.modelColumn')}</span><span className="pricing-column-rates"><span>{t('settings.pricing.input')}</span><span>{t('settings.pricing.cached')}</span><span>{t('settings.pricing.output')}</span></span><span /></div>
+                {group.rows.map(r => <PricingModelRow key={r.model} row={r} draft={drafts[r.model] ?? {}} expanded={expandedModels[r.model] ?? false} advancedOpen={expandedAdvanced[r.model] ?? false} busy={savingModel === r.model || bulkSaving} isNew={newModels.has(r.model.toLowerCase())} highlighted={jumpedModel === r.model.toLowerCase()} onToggle={() => setExpandedModels(prev => ({ ...prev, [r.model]: !prev[r.model] }))} onToggleAdvanced={() => setExpandedAdvanced(prev => ({ ...prev, [r.model]: !prev[r.model] }))} onFieldChange={(key, value) => {
+                  if (key === 'user_billing_mode') setDrafts(prev => ({ ...prev, [r.model]: { ...prev[r.model], user_billing_mode: value === 'per_image' ? 'per_image' : 'token' } }))
+                  else setField(r.model, key, value)
+                }} onRevertField={key => revertField(r.model, key)} onSave={() => void save(r.model)} onReset={() => void reset(r.model)} onDiscard={() => setDrafts(prev => ({ ...prev, [r.model]: { ...r.pricing } }))} />)}
               </section>
-            </div>
+            ))}
+            <p className="pricing-list-note"><SlidersHorizontal size={13} aria-hidden="true" />{t('settings.pricing.listHint')}</p>
           </div>
-
-          {/* Sticky toolbar */}
-          <div className="sticky top-2 z-20 -mx-1 px-1">
-            <div className="flex flex-col gap-3 rounded-xl border border-border/80 bg-card/95 p-2.5 shadow-sm backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between sm:p-2 sm:pl-3">
-              <div className="flex min-w-0 flex-1 items-center gap-2">
-                <div className="relative min-w-0 flex-1 sm:max-w-xs">
-                  <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    className="h-9 border-transparent bg-muted/40 pl-9 text-sm shadow-none focus-visible:bg-background"
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    placeholder={t('settings.pricing.searchPlaceholder')}
-                  />
-                </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={toggleAllAdvanced}
-                  className="h-9 shrink-0 gap-1.5 px-2.5 text-xs text-muted-foreground hover:text-foreground"
-                  title={isAllAdvancedExpanded ? t('settings.pricing.collapseAllAdvanced') : t('settings.pricing.expandAllAdvanced')}
-                >
-                  <ChevronsUpDown className="size-3.5" />
-                  <span className="hidden min-[540px]:inline">
-                    {isAllAdvancedExpanded ? t('settings.pricing.collapseAllAdvanced') : t('settings.pricing.expandAllAdvanced')}
-                  </span>
-                </Button>
-              </div>
-
-              {activeChannels.length > 1 ? (
-                <div
-                  className="flex max-w-full gap-0.5 overflow-x-auto rounded-xl bg-muted/50 p-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-                  role="tablist"
-                  aria-label="provider"
-                >
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={channelFilter === 'all'}
-                    onClick={() => setChannelFilter('all')}
-                    className={cn(
-                      'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-all',
-                      channelFilter === 'all' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
-                    )}
-                  >
-                    {t('settings.pricing.filterAll')}
-                    <span className="tabular-nums rounded-md bg-background/60 px-1 py-px text-[10px] font-bold text-muted-foreground">
-                      {counts.total}
-                    </span>
-                  </button>
-                  {activeChannels.map((c) => {
-                    const active = channelFilter === c
-                    return (
-                      <button
-                        key={c}
-                        type="button"
-                        role="tab"
-                        aria-selected={active}
-                        onClick={() => setChannelFilter(c)}
-                        className={cn(
-                          'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-all',
-                          active ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
-                        )}
-                      >
-                        <ChannelLogo channel={c} size={14} />
-                        {CHANNEL_LABEL[c]}
-                        <span
-                          className={cn(
-                            'tabular-nums rounded-md px-1 py-px text-[10px] font-bold',
-                            active ? 'bg-primary/10 text-primary' : 'bg-background/60 text-muted-foreground',
-                          )}
-                        >
-                          {channelCounts[c]}
-                        </span>
-                      </button>
-                    )
-                  })}
-                </div>
-              ) : null}
-              <div
-                className="flex max-w-full gap-0.5 overflow-x-auto rounded-xl bg-muted/50 p-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-                role="tablist"
-              >
-                {sourceFilters.map((item) => {
-                  const active = sourceFilter === item.id
-                  return (
-                    <button
-                      key={item.id}
-                      type="button"
-                      role="tab"
-                      aria-selected={active}
-                      onClick={() => setSourceFilter(item.id)}
-                      className={cn(
-                        'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-all',
-                        active
-                          ? 'bg-background text-foreground shadow-sm'
-                          : 'text-muted-foreground hover:text-foreground',
-                      )}
-                    >
-                      {item.label}
-                      <span
-                        className={cn(
-                          'tabular-nums rounded-md px-1 py-px text-[10px] font-bold',
-                          active
-                            ? item.id === 'unsaved' && item.count > 0
-                              ? 'bg-amber-500/20 text-amber-600 dark:text-amber-400'
-                              : 'bg-primary/10 text-primary'
-                            : item.id === 'unsaved' && item.count > 0
-                              ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400'
-                              : 'bg-background/60 text-muted-foreground',
-                        )}
-                      >
-                        {item.count}
-                      </span>
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-          </div>
-
-          {/* Model list */}
-          {filteredRows.length === 0 ? (
-            <StateShell
-              isEmpty
-              emptyTitle={t('settings.pricing.emptyTitle')}
-              emptyDescription={
-                query || sourceFilter !== 'all' || channelFilter !== 'all'
-                  ? t('settings.pricing.emptyFiltered')
-                  : t('settings.pricing.emptyDesc')
-              }
-            >
-              {null}
-            </StateShell>
-          ) : (
-            <div className="space-y-3.5">
-              <div className="flex flex-wrap items-center justify-between gap-2 px-1">
-                <p className="text-xs font-medium text-muted-foreground">
-                  {t('settings.pricing.listCount', {
-                    shown: filteredRows.length,
-                    total: counts.total,
-                  })}
-                </p>
-                {dirtyCount > 0 ? (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold text-amber-700 ring-1 ring-inset ring-amber-500/20 dark:text-amber-300">
-                    {t('settings.pricing.unsavedCount', { count: dirtyCount })}
-                  </span>
-                ) : null}
-              </div>
-
-              {groupedRows.map((group) => (
-                <div key={group.channel} className="space-y-3.5">
-                  {channelFilter === 'all' && activeChannels.length > 1 ? (
-                    <div className="flex items-center gap-2 px-1 pt-1.5">
-                      <ChannelLogo channel={group.channel} size={16} />
-                      <span className="text-xs font-semibold text-foreground/80">{CHANNEL_LABEL[group.channel]}</span>
-                      <span className="tabular-nums text-[10px] font-medium text-muted-foreground">{group.rows.length}</span>
-                    </div>
-                  ) : null}
-                  {group.rows.map((r) => {
-                const draft = drafts[r.model] ?? {}
-                const dirty = isDirty(draft, r.pricing)
-                const advDirty = isAdvancedDirty(draft, r.pricing)
-                const busy = savingModel === r.model || bulkSaving
-                const source = sourceMeta(r.source)
-                const advancedOpen = expandedAdvanced[r.model] ?? false
-                const inputVal = normalizePrice(draft.input)
-                const outputVal = normalizePrice(draft.output)
-                const multiplier = getOutputMultiplier(inputVal, outputVal)
-                const pricingModel = (r.canonical_model?.trim() || r.model.trim()).toLowerCase()
-                const imageModel = isImage25Model(pricingModel)
-                const primaryFields = imageModel ? [...PRIMARY_FIELDS.filter(field => !field.key.startsWith('cache_write')), ...IMAGE_FIELDS] : PRIMARY_FIELDS
-                const supportsLongContextPricing = pricingModel !== 'gpt-6-astra' && !imageModel
-                const advancedFields = imageModel ? [] : supportsLongContextPricing
-                  ? ADVANCED_FIELDS
-                  : ADVANCED_FIELDS.filter((field) => !field.key.includes('_long'))
-                const hasLongContextPricing = supportsLongContextPricing && (
-                  normalizePrice(draft.long_context_threshold_tokens) > 0 ||
-                  normalizePrice(draft.input_long) > 0 ||
-                  normalizePrice(draft.cached_input_long) > 0 ||
-                  normalizePrice(draft.output_long) > 0
-                )
-
-                return (
-                  <article
-                    key={r.model}
-                    id={`pricing-row-${r.model.toLowerCase()}`}
-                    className={cn(
-                      'group/card relative overflow-hidden rounded-xl border bg-card shadow-sm transition-all hover:border-border scroll-mt-24',
-                      dirty ? 'border-amber-500/30' : 'border-border/80',
-                      jumpedModel === r.model.toLowerCase() && 'ring-2 ring-primary ring-offset-2 ring-offset-background',
-                    )}
-                  >
-                    <div className="p-4 sm:p-5">
-                      {/* Header */}
-                      <div className="flex flex-col gap-3.5 sm:flex-row sm:items-start sm:justify-between">
-                        <div className="flex min-w-0 items-start gap-3.5">
-                          <ModelLogo model={r.model} size={44} variant="ring" className="rounded-xl" />
-                          <div className="min-w-0">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <h4 className="truncate font-mono text-[15px] font-semibold tracking-tight text-foreground sm:text-base">
-                                {r.model}
-                              </h4>
-                              {newModels.has(r.model.toLowerCase()) ? (
-                                <span className="inline-flex items-center rounded-full bg-rose-500/15 px-1.5 py-0.5 text-[10px] font-bold text-rose-600 ring-1 ring-inset ring-rose-500/25 dark:text-rose-300">
-                                  {t('settings.pricing.newBadge')}
-                                </span>
-                              ) : null}
-                              {r.is_alias && r.canonical_model ? (
-                                <span className="inline-flex items-center gap-1 rounded-full bg-violet-500/10 px-2 py-0.5 text-[10px] font-bold text-violet-700 ring-1 ring-inset ring-violet-500/20 dark:text-violet-300">
-                                  {t('settings.pricing.aliasOf', {
-                                    model: r.canonical_model,
-                                  })}
-                                </span>
-                              ) : null}
-                              <span
-                                className={cn(
-                                  'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold ring-1 ring-inset',
-                                  source.className,
-                                )}
-                              >
-                                <span className={cn('size-1.5 rounded-full', source.dot)} />
-                                {t(source.labelKey)}
-                              </span>
-                              {dirty ? (
-                                <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold text-amber-700 ring-1 ring-inset ring-amber-500/20 dark:text-amber-300">
-                                  <span className="size-1.5 rounded-full bg-amber-500" />
-                                  {t('settings.pricing.unsaved')}
-                                </span>
-                              ) : (
-                                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-700 ring-1 ring-inset ring-emerald-500/15 dark:text-emerald-300">
-                                  <Check className="size-2.5" />
-                                  {t('settings.pricing.syncedState')}
-                                </span>
-                              )}
-                            </div>
-                            <div className="mt-1 flex flex-wrap items-center gap-2 text-[12px] text-muted-foreground">
-                              <span>
-                                <span className="font-semibold tabular-nums text-foreground">
-                                  ${formatPriceDisplay(inputVal)}
-                                </span>
-                                <span className="mx-1 text-border">→</span>
-                                <span className="font-semibold tabular-nums text-foreground">
-                                  ${formatPriceDisplay(outputVal)}
-                                </span>
-                                <span className="ml-1 text-muted-foreground/80">
-                                  {t('settings.pricing.perMillion')}
-                                </span>
-                              </span>
-                              {multiplier ? (
-                                <span className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-muted-foreground">
-                                  {t('settings.pricing.multiplier', { ratio: multiplier })}
-                                </span>
-                              ) : null}
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="flex shrink-0 items-center gap-1.5 sm:pt-0.5">
-                          {r.source !== 'default' ? (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              className="h-9 rounded-xl text-muted-foreground"
-                              disabled={busy}
-                              onClick={() => void reset(r.model)}
-                            >
-                              <RotateCcw className={cn('size-3.5', busy && 'animate-spin')} />
-                              <span className="max-sm:hidden">{t('settings.pricing.resetBtn')}</span>
-                            </Button>
-                          ) : null}
-                          <Button
-                            size="sm"
-                            className="h-9 min-w-[96px] rounded-xl"
-                            disabled={busy || !dirty}
-                            onClick={() => void save(r.model)}
-                          >
-                            {busy ? (
-                              <Loader2 className="size-3.5 animate-spin" />
-                            ) : (
-                              <Save className="size-3.5" />
-                            )}
-                            {busy ? t('common.saving') : t('common.save')}
-                          </Button>
-                        </div>
-                      </div>
-
-                      {/* Primary rates */}
-                      <div className="mt-4 grid grid-cols-1 gap-2.5 min-[480px]:grid-cols-3">
-                        {primaryFields.map((field) => (
-                          <PriceField
-                            key={field.key}
-                            field={field}
-                            value={normalizePrice(draft[field.key])}
-                            savedValue={normalizePrice(r.pricing[field.key])}
-                            changed={
-                              normalizePrice(draft[field.key]) !== normalizePrice(r.pricing[field.key])
-                            }
-                            onChange={(next) => setField(r.model, field.key, next)}
-                            onRevert={() => revertField(r.model, field.key)}
-                          />
-                        ))}
-                      </div>
-
-                      <BillingRulePreview pricing={draft} />
-
-                      {/* Advanced rates */}
-                      <div className={imageModel ? 'hidden' : 'mt-3'}>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setExpandedAdvanced((prev) => ({
-                              ...prev,
-                              [r.model]: !advancedOpen,
-                            }))
-                          }
-                          className="flex w-full items-center justify-between gap-2 rounded-xl px-1 py-1.5 text-left transition-colors hover:bg-muted/40"
-                        >
-                          <span className="flex items-center gap-2 text-[12px] font-semibold text-muted-foreground">
-                            <ChevronDown
-                              className={cn(
-                                'size-3.5 transition-transform duration-200',
-                                advancedOpen && 'rotate-180',
-                              )}
-                            />
-                            {t('settings.pricing.advancedRates')}
-                            {!advancedOpen && advDirty ? (
-                              <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold text-amber-600 dark:text-amber-400">
-                                <span className="size-1.5 animate-pulse rounded-full bg-amber-500" />
-                                {t('settings.pricing.hasAdvancedDirty')}
-                              </span>
-                            ) : null}
-                          </span>
-                          <span className="text-[11px] text-muted-foreground/70">
-                            {t('settings.pricing.advancedRatesHint')}
-                          </span>
-                        </button>
-
-                        <div
-                          className={cn(
-                            'grid transition-[grid-template-rows,opacity] duration-300 ease-out',
-                            advancedOpen ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
-                          )}
-                        >
-                          <div className="min-h-0 overflow-hidden">
-                            <div className="grid grid-cols-1 gap-2.5 pt-2 min-[480px]:grid-cols-2 xl:grid-cols-4">
-                              {advancedFields.map((field) => (
-                                <PriceField
-                                  key={field.key}
-                                  field={field}
-                                  dense
-                                  value={normalizePrice(draft[field.key])}
-                                  savedValue={normalizePrice(r.pricing[field.key])}
-                                  changed={
-                                    normalizePrice(draft[field.key]) !==
-                                    normalizePrice(r.pricing[field.key])
-                                  }
-                                  onChange={(next) => setField(r.model, field.key, next)}
-                                  onRevert={() => revertField(r.model, field.key)}
-                                />
-                              ))}
-                              {hasLongContextPricing ? (
-                                <ContextThresholdField
-                                  value={Math.round(normalizePrice(draft.long_context_threshold_tokens))}
-                                  savedValue={Math.round(normalizePrice(r.pricing.long_context_threshold_tokens))}
-                                  changed={
-                                    normalizePrice(draft.long_context_threshold_tokens) !==
-                                    normalizePrice(r.pricing.long_context_threshold_tokens)
-                                  }
-                                  onChange={(next) =>
-                                    setField(r.model, 'long_context_threshold_tokens', next)
-                                  }
-                                  onRevert={() =>
-                                    revertField(r.model, 'long_context_threshold_tokens')
-                                  }
-                                />
-                              ) : null}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </article>
-                )
-                  })}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+        )}
       </StateShell>
-
-      {/* 底部未保存批量操作悬浮条 */}
-      {dirtyCount > 0 ? (
-        <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 px-4 max-w-lg w-full animate-in fade-in slide-in-from-bottom-4 duration-200">
-          <div className="flex items-center justify-between gap-3 rounded-2xl border border-amber-500/30 bg-card/95 p-3 shadow-xl backdrop-blur-xl ring-1 ring-amber-500/20">
-            <div className="flex items-center gap-2.5 pl-1 min-w-0">
-              <span className="relative flex size-2.5 shrink-0">
-                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
-                <span className="relative inline-flex size-2.5 rounded-full bg-amber-500" />
-              </span>
-              <span className="truncate text-xs font-semibold text-foreground">
-                {t('settings.pricing.unsavedFloatingBar', { count: dirtyCount })}
-              </span>
-            </div>
-            <div className="flex shrink-0 items-center gap-2">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-8 rounded-xl px-2.5 text-xs text-muted-foreground hover:text-foreground"
-                onClick={discardAllChanges}
-                disabled={bulkSaving}
-              >
-                {t('settings.pricing.discardAll')}
-              </Button>
-              <Button
-                size="sm"
-                className="h-8 rounded-xl px-3.5 text-xs font-semibold"
-                onClick={() => void saveAllDirty()}
-                disabled={bulkSaving}
-              >
-                {bulkSaving ? (
-                  <Loader2 className="size-3 animate-spin" />
-                ) : (
-                  <Save className="size-3" />
-                )}
-                {bulkSaving ? t('settings.pricing.savingAll') : t('settings.pricing.saveAll')}
-              </Button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      {dirtyCount > 0 && (
+        <div className="pricing-bulk-bar"><div className="pricing-bulk-content"><div className="pricing-bulk-status" role="status"><span className="pricing-dirty-dot" /><span><strong>{t('settings.pricing.unsavedCount', { count: dirtyCount })}</strong><small>{t('settings.pricing.bulkScope')}</small></span></div><div className="pricing-bulk-actions"><Button variant="ghost" size="sm" onClick={discardAllChanges} disabled={bulkSaving}>{t('settings.pricing.discardAll')}</Button><Button size="sm" onClick={() => void saveAllDirty()} disabled={bulkSaving}>{bulkSaving ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}{t(bulkSaving ? 'settings.pricing.savingAll' : 'settings.pricing.saveAll')}</Button></div></div></div>
+      )}
     </div>
   )
 }

@@ -360,7 +360,11 @@ func (h *Handler) UpdateModelPricing(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	if req.Pricing != nil {
+	if !req.Reset && req.Pricing != nil {
+		if err := database.ValidateModelUserBilling(key, *req.Pricing); err != nil {
+			writeError(c, http.StatusBadRequest, err.Error())
+			return
+		}
 		normalized := database.NormalizeModelPricingOverride(key, *req.Pricing)
 		req.Pricing = &normalized
 	}

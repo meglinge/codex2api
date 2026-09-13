@@ -27,6 +27,7 @@ Run it as a full **PostgreSQL + Redis** production stack or as a single-containe
 <tr><td><b>Visual admin console</b></td><td>The embedded React / Vite dashboard covers account import and testing, API keys, proxy pools, image studio (text-to-image + image-to-image), prompt filtering, usage analytics, operations, scheduler board, and system settings.</td></tr>
 <tr><td><b>Two deployment shapes</b></td><td>Use PostgreSQL + Redis for production or SQLite + Memory for lightweight single-node deployments; Docker images, source builds, local development, and the interactive deploy script are ready to use. SQLite mode binds to <code>127.0.0.1</code> by default for security.</td></tr>
 <tr><td><b>Billing and observability</b></td><td>Per-account 5h/7d windowed USD cost tracking, credit quota support, API key usage tracking, OAuth PKCE token acquisition, prompt filtering, and a usage dashboard with request logs and trend charts.</td></tr>
+<tr><td><b>Quality check</b></td><td>Compare selected accounts, models, and reasoning effort with an editable pelican-on-a-bicycle HTML/SVG animation challenge. Run up to three background tests across accounts, keep persistent test history, and review isolated animation previews, source, timing/token metrics, and HTML downloads.</td></tr>
 </table>
 
 ---

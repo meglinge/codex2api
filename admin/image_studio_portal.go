@@ -43,6 +43,10 @@ func (h *Handler) imageStudioPortalAuthMiddleware() gin.HandlerFunc {
 			return
 		}
 		if h.imageProxy != nil {
+			if c.Request.Method == http.MethodGet {
+				h.imageProxy.APIKeyReadAuthMiddleware()(c)
+				return
+			}
 			h.imageProxy.APIKeyAuthMiddleware()(c)
 			return
 		}
@@ -73,12 +77,17 @@ func (h *Handler) portalAPIKeyAuthFallback() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
+		if !row.Enabled {
+			writeError(c, http.StatusUnauthorized, "API Key 已停用")
+			c.Abort()
+			return
+		}
 		if row.IsExpired(time.Now()) {
 			writeError(c, http.StatusUnauthorized, "API Key 已过期")
 			c.Abort()
 			return
 		}
-		if row.IsQuotaExhausted() {
+		if row.IsQuotaExhausted() && c.Request.Method != http.MethodGet {
 			writeError(c, http.StatusForbidden, "API Key 配额已用尽")
 			c.Abort()
 			return

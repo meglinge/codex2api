@@ -18,9 +18,11 @@ import {
 export default function RequestCountPills({
   account,
   compact = false,
+  variant = "default",
 }: {
   account: AccountRow;
   compact?: boolean;
+  variant?: "default" | "card";
 }) {
   const { t } = useTranslation();
   const success = account.success_requests ?? 0;
@@ -34,8 +36,9 @@ export default function RequestCountPills({
 
   const successPill = (
     <span
+      role="group"
       className={cn(
-        "inline-flex items-center justify-center gap-1 rounded-full font-mono font-semibold tabular-nums",
+        "account-request-count inline-flex items-center justify-center gap-1 rounded-full font-mono font-semibold tabular-nums",
         pad,
         success > 0
           ? "bg-emerald-500/12 text-emerald-700 transition-colors hover:bg-emerald-500/18 dark:bg-emerald-400/12 dark:text-emerald-300 dark:hover:bg-emerald-400/18"
@@ -57,15 +60,18 @@ export default function RequestCountPills({
         )}
         aria-hidden
       />
-      {success.toLocaleString()}
+      <span className="account-request-count__value">{success.toLocaleString()}</span>
+      {variant === "card" && (
+        <span className="account-request-count__label">{t("accounts.healthBarSuccessShort")}</span>
+      )}
     </span>
   );
 
   return (
-    <div className="flex flex-col items-start gap-1">
+    <div className="account-request-summary flex flex-col items-start gap-1" data-variant={variant}>
       <div
         className={cn(
-          "inline-flex items-center rounded-full p-0.5 ring-1 ring-inset ring-border/70",
+          "account-request-counts inline-flex items-center rounded-full p-0.5 ring-1 ring-inset ring-border/70",
           idle ? "bg-muted/50" : "bg-muted/30",
         )}
       >
@@ -103,33 +109,40 @@ export default function RequestCountPills({
             barClassName="bg-gradient-to-r from-red-400 to-rose-300"
           >
             <span
+              role="group"
               tabIndex={0}
               className={cn(
-                "inline-flex cursor-help items-center justify-center gap-1 rounded-full bg-red-500/12 font-mono font-semibold tabular-nums text-red-700 transition-colors hover:bg-red-500/18 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50 dark:bg-red-400/12 dark:text-red-300 dark:hover:bg-red-400/18",
+                "account-request-count inline-flex cursor-help items-center justify-center gap-1 rounded-full bg-red-500/12 font-mono font-semibold tabular-nums text-red-700 transition-colors hover:bg-red-500/18 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50 dark:bg-red-400/12 dark:text-red-300 dark:hover:bg-red-400/18",
                 pad,
               )}
               aria-label={t("accounts.requestErrorTooltipAria", { count: errors })}
             >
               <span className="size-1.5 shrink-0 rounded-full bg-red-500" aria-hidden />
-              {errors.toLocaleString()}
+              <span className="account-request-count__value">{errors.toLocaleString()}</span>
+              {variant === "card" && (
+                <span className="account-request-count__label">{t("accounts.healthBarFailureShort")}</span>
+              )}
             </span>
           </CountBreakdownTooltip>
         ) : (
           <span
             className={cn(
-              "inline-flex items-center justify-center gap-1 rounded-full font-mono font-semibold tabular-nums text-muted-foreground/70",
+              "account-request-count inline-flex items-center justify-center gap-1 rounded-full font-mono font-semibold tabular-nums text-muted-foreground/70",
               pad,
             )}
             title={t("accounts.requestError")}
           >
             <span className="size-1.5 shrink-0 rounded-full bg-muted-foreground/30" aria-hidden />
-            0
+            <span className="account-request-count__value">0</span>
+            {variant === "card" && (
+              <span className="account-request-count__label">{t("accounts.healthBarFailureShort")}</span>
+            )}
           </span>
         )}
       </div>
 
       {(retryErrors > 0 || rateLimits > 0) && (
-        <div className="flex flex-wrap items-center gap-1 pl-0.5 text-[10px] font-medium text-muted-foreground">
+        <div className="account-request-summary__attempts flex flex-wrap items-center gap-1 pl-0.5 text-[10px] font-medium text-muted-foreground">
           {retryErrors > 0 ? (
             <span className="rounded-full bg-muted/70 px-1.5 py-0.5">
               retry {retryErrors}

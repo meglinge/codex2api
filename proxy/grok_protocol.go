@@ -1767,7 +1767,23 @@ func rewriteGrokProtocolModel(body []byte, model string) ([]byte, error) {
 }
 
 func prepareRoutedGrokProtocolRequest(route GrokUpstreamRoute, inbound GrokProtocol, inboundBody, responsesBody []byte) (grokPreflightResult, error) {
+	return prepareRoutedGrokProtocolRequestWithCompaction(route, inbound, inboundBody, responsesBody, nil)
+}
+
+func prepareRoutedGrokProtocolRequestWithCompaction(route GrokUpstreamRoute, inbound GrokProtocol, inboundBody, responsesBody []byte, preservedCompaction compactionProvenanceDigests) (grokPreflightResult, error) {
 	inbound = auth.NormalizeGrokProtocol(string(inbound))
+	if route.Protocol != GrokProtocolResponses && (len(preservedCompaction) > 0 || requestBodyHasCompactionTrigger(inboundBody) || requestBodyHasCompactionTrigger(responsesBody)) {
+		return grokPreflightResult{}, fmt.Errorf("Grok compaction requires a Responses upstream; %s cannot carry its state or trigger", route.Protocol)
+	}
+	prepareResponses := func(body []byte) grokPreflightResult {
+		result := prepareGrokUpstreamBodyWithCompaction(body, preservedCompaction)
+		// Same-protocol Grok uses the original input, which bypasses the Codex
+		// normalizer. Keep the trigger final after every Grok preflight rewrite.
+		if requestBodyHasCompactionTrigger(result.Body) {
+			result.Body = normalizeCompactionTriggerFinal(result.Body, false)
+		}
+		return result
+	}
 	// A same-protocol route receives the original downstream object even when
 	// it was selected from catalog apiBackend rather than a fresh capability
 	// probe. This preserves unknown standard fields and provider extensions.
@@ -1791,7 +1807,7 @@ func prepareRoutedGrokProtocolRequest(route GrokUpstreamRoute, inbound GrokProto
 			// 实测 preflight 成本 0.06~1.9ms(6KB~544KB 请求体),相对 Grok
 			// 秒级首字可忽略。
 			if route.Protocol == GrokProtocolResponses {
-				return prepareGrokUpstreamBody(body), nil
+				return prepareResponses(body), nil
 			}
 			return grokPreflightResult{Body: body, TurnIndex: 1, Model: gjson.GetBytes(body, "model").String()}, nil
 		}
@@ -1813,7 +1829,7 @@ func prepareRoutedGrokProtocolRequest(route GrokUpstreamRoute, inbound GrokProto
 			body = forced
 		}
 		if route.Protocol == GrokProtocolResponses {
-			return prepareGrokUpstreamBody(body), nil
+			return prepareResponses(body), nil
 		}
 		return grokPreflightResult{Body: clampGrokReasoningEffort(body), TurnIndex: 1, Model: gjson.GetBytes(body, "model").String()}, nil
 	}
@@ -1825,7 +1841,7 @@ func prepareRoutedGrokProtocolRequest(route GrokUpstreamRoute, inbound GrokProto
 	// Codex-only Responses tools and history must be lowered while the request
 	// still has canonical Responses semantics. Converting first rejects those
 	// variants and loses the request-local aliases needed to restore tool calls.
-	preflight := prepareGrokUpstreamBody(canonical)
+	preflight := prepareResponses(canonical)
 	converted, err := convertCanonicalGrokResponsesBody(route.Protocol, preflight.Body)
 	if err != nil {
 		return grokPreflightResult{}, err
@@ -1895,7 +1911,8 @@ func ExecuteGrokProtocolRequest(ctx context.Context, account *auth.Account, inbo
 		model = strings.TrimSpace(gjson.GetBytes(inboundBody, "model").String())
 	}
 	route := ResolveGrokUpstreamRoute(account, model, inbound, time.Now())
-	preflight, err := prepareRoutedGrokProtocolRequest(route, inbound, inboundBody, responsesBody)
+	preservedCompaction := grokCompactionDigestsForAccount(ctx, account)
+	preflight, err := prepareRoutedGrokProtocolRequestWithCompaction(route, inbound, inboundBody, responsesBody, preservedCompaction)
 	if err != nil {
 		return nil, ErrBadRequest("Grok protocol conversion failed: " + err.Error())
 	}
@@ -1934,7 +1951,11 @@ func ExecuteGrokProtocolRequest(ctx context.Context, account *auth.Account, inbo
 		if clientVersion != "" {
 			req.Header.Set("x-grok-client-version", clientVersion)
 		}
-		req.Header.Set("x-grok-turn-idx", strconv.Itoa(preflight.TurnIndex))
+		turnIndex := preflight.TurnIndex
+		if !bytes.Equal(payload, preflight.Body) {
+			turnIndex = grokTurnIndex(payload)
+		}
+		req.Header.Set("x-grok-turn-idx", strconv.Itoa(turnIndex))
 		req.Header.Set("Accept-Encoding", "gzip, br, deflate")
 		if preflight.Model != "" {
 			req.Header.Set("x-grok-model-override", preflight.Model)
@@ -1971,10 +1992,16 @@ func ExecuteGrokProtocolRequest(ctx context.Context, account *auth.Account, inbo
 			}
 		}
 	}
+	if route.Protocol == GrokProtocolResponses {
+		resp, err = fallbackGrokInlineCompaction(ctx, resp, preflight.Body, model, func(body []byte) (*http.Response, error) { return send(body, "") })
+		if err != nil {
+			return nil, ErrUpstream(http.StatusBadGateway, "Grok compaction compatibility failed", err)
+		}
+	}
 	if route.Protocol == GrokProtocolResponses && resp.StatusCode == http.StatusBadRequest && grokBodyHasBlobs(preflight.Body) {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		_ = resp.Body.Close()
-		if grokIsBlobDecodeFailure(errBody) {
+		if grokIsBlobDecodeFailure(errBody) && len(preservedCompaction) == 0 {
 			resp, err = send(stripGrokUndecodableBlobs(preflight.Body), "")
 			if err != nil {
 				return nil, err

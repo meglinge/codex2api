@@ -260,7 +260,7 @@ func TestGrokPrepareHistoryItemMatchesMapRebuild(t *testing.T) {
 			}
 			wantItem, wantChanged := rebuildGrokHistoryItem(decoded, register)
 			var buf bytes.Buffer
-			gotChanged, _ := grokWriteHistoryItem(&buf, item, register)
+			gotChanged, _ := grokWriteHistoryItem(&buf, item, register, nil)
 			gotRaw := buf.Bytes()
 			if wantChanged != gotChanged {
 				t.Errorf("%s: 改写判定不一致 (map=%t, raw=%t): %s", tc.name, wantChanged, gotChanged, item.Raw)

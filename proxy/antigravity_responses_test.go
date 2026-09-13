@@ -539,9 +539,137 @@ func TestResponsesToGeminiInternalAcceptsOrdinaryTextConfiguration(t *testing.T)
 	}
 }
 
-func TestResponsesToGeminiInternalRejectsImagesAndToolOutputs(t *testing.T) {
+func TestResponsesToGeminiInternalSupportsInputImage(t *testing.T) {
+	body := []byte(`{
+		"input":[
+			{
+				"role":"user",
+				"content":[
+					{"type":"input_text","text":"what is in this picture?"},
+					{"type":"input_image","image_url":"data:image/jpeg;base64,/9j/4AAQSkZJRg=="}
+				]
+			}
+		]
+	}`)
+	got, err := responsesToGeminiInternal(body, "project", "gemini-3.8-flash")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	req, ok := got["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("request missing: %#v", got)
+	}
+	contents, ok := req["contents"].([]any)
+	if !ok || len(contents) != 1 {
+		t.Fatalf("contents length != 1: %#v", contents)
+	}
+	turn, ok := contents[0].(map[string]any)
+	if !ok || turn["role"] != "user" {
+		t.Fatalf("turn role != user: %#v", turn)
+	}
+	parts, ok := turn["parts"].([]any)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("parts length != 2: %#v", parts)
+	}
+	textPart, ok := parts[0].(map[string]any)
+	if !ok || textPart["text"] != "what is in this picture?" {
+		t.Fatalf("first part != text: %#v", textPart)
+	}
+	imagePart, ok := parts[1].(map[string]any)
+	if !ok {
+		t.Fatalf("second part is not a map: %#v", parts[1])
+	}
+	inlineData, ok := imagePart["inlineData"].(map[string]any)
+	if !ok {
+		t.Fatalf("inlineData missing: %#v", imagePart)
+	}
+	if inlineData["mimeType"] != "image/jpeg" || inlineData["data"] != "/9j/4AAQSkZJRg==" {
+		t.Fatalf("inlineData mismatch: %#v", inlineData)
+	}
+}
+
+func TestResponsesToGeminiInternalSupportsFunctionCallOutputInputImage(t *testing.T) {
+	body := []byte(`{
+		"input":[
+			{
+				"type":"function_call",
+				"call_id":"call_screenshot_1",
+				"name":"take_screenshot",
+				"arguments":"{}"
+			},
+			{
+				"type":"function_call_output",
+				"call_id":"call_screenshot_1",
+				"output":[
+					{"type":"input_text","text":"Screenshot captured"},
+					{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="}
+				]
+			}
+		]
+	}`)
+	got, err := responsesToGeminiInternal(body, "project", "gemini-3.8-flash")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	req, ok := got["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("request missing: %#v", got)
+	}
+	contents, ok := req["contents"].([]any)
+	if !ok || len(contents) != 2 {
+		t.Fatalf("contents length != 2: %#v", contents)
+	}
+	// turn 0: model functionCall
+	modelTurn, ok := contents[0].(map[string]any)
+	if !ok || modelTurn["role"] != "model" {
+		t.Fatalf("modelTurn role != model: %#v", modelTurn)
+	}
+	// turn 1: user functionResponse with parts
+	userTurn, ok := contents[1].(map[string]any)
+	if !ok || userTurn["role"] != "user" {
+		t.Fatalf("userTurn role != user: %#v", userTurn)
+	}
+	parts, ok := userTurn["parts"].([]any)
+	if !ok || len(parts) != 1 {
+		t.Fatalf("parts length != 1: %#v", parts)
+	}
+	fRespPart, ok := parts[0].(map[string]any)
+	if !ok {
+		t.Fatalf("parts[0] not a map: %#v", parts[0])
+	}
+	fResp, ok := fRespPart["functionResponse"].(map[string]any)
+	if !ok {
+		t.Fatalf("functionResponse missing: %#v", fRespPart)
+	}
+	if fResp["name"] != "take_screenshot" || fResp["id"] != "call_screenshot_1" {
+		t.Fatalf("functionResponse metadata mismatch: %#v", fResp)
+	}
+	respObj, ok := fResp["response"].(map[string]any)
+	if !ok || respObj["result"] != "Screenshot captured" {
+		t.Fatalf("functionResponse result mismatch: %#v", respObj)
+	}
+	imageParts, ok := fResp["parts"].([]any)
+	if !ok || len(imageParts) != 1 {
+		t.Fatalf("functionResponse parts length != 1: %#v", fResp["parts"])
+	}
+	imagePart, ok := imageParts[0].(map[string]any)
+	if !ok {
+		t.Fatalf("imagePart not map: %#v", imageParts[0])
+	}
+	inlineData, ok := imagePart["inlineData"].(map[string]any)
+	if !ok {
+		t.Fatalf("inlineData missing: %#v", imagePart)
+	}
+	if inlineData["mimeType"] != "image/png" || inlineData["data"] != "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" {
+		t.Fatalf("inlineData mismatch: %#v", inlineData)
+	}
+}
+
+func TestResponsesToGeminiInternalRejectsUnsupportedInputs(t *testing.T) {
 	for _, body := range []string{
-		`{"input":[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AA=="}]}]}`,
+		`{"input":[{"role":"assistant","content":[{"type":"input_image","image_url":"data:image/png;base64,AA=="}]}]}`,
+		`{"input":[{"role":"user","content":[{"type":"input_image","image_url":"https://example.com/test.png"}]}]}`,
+		`{"input":[{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_image","image_url":"https://example.com/test.png"}]}]}`,
 		`{"input":[{"type":"function_call_output","call_id":"call_1","output":"ok"}]}`,
 	} {
 		if _, err := responsesToGeminiInternal([]byte(body), "project", "gemini"); err == nil {

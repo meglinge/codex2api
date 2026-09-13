@@ -551,7 +551,7 @@ func rebuildGrokHistoryItem(item map[string]any, register grokAliasRegister) (ma
 	if itemType == "" && grokNsStringField(item, "role") != "" {
 		itemType = "message" // Codex 可能省略带 role 消息的 type
 	}
-	if itemType == "compaction" {
+	if itemType == "compaction" || (isEncryptedCompactionItemType(itemType) && strings.TrimSpace(grokNsStringField(item, "encrypted_content")) != "") {
 		// 外来 compaction 密文 Grok 解不了，直接换成边界消息。
 		return grokBoundaryMessage(), true
 	}
@@ -890,7 +890,8 @@ func stripGrokUndecodableBlobs(body []byte) []byte {
 		if !ok {
 			continue
 		}
-		if grokNsStringField(item, "type") == "compaction" {
+		itemType := grokNsStringField(item, "type")
+		if itemType == "compaction" || (isEncryptedCompactionItemType(itemType) && strings.TrimSpace(grokNsStringField(item, "encrypted_content")) != "") {
 			items[i] = grokBoundaryMessage()
 			changed = true
 			continue

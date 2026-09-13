@@ -34,7 +34,7 @@ export interface AccountOperationResultsPage {
 }
 
 export interface AccountOperationResultsState {
-  action: "batch_test" | "batch_refresh";
+  action: "batch_test" | "batch_refresh" | "batch_usage_refresh";
   results: AccountOperationResult[];
 }
 
@@ -68,7 +68,7 @@ export function collectAccountOperationResult(
   }
   if (
     event.type !== "progress" ||
-    (event.action !== "batch_test" && event.action !== "batch_refresh") ||
+    (event.action !== "batch_test" && event.action !== "batch_refresh" && event.action !== "batch_usage_refresh") ||
     !event.account_id
   ) {
     return;

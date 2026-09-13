@@ -40,6 +40,7 @@ func migrateOnlyEnabled() bool {
 	return value == "1" || strings.EqualFold(value, "true")
 }
 
+// main 加载配置、初始化存储与路由，并启动 Codex2API HTTP 服务。
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.Println("Codex2API v2 启动中...")
@@ -49,6 +50,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("加载核心环境配置失败 (请检查 .env 文件): %v", err)
 	}
+	proxy.ConfigureDownstreamKeepaliveFromEnv()
 	log.Printf("物理层配置加载成功: port=%d, database=%s, cache=%s, tz=%s", cfg.Port, cfg.Database.Label(), cfg.Cache.Label(), time.Local)
 
 	// 2. 初始化数据库
@@ -84,6 +86,7 @@ func main() {
 		settings = &database.SystemSettings{
 			SiteName:                          database.DefaultSiteName,
 			MaxConcurrency:                    2,
+			CodexTelemetryEnabled:             false, // 实验性:模拟遥测默认不外发,由部署者显式开启
 			GlobalRPM:                         0,
 			TestModel:                         auth.DefaultTestModel,
 			TestContent:                       auth.DefaultTestContent,
@@ -138,6 +141,7 @@ func main() {
 		settings = &database.SystemSettings{
 			SiteName:                          database.DefaultSiteName,
 			MaxConcurrency:                    2,
+			CodexTelemetryEnabled:             false, // 实验性:模拟遥测默认不外发,由部署者显式开启
 			GlobalRPM:                         0,
 			TestModel:                         auth.DefaultTestModel,
 			TestContent:                       auth.DefaultTestContent,
@@ -355,6 +359,7 @@ func main() {
 	store.TriggerAutoCleanupAsync()
 	defer store.Stop()
 	backgroundCtx, cancelBackground := context.WithCancel(context.Background())
+	adminHandler.StartQualityTests(backgroundCtx)
 	defer cancelBackground()
 	if !proxy.StartResponseCacheSettingsPoller(backgroundCtx, db) {
 		log.Fatalf("启动响应缓存设置同步失败")
@@ -642,6 +647,7 @@ func main() {
 	}
 	adminHandler.WaitAutoResetCredits()
 	adminHandler.WaitAutoActivate5hWindow()
+	adminHandler.WaitQualityTests()
 	wsKeepalive.Stop()
 	wsrelay.ShutdownExecutor()
 	if !proxy.DrainResponseCacheBackendWrites(2 * time.Second) {

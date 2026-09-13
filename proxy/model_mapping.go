@@ -453,7 +453,7 @@ func resolveAccountCompactModelMappingForCandidates(account *auth.Account, candi
 	if account == nil {
 		return "", false
 	}
-	accountModels := account.OpenAIResponsesModels()
+	accountModels := accountModelMappingTargetModels(account)
 	if len(accountModels) == 0 {
 		return "", false
 	}
@@ -471,7 +471,11 @@ func resolveAccountCompactModelMappingForCandidates(account *auth.Account, candi
 		if !ok || mappedModel == "" {
 			continue
 		}
-		return normalizeCompactMappingTarget(mappedModel), true
+		mappedModel = normalizeCompactMappingTarget(mappedModel)
+		if account.IsGrokAPI() && !modelIDInList(mappedModel, accountModels) {
+			continue
+		}
+		return mappedModel, true
 	}
 	return "", false
 }

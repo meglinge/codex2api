@@ -184,6 +184,8 @@ type accountPageQuery struct {
 	HealthTier   string
 	ProxyURL     string
 	ProxyFilter  string
+	// Subscription 订阅状态筛选（Codex 渠道）：见 subscriptionFilterMatches。
+	Subscription string
 	Sort         string
 	Order        string
 }
@@ -211,6 +213,7 @@ type accountOperationSelector struct {
 	Ungrouped            bool    `json:"ungrouped,omitempty"`
 	RefreshableOnly      bool    `json:"refreshable_only,omitempty"`
 	SubscriptionUnlocked bool    `json:"subscription_unlocked,omitempty"`
+	Subscription         string  `json:"subscription,omitempty"`
 }
 
 func (h *Handler) resolveAccountOperationSelector(ctx context.Context, selector *accountOperationSelector) ([]int64, error) {
@@ -235,6 +238,7 @@ func (h *Handler) resolveAccountOperationSelector(ctx context.Context, selector 
 		GroupInclude: positiveUniqueAdminIDs(selector.GroupInclude),
 		GroupExclude: positiveUniqueAdminIDs(selector.GroupExclude),
 		Ungrouped:    selector.Ungrouped,
+		Subscription: strings.ToLower(strings.TrimSpace(selector.Subscription)),
 	}
 	if err := validateAccountPageFilters(query); err != nil {
 		return nil, err
@@ -275,19 +279,20 @@ func positiveUniqueAdminIDs(values []int64) []int64 {
 
 func parseAccountPageQuery(c *gin.Context) (accountPageQuery, error) {
 	query := accountPageQuery{
-		Page:        1,
-		PageSize:    accountListPageDefault,
-		Search:      strings.ToLower(strings.TrimSpace(c.Query("search"))),
-		Status:      strings.ToLower(strings.TrimSpace(c.Query("status"))),
-		Plan:        strings.ToLower(strings.TrimSpace(c.Query("plan"))),
-		AuthKind:    strings.ToLower(strings.TrimSpace(c.Query("auth_kind"))),
-		Tag:         strings.TrimSpace(c.Query("tag")),
-		EmailDomain: strings.ToLower(strings.TrimSpace(c.Query("email_domain"))),
-		HealthTier:  strings.ToLower(strings.TrimSpace(c.Query("health_tier"))),
-		ProxyURL:    strings.TrimSpace(c.Query("proxy_url")),
-		ProxyFilter: strings.ToLower(strings.TrimSpace(c.Query("proxy_filter"))),
-		Sort:        strings.ToLower(strings.TrimSpace(c.Query("sort"))),
-		Order:       strings.ToLower(strings.TrimSpace(c.Query("order"))),
+		Page:         1,
+		PageSize:     accountListPageDefault,
+		Search:       strings.ToLower(strings.TrimSpace(c.Query("search"))),
+		Status:       strings.ToLower(strings.TrimSpace(c.Query("status"))),
+		Plan:         strings.ToLower(strings.TrimSpace(c.Query("plan"))),
+		AuthKind:     strings.ToLower(strings.TrimSpace(c.Query("auth_kind"))),
+		Tag:          strings.TrimSpace(c.Query("tag")),
+		EmailDomain:  strings.ToLower(strings.TrimSpace(c.Query("email_domain"))),
+		HealthTier:   strings.ToLower(strings.TrimSpace(c.Query("health_tier"))),
+		ProxyURL:     strings.TrimSpace(c.Query("proxy_url")),
+		ProxyFilter:  strings.ToLower(strings.TrimSpace(c.Query("proxy_filter"))),
+		Subscription: strings.ToLower(strings.TrimSpace(c.Query("subscription"))),
+		Sort:         strings.ToLower(strings.TrimSpace(c.Query("sort"))),
+		Order:        strings.ToLower(strings.TrimSpace(c.Query("order"))),
 	}
 	if raw := strings.TrimSpace(c.Query("page")); raw != "" {
 		value, err := strconv.Atoi(raw)
@@ -360,6 +365,9 @@ func validateAccountPageFilters(query accountPageQuery) error {
 	validProxyFilters := map[string]bool{"": true, "all": true, "unbound": true, "this": true, "other": true}
 	if !validProxyFilters[query.ProxyFilter] {
 		return fmt.Errorf("unsupported proxy_filter")
+	}
+	if !validSubscriptionFilters[query.Subscription] {
+		return fmt.Errorf("unsupported subscription")
 	}
 	if query.ProxyFilter == "this" && query.ProxyURL == "" {
 		return fmt.Errorf("proxy_url is required for proxy_filter=this")
@@ -1116,6 +1124,9 @@ func accountListItemMatches(item *accountListSnapshotItem, query accountPageQuer
 		}
 	}
 	if query.Tag != "" && !containsString(item.Tags, query.Tag) {
+		return false
+	}
+	if query.Subscription != "" && query.Subscription != "all" && !subscriptionFilterMatches(item, query.Subscription, time.Now()) {
 		return false
 	}
 	if query.EmailDomain != "" && item.EmailDomain != query.EmailDomain {
