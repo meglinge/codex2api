@@ -255,7 +255,10 @@
     "success": "成功",
     "failed": "失敗",
     "enabled": "開啟",
-    "disabled": "關閉"
+    "disabled": "關閉",
+    "edgeBlockVendor": "邊緣閘道",
+    "edgeBlocked": "請求被 {{vendor}} 攔截（HTTP {{status}}），沒有到達伺服端——回傳的是攔截頁而不是介面資料。通常是 WAF 規則誤判，放行該介面或調整規則後重試。",
+    "edgeBlockedWithRay": "請求被 {{vendor}} 攔截（HTTP {{status}}，Ray ID {{rayId}}），沒有到達伺服端。請在 Cloudflare → Security → Events 中依該 Ray ID 查看命中的規則，或為該介面放行 WAF。"
   },
   "antigravity": {
     "authKind": "憑證類型",

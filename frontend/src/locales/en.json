@@ -690,7 +690,10 @@
     "hoursAgoLong": "{{count}} hours ago",
     "hoursAgoCompact": "{{count}}h ago",
     "daysAgoLong": "{{count}} days ago",
-    "daysAgoCompact": "{{count}}d ago"
+    "daysAgoCompact": "{{count}}d ago",
+    "edgeBlockVendor": "the edge gateway",
+    "edgeBlocked": "The request was blocked by {{vendor}} (HTTP {{status}}) and never reached the server — it returned a block page instead of API data. This is usually a false positive WAF rule; allow this endpoint or adjust the rule and retry.",
+    "edgeBlockedWithRay": "The request was blocked by {{vendor}} (HTTP {{status}}, Ray ID {{rayId}}) and never reached the server. Look up that Ray ID under Cloudflare → Security → Events to see which rule matched, or skip the WAF for this endpoint."
   },
   "auth": {
     "title": "Admin Panel",

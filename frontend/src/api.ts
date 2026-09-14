@@ -1,4 +1,9 @@
 import { qualityTestFilterQuery, type QualityTestJob, type QualityTestJobsFilter, type QualityTestJobsResponse, type QualityTestPrompt } from './lib/qualityTest.ts'
+// 取 i18next 单例而不是 ./i18n:后者在模块加载时就要读 localStorage / navigator,
+// 会让 Node 下直接 import 本文件的单测(src/lib/usageLogApi.test.mjs)崩掉。
+// ./i18n 初始化的正是这个同一个实例,浏览器里由应用入口负责 init。
+import i18n from 'i18next'
+import { detectEdgeBlock, edgeBlockMessage, parseJSONResponse } from './lib/edgeBlock.ts'
 import type {
   AccountEventTrendPoint,
   AccountPortalAuthURLResponse,
@@ -198,9 +203,16 @@ export class AdminAPIError extends Error {
   }
 }
 
-function extractAdminErrorMessage(body: string, status: number): string {
+// edgeBlock 的文案要走 i18n,但 lib/ 下的模块一律不直接依赖 i18n(见 lib/edgeBlock.ts
+// 把 translate 做成入参),所以由 api 层在这里注入。
+const translate = (key: string, vars?: Record<string, string | number>): string =>
+  i18n.t(key, vars as Record<string, unknown>) as string
+
+// 传入整个 res 而不只是 status:边缘拦截的 Ray ID 首选来自 cf-ray 响应头,
+// 取不到才回退到从拦截页正文里抠。
+function extractAdminErrorMessage(res: Response, body: string): string {
   if (!body.trim()) {
-    return `HTTP ${status}`
+    return `HTTP ${res.status}`
   }
 
   try {
@@ -209,7 +221,12 @@ function extractAdminErrorMessage(body: string, status: number): string {
       return parsed.error
     }
   } catch {
-    // ignore JSON parse error and fall back to raw text
+    // 不是 JSON:可能是 Cloudflare WAF 之类的拦截页。直接把整页 HTML 当错误文案
+    // 会糊用户一屏,且看不出是谁拦的,所以先识别成一句带厂商 / 状态码 / Ray ID 的话。
+    const blocked = detectEdgeBlock(res, body)
+    if (blocked) {
+      return edgeBlockMessage(blocked, translate)
+    }
   }
 
   return body
@@ -258,14 +275,13 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     if (res.status === 401) {
       resetAdminAuthState()
     }
-    throw new AdminAPIError(res.status, extractAdminErrorMessage(body, res.status))
+    throw new AdminAPIError(res.status, extractAdminErrorMessage(res, body))
   }
 
   if (res.status === 204) {
     return undefined as T
   }
-  const text = await res.text()
-  return (text ? JSON.parse(text) : undefined) as T
+  return (await parseJSONResponse<T>(res, translate)) as T
 }
 
 async function requestPublic<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -276,10 +292,10 @@ async function requestPublic<T>(path: string, options: RequestInit = {}): Promis
 
   if (!res.ok) {
     const body = await res.text()
-    throw new Error(extractAdminErrorMessage(body, res.status))
+    throw new Error(extractAdminErrorMessage(res, body))
   }
 
-  return (await res.json()) as T
+  return (await parseJSONResponse<T>(res, translate)) as T
 }
 
 // 公开账号自助门户:无鉴权头,错误体形如 {error:{message}}。
@@ -309,15 +325,18 @@ async function requestAccountPortal<T>(path: string, options: RequestInit = {}):
         message = parsed.message
       }
     } catch {
-      // 保留原始文本
+      // 不是 JSON:可能是边缘拦截页,理由同 extractAdminErrorMessage;否则保留原始文本。
+      const blocked = detectEdgeBlock(res, body)
+      if (blocked) {
+        message = edgeBlockMessage(blocked, translate)
+      }
     }
     const err = new Error(message) as Error & { status?: number }
     err.status = res.status
     throw err
   }
 
-  const text = await res.text()
-  return (text ? JSON.parse(text) : undefined) as T
+  return (await parseJSONResponse<T>(res, translate)) as T
 }
 
 async function requestAPIKeyUsage<T>(path: string, apiKey: string, options: RequestInit = {}): Promise<T> {
@@ -332,10 +351,10 @@ async function requestAPIKeyUsage<T>(path: string, apiKey: string, options: Requ
 
   if (!res.ok) {
     const body = await res.text()
-    throw new Error(extractAdminErrorMessage(body, res.status))
+    throw new Error(extractAdminErrorMessage(res, body))
   }
 
-  return (await res.json()) as T
+  return (await parseJSONResponse<T>(res, translate)) as T
 }
 
 async function requestImageStudioPortal<T>(path: string, apiKey: string, options: RequestInit = {}): Promise<T> {
@@ -353,17 +372,13 @@ async function requestImageStudioPortal<T>(path: string, apiKey: string, options
 
   if (!res.ok) {
     const body = await res.text()
-    throw new Error(extractAdminErrorMessage(body, res.status))
+    throw new Error(extractAdminErrorMessage(res, body))
   }
 
   if (res.status === 204) {
     return undefined as T
   }
-  const text = await res.text()
-  if (!text) {
-    return undefined as T
-  }
-  return JSON.parse(text) as T
+  return (await parseJSONResponse<T>(res, translate)) as T
 }
 
 async function requestImageStudioPortalBlob(path: string, apiKey: string, options: RequestInit = {}): Promise<Blob> {
@@ -378,7 +393,7 @@ async function requestImageStudioPortalBlob(path: string, apiKey: string, option
 
   if (!res.ok) {
     const body = await res.text()
-    throw new Error(extractAdminErrorMessage(body, res.status))
+    throw new Error(extractAdminErrorMessage(res, body))
   }
 
   return res.blob()
@@ -428,7 +443,7 @@ async function requestNamedBlob(path: string, options: RequestInit = {}): Promis
     if (res.status === 401) {
       resetAdminAuthState()
     }
-    throw new Error(extractAdminErrorMessage(body, res.status))
+    throw new Error(extractAdminErrorMessage(res, body))
   }
 
   return {
@@ -457,7 +472,7 @@ async function requestBlob(path: string, options: RequestInit = {}): Promise<Blo
     if (res.status === 401) {
       resetAdminAuthState()
     }
-    throw new Error(extractAdminErrorMessage(body, res.status))
+    throw new Error(extractAdminErrorMessage(res, body))
   }
 
   return res.blob()

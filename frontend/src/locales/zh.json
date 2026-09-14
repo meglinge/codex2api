@@ -690,7 +690,10 @@
     "hoursAgoLong": "{{count}} 小时前",
     "hoursAgoCompact": "{{count}}h 前",
     "daysAgoLong": "{{count}} 天前",
-    "daysAgoCompact": "{{count}}d 前"
+    "daysAgoCompact": "{{count}}d 前",
+    "edgeBlockVendor": "边缘网关",
+    "edgeBlocked": "请求被 {{vendor}} 拦截（HTTP {{status}}），没有到达服务端——返回的是拦截页而不是接口数据。通常是 WAF 规则误判，放行该接口或调整规则后重试。",
+    "edgeBlockedWithRay": "请求被 {{vendor}} 拦截（HTTP {{status}}，Ray ID {{rayId}}），没有到达服务端。请在 Cloudflare → Security → Events 里按该 Ray ID 查看命中的规则，或为该接口放行 WAF。"
   },
   "auth": {
     "title": "管理后台",
