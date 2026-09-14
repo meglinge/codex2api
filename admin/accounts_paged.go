@@ -12,6 +12,7 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
+	"github.com/codex2api/proxy"
 	"github.com/gin-gonic/gin"
 )
 
@@ -605,6 +606,8 @@ func (h *Handler) pruneAccountsFromSnapshotCaches(ids []int64) {
 	drop := make(map[int64]struct{}, len(ids))
 	for _, id := range ids {
 		drop[id] = struct{}{}
+		// 账号没了，它那几格 turn-state 刷新档案也该跟着走，别在智力管理页留下孤儿行。
+		proxy.ForgetCodexTurnStateRefreshStats(id)
 	}
 	h.accountCachesGen.Add(1)
 	h.accountListCacheMu.Lock()
