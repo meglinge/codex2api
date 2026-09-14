@@ -9,6 +9,9 @@ codex2api
 # Go
 /vendor/
 
+# Rust
+target/
+
 # Frontend
 frontend/node_modules/
 frontend/dist/
@@ -61,3 +64,5 @@ diagrams/
 /data/
 /codex2api_local
 /server.log
+# QUALITY_TEST_SVG_SAMPLE 的本地样例，见 docs/CONTRIBUTING.md
+/pelican-bike.html
