@@ -2160,11 +2160,24 @@
       "missing": "无缓存",
       "chronic": "长期刷不出"
     },
+    "filter": {
+      "search": "账号",
+      "searchPlaceholder": "邮箱或 #ID",
+      "status": "状态",
+      "statusProblems": "有问题的",
+      "statusAll": "全部",
+      "model": "模型",
+      "modelAll": "全部模型",
+      "plan": "套餐",
+      "planAll": "全部套餐",
+      "reset": "重置筛选"
+    },
     "table": {
       "title": "问题列表",
       "hint": "按连续失败次数排序。连续失败 ≥ 3 次基本可以认定上游对这一格长期降智，光靠重试不会好转。",
-      "onlyProblems": "只看有问题的",
+      "count": "共 {{count}} 格",
       "allHealthy": "所有格子都健康。",
+      "noMatch": "没有符合筛选条件的格子。",
       "empty": "暂无数据。先在系统设置里勾选参与缓存的模型。"
     },
     "col": {

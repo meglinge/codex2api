@@ -2160,11 +2160,24 @@
       "missing": "No cache",
       "chronic": "Chronic failures"
     },
+    "filter": {
+      "search": "Account",
+      "searchPlaceholder": "Email or #ID",
+      "status": "Status",
+      "statusProblems": "Problems",
+      "statusAll": "All",
+      "model": "Model",
+      "modelAll": "All models",
+      "plan": "Plan",
+      "planAll": "All plans",
+      "reset": "Reset filters"
+    },
     "table": {
       "title": "Problem list",
       "hint": "Sorted by consecutive failures. Three or more in a row means the upstream is degrading this cell persistently; retrying alone will not fix it.",
-      "onlyProblems": "Problems only",
+      "count": "{{count}} cells",
       "allHealthy": "Every cell is healthy.",
+      "noMatch": "No cells match the current filters.",
       "empty": "No data yet. Pick the cached models in system settings first."
     },
     "col": {

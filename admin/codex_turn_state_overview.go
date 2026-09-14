@@ -126,9 +126,10 @@ func (h *Handler) GetCodexTurnStateOverview(c *gin.Context) {
 		if len(cells) == 0 {
 			continue
 		}
+		// 管理页与账号列表页保持一致：邮箱直出，运维要靠它定位账号。
 		response.Accounts = append(response.Accounts, codexTurnStateAccountResponse{
 			AccountID: account.ID(),
-			Email:     security.MaskEmail(account.Email),
+			Email:     account.Email,
 			PlanType:  account.GetPlanType(),
 			Cells:     cells,
 		})

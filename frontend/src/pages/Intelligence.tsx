@@ -4,12 +4,14 @@ import { useTranslation } from 'react-i18next'
 import { api } from '../api'
 import OpsTabs from '../components/OpsTabs'
 import PageHeader from '../components/PageHeader'
+import Pagination from '../components/Pagination'
 import { StatTile } from '../components/StatTile'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
 import { getErrorMessage } from '../utils/error'
 import type {
+  CodexTurnStateAccountRow,
   CodexTurnStateCell,
   CodexTurnStateCellStatus,
   CodexTurnStateOverview,
@@ -18,9 +20,13 @@ import type {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Select } from '@/components/ui/select'
 
 /** 连续这么多轮刷不出健康值就算「长期降智」，和后端 chronicFailureThreshold 保持一致。 */
 const CHRONIC_THRESHOLD = 3
+
+const ALL_STATUSES: CodexTurnStateCellStatus[] = ['healthy', 'stale', 'cooling', 'degraded', 'unparsed', 'missing']
 
 const STATUS_TONE: Record<CodexTurnStateCellStatus, string> = {
   healthy: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
@@ -41,6 +47,8 @@ const MATRIX_TONE: Record<CodexTurnStateCellStatus, string> = {
   missing: 'bg-muted-foreground/25',
 }
 
+const PAGE_SIZE_OPTIONS = [20, 50, 100]
+
 type Row = CodexTurnStateCell & {
   accountId: number
   email: string
@@ -49,12 +57,41 @@ type Row = CodexTurnStateCell & {
 
 type PendingAction = `${number}:${string}`
 
+/** 状态筛选的取值：具体状态、全部、或「有问题的」（= 非健康）。 */
+type StatusFilter = CodexTurnStateCellStatus | 'all' | 'problems'
+
+interface Filters {
+  search: string
+  status: StatusFilter
+  model: string
+  plan: string
+}
+
+const DEFAULT_FILTERS: Filters = { search: '', status: 'problems', model: '', plan: '' }
+
+function cellMatchesStatus(status: CodexTurnStateCellStatus, filter: StatusFilter): boolean {
+  if (filter === 'all') return true
+  if (filter === 'problems') return status !== 'healthy'
+  return status === filter
+}
+
+function accountMatchesSearch(account: { account_id: number; email: string }, search: string): boolean {
+  const needle = search.trim().toLowerCase()
+  if (!needle) return true
+  if (String(account.account_id) === needle || `#${account.account_id}` === needle) return true
+  return account.email.toLowerCase().includes(needle)
+}
+
 export default function Intelligence() {
   const { t } = useTranslation()
   const { showToast } = useToast()
-  const [onlyProblems, setOnlyProblems] = useState(true)
+  const [filters, setFilters] = useState<Filters>(DEFAULT_FILTERS)
   const [pending, setPending] = useState<PendingAction | null>(null)
   const [events, setEvents] = useState<CodexTurnStateRefreshEvent[]>([])
+  const [matrixPage, setMatrixPage] = useState(1)
+  const [matrixPageSize, setMatrixPageSize] = useState(20)
+  const [listPage, setListPage] = useState(1)
+  const [listPageSize, setListPageSize] = useState(20)
 
   const load = useCallback(() => api.getCodexTurnStateOverview(), [])
   const { data, loading, error, reload, reloadSilently } = useDataLoader<CodexTurnStateOverview | null>({
@@ -80,10 +117,47 @@ export default function Intelligence() {
     return () => window.clearInterval(timer)
   }, [reloadSilently, loadEvents])
 
-  const allRows = useMemo<Row[]>(() => {
+  const updateFilters = useCallback((patch: Partial<Filters>) => {
+    setFilters((prev) => ({ ...prev, ...patch }))
+    // 任何筛选变化都回到第一页，否则很容易停在一个超出范围的页码上。
+    setMatrixPage(1)
+    setListPage(1)
+  }, [])
+
+  // 下拉选项：所有出现过的模型和套餐，按名字排序。
+  const { models, plans } = useMemo(() => {
+    const modelSet = new Set<string>()
+    const planSet = new Set<string>()
+    for (const account of data?.accounts ?? []) {
+      if (account.plan_type) planSet.add(account.plan_type)
+      for (const cell of account.cells) modelSet.add(cell.model)
+    }
+    return { models: Array.from(modelSet).sort(), plans: Array.from(planSet).sort() }
+  }, [data])
+
+  // 矩阵：账号级筛选。搜索 / 套餐直接过滤账号；状态筛选保留「至少有一格命中」的账号，
+  // 但该账号的整行都显示，否则看不出这一格在整体里的位置。模型筛选缩列。
+  const matrixAccounts = useMemo<CodexTurnStateAccountRow[]>(() => {
+    return (data?.accounts ?? []).filter((account) => {
+      if (!accountMatchesSearch(account, filters.search)) return false
+      if (filters.plan && account.plan_type !== filters.plan) return false
+      const cells = filters.model ? account.cells.filter((c) => c.model === filters.model) : account.cells
+      return cells.some((cell) => cellMatchesStatus(cell.status, filters.status))
+    })
+  }, [data, filters])
+  const matrixModels = useMemo(
+    () => (filters.model ? models.filter((m) => m === filters.model) : models),
+    [models, filters.model])
+
+  // 问题列表：格子级筛选，四个条件全部命中才留下。
+  const listRows = useMemo<Row[]>(() => {
     const flat: Row[] = []
     for (const account of data?.accounts ?? []) {
+      if (!accountMatchesSearch(account, filters.search)) continue
+      if (filters.plan && account.plan_type !== filters.plan) continue
       for (const cell of account.cells) {
+        if (filters.model && cell.model !== filters.model) continue
+        if (!cellMatchesStatus(cell.status, filters.status)) continue
         flat.push({ ...cell, accountId: account.account_id, email: account.email, planType: account.plan_type })
       }
     }
@@ -94,20 +168,19 @@ export default function Intelligence() {
       a.accountId - b.accountId ||
       a.model.localeCompare(b.model))
     return flat
-  }, [data])
+  }, [data, filters])
 
-  const rows = useMemo(
-    () => (onlyProblems ? allRows.filter((row) => row.status !== 'healthy') : allRows),
-    [allRows, onlyProblems])
+  const matrixTotalPages = Math.max(1, Math.ceil(matrixAccounts.length / matrixPageSize))
+  const matrixSlice = useMemo(() => {
+    const page = Math.min(matrixPage, matrixTotalPages)
+    return matrixAccounts.slice((page - 1) * matrixPageSize, page * matrixPageSize)
+  }, [matrixAccounts, matrixPage, matrixPageSize, matrixTotalPages])
 
-  // 矩阵的列 = 所有出现过的模型，按名字排序，保证每行列序一致。
-  const models = useMemo(() => {
-    const seen = new Set<string>()
-    for (const account of data?.accounts ?? []) {
-      for (const cell of account.cells) seen.add(cell.model)
-    }
-    return Array.from(seen).sort()
-  }, [data])
+  const listTotalPages = Math.max(1, Math.ceil(listRows.length / listPageSize))
+  const listSlice = useMemo(() => {
+    const page = Math.min(listPage, listTotalPages)
+    return listRows.slice((page - 1) * listPageSize, page * listPageSize)
+  }, [listRows, listPage, listPageSize, listTotalPages])
 
   const runAction = useCallback(
     async (row: Row, action: 'refresh' | 'clearCooldown' | 'invalidate') => {
@@ -142,6 +215,13 @@ export default function Intelligence() {
     [loadEvents, reloadSilently, showToast, t])
 
   const summary = data?.summary
+  const statusOptions = useMemo(
+    () => [
+      { value: 'problems', label: t('intelligence.filter.statusProblems') },
+      { value: 'all', label: t('intelligence.filter.statusAll') },
+      ...ALL_STATUSES.map((status) => ({ value: status, label: t(`intelligence.status.${status}`) })),
+    ],
+    [t])
 
   return (
     <StateShell
@@ -176,7 +256,59 @@ export default function Intelligence() {
           <StatTile label={t('intelligence.stat.chronic')} value={String(summary?.chronic_failures ?? 0)} tone="danger" />
         </div>
 
-        <Matrix accounts={data?.accounts ?? []} models={models} />
+        <Card className="mb-5">
+          <CardContent className="flex flex-wrap items-end gap-3 p-4">
+            <label className="flex min-w-[220px] flex-1 flex-col gap-1 text-xs text-muted-foreground">
+              {t('intelligence.filter.search')}
+              <Input
+                value={filters.search}
+                placeholder={t('intelligence.filter.searchPlaceholder')}
+                onChange={(e) => updateFilters({ search: e.target.value })}
+              />
+            </label>
+            <label className="flex w-40 flex-col gap-1 text-xs text-muted-foreground">
+              {t('intelligence.filter.status')}
+              <Select
+                value={filters.status}
+                onValueChange={(value) => updateFilters({ status: value as StatusFilter })}
+                options={statusOptions}
+              />
+            </label>
+            <label className="flex w-44 flex-col gap-1 text-xs text-muted-foreground">
+              {t('intelligence.filter.model')}
+              <Select
+                value={filters.model}
+                onValueChange={(value) => updateFilters({ model: value })}
+                options={[{ value: '', label: t('intelligence.filter.modelAll') }, ...models.map((m) => ({ value: m, label: m }))]}
+              />
+            </label>
+            <label className="flex w-52 flex-col gap-1 text-xs text-muted-foreground">
+              {t('intelligence.filter.plan')}
+              <Select
+                value={filters.plan}
+                onValueChange={(value) => updateFilters({ plan: value })}
+                options={[{ value: '', label: t('intelligence.filter.planAll') }, ...plans.map((p) => ({ value: p, label: p }))]}
+              />
+            </label>
+            <Button variant="ghost" size="sm" onClick={() => updateFilters(DEFAULT_FILTERS)}>
+              {t('intelligence.filter.reset')}
+            </Button>
+          </CardContent>
+        </Card>
+
+        <Matrix
+          accounts={matrixSlice}
+          models={matrixModels}
+          totalAccounts={matrixAccounts.length}
+          page={Math.min(matrixPage, matrixTotalPages)}
+          totalPages={matrixTotalPages}
+          pageSize={matrixPageSize}
+          onPageChange={setMatrixPage}
+          onPageSizeChange={(size) => {
+            setMatrixPageSize(size)
+            setMatrixPage(1)
+          }}
+        />
 
         <Card className="mt-5">
           <CardContent className="p-0">
@@ -185,117 +317,129 @@ export default function Intelligence() {
                 <h2 className="text-sm font-semibold text-foreground">{t('intelligence.table.title')}</h2>
                 <p className="text-xs text-muted-foreground">{t('intelligence.table.hint')}</p>
               </div>
-              <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
-                <input
-                  type="checkbox"
-                  className="size-3.5"
-                  checked={onlyProblems}
-                  onChange={(e) => setOnlyProblems(e.target.checked)}
-                />
-                {t('intelligence.table.onlyProblems')}
-              </label>
+              <span className="text-xs text-muted-foreground">
+                {t('intelligence.table.count', { count: listRows.length })}
+              </span>
             </div>
 
-            {rows.length === 0 ? (
+            {listRows.length === 0 ? (
               <p className="px-4 py-10 text-center text-sm text-muted-foreground">
-                {onlyProblems ? t('intelligence.table.allHealthy') : t('intelligence.table.empty')}
+                {filters.status === 'problems' && !filters.search && !filters.model && !filters.plan
+                  ? t('intelligence.table.allHealthy')
+                  : t('intelligence.table.noMatch')}
               </p>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-[13px]">
-                  <thead className="border-b border-border text-xs text-muted-foreground">
-                    <tr>
-                      <th className="px-4 py-2 font-medium">{t('intelligence.col.account')}</th>
-                      <th className="px-4 py-2 font-medium">{t('intelligence.col.model')}</th>
-                      <th className="px-4 py-2 font-medium">{t('intelligence.col.status')}</th>
-                      <th className="px-4 py-2 font-medium">{t('intelligence.col.cipher')}</th>
-                      <th className="px-4 py-2 text-right font-medium">{t('intelligence.col.fails')}</th>
-                      <th className="px-4 py-2 text-right font-medium">{t('intelligence.col.cooldown')}</th>
-                      <th className="px-4 py-2 text-right font-medium">{t('intelligence.col.lastRound')}</th>
-                      <th className="px-4 py-2 font-medium">{t('intelligence.col.reason')}</th>
-                      <th className="px-4 py-2 text-right font-medium">{t('intelligence.col.actions')}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rows.map((row) => {
-                      const busy = pending === `${row.accountId}:${row.model}`
-                      return (
-                        <tr key={`${row.accountId}-${row.model}`} className="border-b border-border/60 last:border-0">
-                          <td className="px-4 py-2">
-                            <span className="font-mono text-xs text-muted-foreground">#{row.accountId}</span>
-                            <span className="ml-2">{row.email || '—'}</span>
-                            {row.planType ? (
-                              <span className="ml-2 text-xs text-muted-foreground">{row.planType}</span>
-                            ) : null}
-                          </td>
-                          <td className="px-4 py-2 font-mono text-xs">{row.model}</td>
-                          <td className="px-4 py-2">
-                            <Badge variant="outline" className={STATUS_TONE[row.status]}>
-                              {t(`intelligence.status.${row.status}`)}
-                            </Badge>
-                          </td>
-                          <td className="px-4 py-2 font-mono text-xs">
-                            <CipherCell row={row} />
-                          </td>
-                          <td className={`px-4 py-2 text-right font-mono text-xs ${row.refresh_consecutive_fails >= CHRONIC_THRESHOLD ? 'font-bold text-red-500' : ''}`}>
-                            {row.refresh_consecutive_fails || '—'}
-                          </td>
-                          <td className="px-4 py-2 text-right font-mono text-xs">
-                            {row.cooldown_remaining_seconds > 0 ? formatDuration(row.cooldown_remaining_seconds) : '—'}
-                          </td>
-                          <td className="px-4 py-2 text-right font-mono text-xs">
-                            {row.refresh_last_ping_count > 0
-                              ? t('intelligence.lastRound', {
-                                  pings: row.refresh_last_ping_count,
-                                  seconds: (row.refresh_last_duration_ms / 1000).toFixed(1),
-                                })
-                              : '—'}
-                          </td>
-                          <td className="px-4 py-2 text-xs text-muted-foreground">
-                            {row.refresh_failure_kind
-                              ? t(`intelligence.failure.${row.refresh_failure_kind}`, { defaultValue: row.refresh_failure_kind })
-                              : '—'}
-                          </td>
-                          <td className="px-4 py-2">
-                            <div className="flex items-center justify-end gap-1">
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="size-7"
-                                disabled={busy}
-                                title={t('intelligence.action.refresh')}
-                                onClick={() => void runAction(row, 'refresh')}
-                              >
-                                <RotateCw className={`size-3.5 ${busy ? 'animate-spin' : ''}`} />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="size-7"
-                                disabled={busy || row.cooldown_remaining_seconds <= 0}
-                                title={t('intelligence.action.clearCooldown')}
-                                onClick={() => void runAction(row, 'clearCooldown')}
-                              >
-                                <Snowflake className="size-3.5" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="size-7"
-                                disabled={busy || !row.has_value}
-                                title={t('intelligence.action.invalidate')}
-                                onClick={() => void runAction(row, 'invalidate')}
-                              >
-                                <Trash2 className="size-3.5" />
-                              </Button>
-                            </div>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
+              <>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-[13px]">
+                    <thead className="border-b border-border text-xs text-muted-foreground">
+                      <tr>
+                        <th className="px-4 py-2 font-medium">{t('intelligence.col.account')}</th>
+                        <th className="px-4 py-2 font-medium">{t('intelligence.col.model')}</th>
+                        <th className="px-4 py-2 font-medium">{t('intelligence.col.status')}</th>
+                        <th className="px-4 py-2 font-medium">{t('intelligence.col.cipher')}</th>
+                        <th className="px-4 py-2 text-right font-medium">{t('intelligence.col.fails')}</th>
+                        <th className="px-4 py-2 text-right font-medium">{t('intelligence.col.cooldown')}</th>
+                        <th className="px-4 py-2 text-right font-medium">{t('intelligence.col.lastRound')}</th>
+                        <th className="px-4 py-2 font-medium">{t('intelligence.col.reason')}</th>
+                        <th className="px-4 py-2 text-right font-medium">{t('intelligence.col.actions')}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {listSlice.map((row) => {
+                        const busy = pending === `${row.accountId}:${row.model}`
+                        return (
+                          <tr key={`${row.accountId}-${row.model}`} className="border-b border-border/60 last:border-0">
+                            <td className="px-4 py-2">
+                              <span className="font-mono text-xs text-muted-foreground">#{row.accountId}</span>
+                              <span className="ml-2">{row.email || '—'}</span>
+                              {row.planType ? (
+                                <span className="ml-2 text-xs text-muted-foreground">{row.planType}</span>
+                              ) : null}
+                            </td>
+                            <td className="px-4 py-2 font-mono text-xs">{row.model}</td>
+                            <td className="px-4 py-2">
+                              <Badge variant="outline" className={STATUS_TONE[row.status]}>
+                                {t(`intelligence.status.${row.status}`)}
+                              </Badge>
+                            </td>
+                            <td className="px-4 py-2 font-mono text-xs">
+                              <CipherCell row={row} />
+                            </td>
+                            <td className={`px-4 py-2 text-right font-mono text-xs ${row.refresh_consecutive_fails >= CHRONIC_THRESHOLD ? 'font-bold text-red-500' : ''}`}>
+                              {row.refresh_consecutive_fails || '—'}
+                            </td>
+                            <td className="px-4 py-2 text-right font-mono text-xs">
+                              {row.cooldown_remaining_seconds > 0 ? formatDuration(row.cooldown_remaining_seconds) : '—'}
+                            </td>
+                            <td className="px-4 py-2 text-right font-mono text-xs">
+                              {row.refresh_last_ping_count > 0
+                                ? t('intelligence.lastRound', {
+                                    pings: row.refresh_last_ping_count,
+                                    seconds: (row.refresh_last_duration_ms / 1000).toFixed(1),
+                                  })
+                                : '—'}
+                            </td>
+                            <td className="px-4 py-2 text-xs text-muted-foreground">
+                              {row.refresh_failure_kind
+                                ? t(`intelligence.failure.${row.refresh_failure_kind}`, { defaultValue: row.refresh_failure_kind })
+                                : '—'}
+                            </td>
+                            <td className="px-4 py-2">
+                              <div className="flex items-center justify-end gap-1">
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="size-7"
+                                  disabled={busy}
+                                  title={t('intelligence.action.refresh')}
+                                  onClick={() => void runAction(row, 'refresh')}
+                                >
+                                  <RotateCw className={`size-3.5 ${busy ? 'animate-spin' : ''}`} />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="size-7"
+                                  disabled={busy || row.cooldown_remaining_seconds <= 0}
+                                  title={t('intelligence.action.clearCooldown')}
+                                  onClick={() => void runAction(row, 'clearCooldown')}
+                                >
+                                  <Snowflake className="size-3.5" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="size-7"
+                                  disabled={busy || !row.has_value}
+                                  title={t('intelligence.action.invalidate')}
+                                  onClick={() => void runAction(row, 'invalidate')}
+                                >
+                                  <Trash2 className="size-3.5" />
+                                </Button>
+                              </div>
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="border-t border-border px-4 py-3">
+                  <Pagination
+                    page={Math.min(listPage, listTotalPages)}
+                    totalPages={listTotalPages}
+                    onPageChange={setListPage}
+                    totalItems={listRows.length}
+                    pageSize={listPageSize}
+                    pageSizeOptions={PAGE_SIZE_OPTIONS}
+                    onPageSizeChange={(size) => {
+                      setListPageSize(size)
+                      setListPage(1)
+                    }}
+                  />
+                </div>
+              </>
             )}
           </CardContent>
         </Card>
@@ -310,9 +454,26 @@ export default function Intelligence() {
   )
 }
 
-function Matrix({ accounts, models }: { accounts: CodexTurnStateOverview['accounts']; models: string[] }) {
+function Matrix({
+  accounts,
+  models,
+  totalAccounts,
+  page,
+  totalPages,
+  pageSize,
+  onPageChange,
+  onPageSizeChange,
+}: {
+  accounts: CodexTurnStateAccountRow[]
+  models: string[]
+  totalAccounts: number
+  page: number
+  totalPages: number
+  pageSize: number
+  onPageChange: (page: number) => void
+  onPageSizeChange: (size: number) => void
+}) {
   const { t } = useTranslation()
-  if (accounts.length === 0 || models.length === 0) return null
 
   return (
     <Card>
@@ -331,51 +492,71 @@ function Matrix({ accounts, models }: { accounts: CodexTurnStateOverview['accoun
             ))}
           </div>
         </div>
-        <div className="max-h-[420px] overflow-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="sticky top-0 bg-card text-muted-foreground">
-              <tr>
-                <th className="px-4 py-2 font-medium">{t('intelligence.col.account')}</th>
-                {models.map((model) => (
-                  <th key={model} className="px-2 py-2 text-center font-mono font-medium">
-                    {model.replace(/^gpt-/, '')}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {accounts.map((account) => {
-                const byModel = new Map(account.cells.map((cell) => [cell.model, cell]))
-                return (
-                  <tr key={account.account_id} className="border-t border-border/60">
-                    <td className="whitespace-nowrap px-4 py-1.5">
-                      <span className="font-mono text-muted-foreground">#{account.account_id}</span>
-                      <span className="ml-2">{account.email || '—'}</span>
-                    </td>
-                    {models.map((model) => {
-                      const cell = byModel.get(model)
-                      if (!cell) {
-                        return <td key={model} className="px-2 py-1.5 text-center text-muted-foreground/40">·</td>
-                      }
-                      return (
-                        <td key={model} className="px-2 py-1.5 text-center">
-                          <span
-                            className={`inline-block size-3.5 rounded-sm ${MATRIX_TONE[cell.status]}`}
-                            title={`${model} · ${t(`intelligence.status.${cell.status}`)}${
-                              cell.health && !cell.health.error
-                                ? ` · ${cell.health.cipher_len}/${cell.health.expected_cipher_len}`
-                                : ''
-                            }${cell.refresh_consecutive_fails > 0 ? ` · ${cell.refresh_consecutive_fails}x` : ''}`}
-                          />
-                        </td>
-                      )
-                    })}
+        {accounts.length === 0 || models.length === 0 ? (
+          <p className="px-4 py-8 text-center text-sm text-muted-foreground">{t('intelligence.table.noMatch')}</p>
+        ) : (
+          <>
+            <div className="overflow-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="sticky top-0 bg-card text-muted-foreground">
+                  <tr>
+                    <th className="px-4 py-2 font-medium">{t('intelligence.col.account')}</th>
+                    {models.map((model) => (
+                      <th key={model} className="px-2 py-2 text-center font-mono font-medium">
+                        {model.replace(/^gpt-/, '')}
+                      </th>
+                    ))}
                   </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
+                </thead>
+                <tbody>
+                  {accounts.map((account) => {
+                    const byModel = new Map(account.cells.map((cell) => [cell.model, cell]))
+                    return (
+                      <tr key={account.account_id} className="border-t border-border/60">
+                        <td className="whitespace-nowrap px-4 py-1.5">
+                          <span className="font-mono text-muted-foreground">#{account.account_id}</span>
+                          <span className="ml-2">{account.email || '—'}</span>
+                          {account.plan_type ? (
+                            <span className="ml-2 text-muted-foreground">{account.plan_type}</span>
+                          ) : null}
+                        </td>
+                        {models.map((model) => {
+                          const cell = byModel.get(model)
+                          if (!cell) {
+                            return <td key={model} className="px-2 py-1.5 text-center text-muted-foreground/40">·</td>
+                          }
+                          return (
+                            <td key={model} className="px-2 py-1.5 text-center">
+                              <span
+                                className={`inline-block size-3.5 rounded-sm ${MATRIX_TONE[cell.status]}`}
+                                title={`${model} · ${t(`intelligence.status.${cell.status}`)}${
+                                  cell.health && !cell.health.error
+                                    ? ` · ${cell.health.cipher_len}/${cell.health.expected_cipher_len}`
+                                    : ''
+                                }${cell.refresh_consecutive_fails > 0 ? ` · ${cell.refresh_consecutive_fails}x` : ''}`}
+                              />
+                            </td>
+                          )
+                        })}
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div className="border-t border-border px-4 py-3">
+              <Pagination
+                page={page}
+                totalPages={totalPages}
+                onPageChange={onPageChange}
+                totalItems={totalAccounts}
+                pageSize={pageSize}
+                pageSizeOptions={PAGE_SIZE_OPTIONS}
+                onPageSizeChange={onPageSizeChange}
+              />
+            </div>
+          </>
+        )}
       </CardContent>
     </Card>
   )
