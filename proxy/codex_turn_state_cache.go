@@ -27,6 +27,10 @@ const (
 	codexTurnStateFernetVersion        = 0x80
 	codexTurnStateHealthyCipherLen     = 160
 	codexTurnStateTeamHealthyCipherLen = 192
+
+	// codexTurnStateCooldownReason 标记由 turn-state 刷新失败挂上的模型冷却。
+	// 刷新成功只清掉带这个 reason 的冷却，429 之类的限流冷却不受影响。
+	codexTurnStateCooldownReason = "turn_state_degraded"
 )
 
 type codexTurnStateCache struct {
@@ -120,6 +124,17 @@ func (c *codexTurnStateCache) covers(model string) bool {
 	return c != nil && c.config().CoversModel(model)
 }
 
+// errCodexTurnStateModelUnavailable 是内部分类标记：它只说明「这个账号的这个模型」
+// 暂时拿不到未降智的 blob，不代表账号本身有问题。下游看到的仍然是不透明的
+// no_available_account；调度侧靠 isCodexTurnStateModelUnavailable 识别它，跳过账号级
+// 健康惩罚和粘滞同号重试，只把这一格换掉。
+var errCodexTurnStateModelUnavailable = errors.New("codex turn-state unavailable for this account+model")
+
+// isCodexTurnStateModelUnavailable 判断失败是否只波及 (账号, 模型) 这一格。
+func isCodexTurnStateModelUnavailable(err error) bool {
+	return err != nil && errors.Is(err, errCodexTurnStateModelUnavailable)
+}
+
 func ensureCodexTurnStateReady(ctx context.Context, account *auth.Account, body []byte) (context.Context, error) {
 	if skipStoredCodexTurnState(ctx) || account == nil {
 		return ctx, nil
@@ -136,11 +151,87 @@ func ensureCodexTurnStateReady(ctx context.Context, account *auth.Account, body 
 	if fresh {
 		return withExpectedCodexTurnState(ctx, account, model, stored), nil
 	}
+	if cache.config().AsyncRefresh() {
+		// 刷新挪出关键路径：请求不等 ping。有旧值就先回放旧值（上游若不认，
+		// observeCodexTurnStateInbound 会把它作废并重刷）；完全没有值才让调度换号。
+		// 这里不挂冷却：冷启动只是「还没热」，不是确认失败。真失败由后台刷新
+		// 自己在 refreshDetached 里冷却，避免第一次请求就把好账号罚 60 秒。
+		cache.refreshDetached(account, model)
+		if stored != "" {
+			return withExpectedCodexTurnState(ctx, account, model, stored), nil
+		}
+		return ctx, codexTurnStateModelUnavailableError(errCodexTurnStateModelUnavailable)
+	}
 	value, err := cache.refresh(ctx, account, model)
 	if err != nil {
-		return ctx, opaqueCodexTurnStateRefreshError(err)
+		cache.coolDownModel(account, model, err)
+		return ctx, codexTurnStateModelUnavailableError(err)
 	}
 	return withExpectedCodexTurnState(ctx, account, model, value), nil
+}
+
+// codexTurnStateModelUnavailableError 把刷新失败收成对下游不透明的 503，同时挂上
+// errCodexTurnStateModelUnavailable，让调度侧知道这只是 (账号, 模型) 一格的问题。
+func codexTurnStateModelUnavailableError(cause error) error {
+	return opaqueCodexTurnStateRefreshError(errors.Join(errCodexTurnStateModelUnavailable, cause))
+}
+
+// refreshDetached 在后台刷新，绝不阻塞调用方。
+// 已经在刷的 key 直接跳过：refresh 内部虽然会共享 waiter，但每个调用方仍要挂一个
+// goroutine 干等，热点账号在 async 模式下能堆出上万个空转 goroutine。
+func (c *codexTurnStateCache) refreshDetached(account *auth.Account, model string) {
+	if c == nil || account == nil {
+		return
+	}
+	key := fmt.Sprintf("%d%s%s", account.ID(), codexTurnStateCacheWaiterKey, strings.ToLower(strings.TrimSpace(model)))
+	c.mu.Lock()
+	_, inFlight := c.waiters[key]
+	c.mu.Unlock()
+	if inFlight {
+		return
+	}
+	go func() {
+		if _, err := c.refresh(context.Background(), account, model); err != nil {
+			c.coolDownModel(account, model, err)
+		}
+	}()
+}
+
+// coolDownModel 把刷不出健康 blob 的 (账号, 模型) 按退避挂起，让调度器暂时跳过这一格。
+// 用账号已有的 per-model 冷却设施，所以同账号的其它模型完全不受影响。
+// 下游取消不算失败：那是客户端走了，不是账号的问题。
+func (c *codexTurnStateCache) coolDownModel(account *auth.Account, model string, cause error) {
+	if c == nil || c.store == nil || account == nil {
+		return
+	}
+	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
+		return
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return
+	}
+	cooldown := c.store.MarkModelCooldownWithBackoff(account, model, c.config().FailureCooldown(), codexTurnStateCooldownReason, true)
+	log.Printf("X-Codex-Turn-State 刷不出健康值，冷却该模型 account=%d model=%s 至 %s (退避档位 %d): %v",
+		account.ID(), model, cooldown.ResetAt.Format(time.RFC3339), cooldown.BackoffLevel, cause)
+}
+
+// clearOwnCooldown 在刷到健康 blob 后解除本模块挂的冷却。只认自己的 reason：
+// 429 / credits_required 之类的限流冷却不能因为 ping 成功就被抹掉。
+func (c *codexTurnStateCache) clearOwnCooldown(account *auth.Account, model string) {
+	if c == nil || c.store == nil || account == nil {
+		return
+	}
+	key := strings.ToLower(strings.TrimSpace(model))
+	if key == "" {
+		return
+	}
+	for _, cooldown := range account.ActiveModelCooldowns() {
+		if strings.ToLower(cooldown.Model) == key && cooldown.Reason == codexTurnStateCooldownReason {
+			c.store.ClearModelCooldown(account, model)
+			return
+		}
+	}
 }
 
 // opaqueCodexTurnStateRefreshError 把 ping / 智力校验失败收成可换号的 503。
@@ -154,6 +245,13 @@ func opaqueCodexTurnStateRefreshError(err error) error {
 	}
 	var existing *Error
 	if errors.As(err, &existing) {
+		// 结构化错误原样透出，但「只影响这一格」的标记必须保住：调度侧靠它决定
+		// 换号而不是罚账号。Cause 不进下游 JSON，挂在这里是安全的。
+		if isCodexTurnStateModelUnavailable(err) && !isCodexTurnStateModelUnavailable(existing) {
+			tagged := *existing
+			tagged.Cause = errors.Join(errCodexTurnStateModelUnavailable, existing.Cause)
+			return &tagged
+		}
 		return existing
 	}
 	return &Error{
@@ -293,6 +391,7 @@ func (c *codexTurnStateCache) runRefresh(account *auth.Account, model, key strin
 			waiter.err = fmt.Errorf("保存 X-Codex-Turn-State 失败: %w", err)
 			return
 		}
+		c.clearOwnCooldown(account, model)
 		waiter.value = value
 		return
 	}

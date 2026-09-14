@@ -7,7 +7,7 @@ import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
-import type { AntigravityOAuthClientSetting, AntigravitySettingsResponse, ChannelTestSettings, CodexTurnStateCacheSettings, CodexUserAgentCatalog, CodexUserAgentPreview, HealthResponse, ModelInfo, SiteBranding, SystemSettings, UpstreamChannel } from '../types'
+import type { AntigravityOAuthClientSetting, AntigravitySettingsResponse, ChannelTestSettings, CodexTurnStateCacheSettings, CodexTurnStateRefreshMode, CodexUserAgentCatalog, CodexUserAgentPreview, HealthResponse, ModelInfo, SiteBranding, SystemSettings, UpstreamChannel } from '../types'
 import { ANTIGRAVITY_DEFAULT_MODELS } from '../lib/antigravityModels'
 import { countPayloadRules } from './PayloadRules'
 import { getErrorMessage } from '../utils/error'
@@ -773,7 +773,7 @@ function CodexTurnStateCacheCard() {
     }
   }, [showToast])
 
-  const save = useCallback(async (patch: Partial<Pick<CodexTurnStateCacheSettings, 'ipv6_proxy_url' | 'models' | 'ttl_minutes' | 'countries' | 'max_ping_tries'>>) => {
+  const save = useCallback(async (patch: Partial<Pick<CodexTurnStateCacheSettings, 'ipv6_proxy_url' | 'models' | 'ttl_minutes' | 'countries' | 'max_ping_tries' | 'refresh_mode' | 'failure_cooldown_seconds'>>) => {
     setSaving(true)
     try {
       const response = await api.updateCodexTurnStateCacheSettings(patch)
@@ -865,6 +865,37 @@ function CodexTurnStateCacheCard() {
               disabled={settings === null || saving}
               onValueChange={(value) => {
                 if (value !== (settings?.max_ping_tries ?? 8)) void save({ max_ping_tries: value })
+              }}
+            />
+          </SettingField>
+          <SettingField
+            label={t('settings.codexTurnStateCache.refreshMode')}
+            description={t('settings.codexTurnStateCache.refreshModeDesc')}
+          >
+            <Select
+              value={settings?.refresh_mode ?? 'blocking'}
+              onValueChange={(value) => {
+                if (value !== (settings?.refresh_mode ?? 'blocking')) void save({ refresh_mode: value as CodexTurnStateRefreshMode })
+              }}
+              options={[
+                { value: 'blocking', label: t('settings.codexTurnStateCache.refreshModeBlocking') },
+                { value: 'async', label: t('settings.codexTurnStateCache.refreshModeAsync') },
+              ]}
+              disabled={settings === null || saving}
+            />
+          </SettingField>
+          <SettingField
+            label={t('settings.codexTurnStateCache.failureCooldown')}
+            description={t('settings.codexTurnStateCache.failureCooldownDesc')}
+            suffix={t('settings.unit.sec')}
+          >
+            <DraftNumberInput
+              min={5}
+              max={1800}
+              value={settings?.failure_cooldown_seconds ?? 60}
+              disabled={settings === null || saving}
+              onValueChange={(value) => {
+                if (value !== (settings?.failure_cooldown_seconds ?? 60)) void save({ failure_cooldown_seconds: value })
               }}
             />
           </SettingField>

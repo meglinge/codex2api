@@ -2018,6 +2018,13 @@ func shouldPenalizeTransportKind(kind string) bool {
 	return kind != "" && kind != upstreamErrorKindWsBusyAcquire
 }
 
+// shouldUnbindAffinityOnRetry 决定换号重试时要不要解绑会话亲和。
+// 刷不出 X-Codex-Turn-State 只淘汰 (账号, 模型) 一格，账号对会话里的其它模型仍然
+// 可用；解绑会因为一个模型的降智把整个会话的 prompt cache 局部性白白丢掉。
+func shouldUnbindAffinityOnRetry(err error, retryable, stickyRetry bool) bool {
+	return retryable && !stickyRetry && !isCodexTurnStateModelUnavailable(err)
+}
+
 func isWebsocketMessageTooBigError(err error) bool {
 	if err == nil {
 		return false
@@ -2051,6 +2058,14 @@ func shouldFallbackWebsocketMessageTooBigToHTTP(outcome streamOutcome, useWebsoc
 
 func classifyTransportFailure(err error) string {
 	if err == nil {
+		return ""
+	}
+
+	// 刷不出未降智的 X-Codex-Turn-State 只说明「这个账号的这个模型」暂时不可用，
+	// 账号本身是好的。必须在递归进 Cause 之前拦住：否则内层的刷新失败文本会命中
+	// 下面的兜底分支被判成 transport，既扣账号健康分又触发粘滞同号重试，等于在同
+	// 一个刷不出来的格子上原地打转。返回空串让上层只做换号。
+	if isCodexTurnStateModelUnavailable(err) {
 		return ""
 	}
 
@@ -4205,7 +4220,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 				}
 				h.store.Release(account)
-				if retryable && !stickyRetry {
+				if shouldUnbindAffinityOnRetry(reqErr, retryable, stickyRetry) {
 					h.store.UnbindSessionAffinity(affinityKey, account.ID())
 				}
 				if timedOut && shouldRetry {
@@ -4958,7 +4973,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
 			h.store.Release(account)
-			if retryable && !stickyRetry {
+			if shouldUnbindAffinityOnRetry(reqErr, retryable, stickyRetry) {
 				h.store.UnbindSessionAffinity(affinityKey, account.ID())
 			}
 			if timedOut && shouldRetry {
@@ -6951,7 +6966,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
 			h.store.Release(account)
-			if retryable && !stickyRetry {
+			if shouldUnbindAffinityOnRetry(reqErr, retryable, stickyRetry) {
 				h.store.UnbindSessionAffinity(affinityKey, account.ID())
 			}
 			if timedOut && shouldRetry {

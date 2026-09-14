@@ -15,11 +15,18 @@ import (
 // 勾选的模型才会走缓存：值为空或 TTL 到期时，用 IPv6 轮转代理 ping 拿新 blob；
 // 用户请求命中该账号该模型时先等 ping 完成再发出。
 type CodexTurnStateCacheConfig struct {
-	IPv6ProxyURL string   `json:"ipv6_proxy_url"`
+	IPv6ProxyURL string `json:"ipv6_proxy_url"`
 	Models       []string `json:"models"`
 	TTLMinutes   int      `json:"ttl_minutes"`
 	Countries    []string `json:"countries"`
 	MaxPingTries int      `json:"max_ping_tries"`
+	// RefreshMode 决定缓存未命中时用户请求是否等待 ping 完成。
+	// blocking：等 ping 跑完（历史行为）。
+	// async：不等，后台刷新；有旧值就先回放旧值，没有旧值则冷却该模型并换号。
+	RefreshMode string `json:"refresh_mode"`
+	// FailureCooldownSeconds 是一次刷新彻底失败后，该 (账号, 模型) 的冷却起始时长。
+	// 连续失败按 store 的模型冷却退避逐级翻倍，上限 30 分钟。0 表示用默认值。
+	FailureCooldownSeconds int `json:"failure_cooldown_seconds"`
 }
 
 const (
@@ -32,6 +39,15 @@ const (
 	MaxCodexTurnStateCacheMaxTries       = 32
 	MaxCodexTurnStateCacheCountries      = 32
 	codexTurnStateRegionPlaceholder      = "{XX}"
+
+	// CodexTurnStateRefreshModeBlocking 保持历史行为：用户请求等 ping 跑完。
+	CodexTurnStateRefreshModeBlocking = "blocking"
+	// CodexTurnStateRefreshModeAsync 把 ping 挪出请求关键路径。
+	CodexTurnStateRefreshModeAsync = "async"
+
+	DefaultCodexTurnStateFailureCooldownSeconds = 60
+	MinCodexTurnStateFailureCooldownSeconds     = 5
+	MaxCodexTurnStateFailureCooldownSeconds     = 30 * 60
 )
 
 // Normalized 去掉空白模型、钳制 TTL，保证落库与回显一致。
@@ -73,13 +89,39 @@ func (c CodexTurnStateCacheConfig) Normalized() CodexTurnStateCacheConfig {
 	if tries > MaxCodexTurnStateCacheMaxTries {
 		tries = MaxCodexTurnStateCacheMaxTries
 	}
-	return CodexTurnStateCacheConfig{
-		IPv6ProxyURL: strings.TrimSpace(c.IPv6ProxyURL),
-		Models:       models,
-		TTLMinutes:   ttl,
-		Countries:    NormalizeCodexTurnStateCacheCountries(c.Countries),
-		MaxPingTries: tries,
+	mode := strings.ToLower(strings.TrimSpace(c.RefreshMode))
+	if mode != CodexTurnStateRefreshModeAsync {
+		mode = CodexTurnStateRefreshModeBlocking
 	}
+	cooldown := c.FailureCooldownSeconds
+	if cooldown <= 0 {
+		cooldown = DefaultCodexTurnStateFailureCooldownSeconds
+	}
+	if cooldown < MinCodexTurnStateFailureCooldownSeconds {
+		cooldown = MinCodexTurnStateFailureCooldownSeconds
+	}
+	if cooldown > MaxCodexTurnStateFailureCooldownSeconds {
+		cooldown = MaxCodexTurnStateFailureCooldownSeconds
+	}
+	return CodexTurnStateCacheConfig{
+		IPv6ProxyURL:           strings.TrimSpace(c.IPv6ProxyURL),
+		Models:                 models,
+		TTLMinutes:             ttl,
+		Countries:              NormalizeCodexTurnStateCacheCountries(c.Countries),
+		MaxPingTries:           tries,
+		RefreshMode:            mode,
+		FailureCooldownSeconds: cooldown,
+	}
+}
+
+// AsyncRefresh 表示缓存未命中时不阻塞用户请求。
+func (c CodexTurnStateCacheConfig) AsyncRefresh() bool {
+	return c.Normalized().RefreshMode == CodexTurnStateRefreshModeAsync
+}
+
+// FailureCooldown 返回一次刷新失败后该 (账号, 模型) 的冷却起始时长。
+func (c CodexTurnStateCacheConfig) FailureCooldown() time.Duration {
+	return time.Duration(c.Normalized().FailureCooldownSeconds) * time.Second
 }
 
 // NormalizeCodexTurnStateCacheCountries 去空白、转大写、去重。

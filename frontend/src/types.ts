@@ -38,12 +38,16 @@ export interface CodexTurnStateInfo {
   health?: CodexTurnStateHealth
 }
 
+export type CodexTurnStateRefreshMode = 'blocking' | 'async'
+
 export interface CodexTurnStateCacheSettings {
   ipv6_proxy_url: string
   models: string[]
   ttl_minutes: number
   countries: string[]
   max_ping_tries: number
+  refresh_mode: CodexTurnStateRefreshMode
+  failure_cooldown_seconds: number
   model_choices?: string[]
 }
 
