@@ -152,7 +152,10 @@ import type {
   ChannelTestSettings,
   ChannelTestSettingsResponse,
   CodexTurnStateCacheSettings,
+  CodexTurnStateCellAction,
+  CodexTurnStateForceRefreshResult,
   CodexTurnStateOverview,
+  CodexTurnStateRefreshEvent,
   AntigravitySettingsResponse,
 } from './types'
 
@@ -1025,6 +1028,23 @@ export const api = {
       body: JSON.stringify(patch),
     }),
   getCodexTurnStateOverview: () => request<CodexTurnStateOverview>('/codex-turn-states/overview'),
+  getCodexTurnStateRefreshEvents: (limit = 200) =>
+    request<{ events: CodexTurnStateRefreshEvent[] }>(`/codex-turn-states/events?limit=${limit}`),
+  refreshCodexTurnStateCell: (cell: CodexTurnStateCellAction) =>
+    request<CodexTurnStateForceRefreshResult>('/codex-turn-states/refresh', {
+      method: 'POST',
+      body: JSON.stringify(cell),
+    }),
+  clearCodexTurnStateCooldown: (cell: CodexTurnStateCellAction) =>
+    request<{ cleared: boolean }>('/codex-turn-states/clear-cooldown', {
+      method: 'POST',
+      body: JSON.stringify(cell),
+    }),
+  invalidateCodexTurnStateCell: (cell: CodexTurnStateCellAction) =>
+    request<{ invalidated: boolean }>('/codex-turn-states/invalidate', {
+      method: 'POST',
+      body: JSON.stringify(cell),
+    }),
   getInviteGuideSettings: () => request<{ enabled: boolean }>('/settings/invite-guide'),
   updateInviteGuideSettings: (enabled: boolean) =>
     request<{ enabled: boolean }>('/settings/invite-guide', {

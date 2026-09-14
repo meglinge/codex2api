@@ -2172,7 +2172,27 @@
       "fails": "Consecutive fails",
       "cooldown": "Cooldown left",
       "lastRound": "Last round",
-      "reason": "Failure"
+      "reason": "Failure",
+      "actions": "Actions"
+    },
+    "matrix": {
+      "title": "Account x model matrix",
+      "hint": "One square per (account, model). Hover for ciphertext length and consecutive failures."
+    },
+    "stream": {
+      "title": "Live refresh stream",
+      "hint": "Last 300 refresh rounds, newest first. Process memory only; cleared on restart.",
+      "empty": "No refresh rounds recorded yet."
+    },
+    "action": {
+      "refresh": "Force refresh (bypass TTL)",
+      "clearCooldown": "Clear cooldown",
+      "invalidate": "Drop cached value",
+      "refreshOk": "Refreshed, ciphertext {{len}} bytes",
+      "refreshFailed": "Refresh failed: {{reason}}",
+      "cooldownCleared": "Cooldown cleared",
+      "cooldownNone": "This cell has no turn-state cooldown right now",
+      "invalidated": "Cached value dropped; the next request will ping again"
     },
     "status": {
       "healthy": "Healthy",

@@ -101,6 +101,37 @@ export interface CodexTurnStateOverview {
   accounts: CodexTurnStateAccountRow[]
 }
 
+export interface CodexTurnStateRefreshEvent {
+  seq: number
+  at: string
+  account_id: number
+  model: string
+  ok: boolean
+  ping_count: number
+  duration_ms: number
+  failure_kind?: string
+  detail?: string
+  cipher_len: number
+  expected_cipher_len: number
+}
+
+export interface CodexTurnStateCellAction {
+  account_id: number
+  model: string
+}
+
+export interface CodexTurnStateForceRefreshResult {
+  ok: boolean
+  error?: string
+  failure_kind?: string
+  ping_count?: number
+  duration_ms?: number
+  cipher_len?: number
+  expected_cipher?: number
+  consecutive_fails?: number
+  health?: CodexTurnStateHealth
+}
+
 export interface CodexTurnStateCacheSettings {
   ipv6_proxy_url: string
   models: string[]

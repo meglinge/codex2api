@@ -50,6 +50,25 @@ func (s CodexTurnStateRefreshStat) Healthy() bool {
 	return s.ConsecutiveFails == 0 && !s.LastSuccessAt.IsZero()
 }
 
+// codexTurnStateEventRingSize 是实时刷新流保留的条数。够看清一次风暴的形状，
+// 又不至于让内存随刷新频率增长。
+const codexTurnStateEventRingSize = 300
+
+// CodexTurnStateRefreshEvent 是一轮刷新的流水记录，供管理页的实时刷新流展示。
+type CodexTurnStateRefreshEvent struct {
+	Seq         int64
+	At          time.Time
+	AccountID   int64
+	Model       string
+	OK          bool
+	PingCount   int
+	DurationMs  int64
+	FailureKind string
+	Detail      string
+	CipherLen   int
+	ExpectedLen int
+}
+
 func codexTurnStateStatKey(accountID int64, model string) string {
 	return strconv.FormatInt(accountID, 10) + codexTurnStateCacheWaiterKey + strings.ToLower(strings.TrimSpace(model))
 }
@@ -115,6 +134,19 @@ func (c *codexTurnStateCache) recordRefresh(account *auth.Account, model string,
 		stat = &CodexTurnStateRefreshStat{AccountID: account.ID(), Model: model}
 		c.stats[key] = stat
 	}
+	c.appendEventLocked(CodexTurnStateRefreshEvent{
+		At:          now,
+		AccountID:   account.ID(),
+		Model:       model,
+		OK:          err == nil,
+		PingCount:   pings,
+		DurationMs:  elapsed.Milliseconds(),
+		FailureKind: kind,
+		Detail:      failureDetail(err),
+		CipherLen:   cipherLen,
+		ExpectedLen: expectedLen,
+	})
+
 	stat.LastAttemptAt = now
 	stat.LastPingCount = pings
 	stat.LastDurationMs = elapsed.Milliseconds()
@@ -135,6 +167,48 @@ func (c *codexTurnStateCache) recordRefresh(account *auth.Account, model string,
 	stat.LastFailureDetail = err.Error()
 	stat.LastDegradedCipherLen = cipherLen
 	stat.LastExpectedCipherLen = expectedLen
+}
+
+func failureDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// appendEventLocked 往环里追加一条流水。调用方必须持有 statsMu 写锁。
+func (c *codexTurnStateCache) appendEventLocked(event CodexTurnStateRefreshEvent) {
+	c.eventSeq++
+	event.Seq = c.eventSeq
+	if len(c.events) < codexTurnStateEventRingSize {
+		c.events = append(c.events, event)
+		return
+	}
+	c.events[c.eventHead] = event
+	c.eventHead = (c.eventHead + 1) % codexTurnStateEventRingSize
+}
+
+// refreshEvents 返回最近的流水，最新的在前。limit<=0 时返回全部。
+func (c *codexTurnStateCache) refreshEvents(limit int) []CodexTurnStateRefreshEvent {
+	if c == nil {
+		return nil
+	}
+	c.statsMu.RLock()
+	defer c.statsMu.RUnlock()
+	out := make([]CodexTurnStateRefreshEvent, 0, len(c.events))
+	// 环还没填满时 eventHead 为 0，切片本身就是时间序。
+	for i := len(c.events) - 1; i >= 0; i-- {
+		out = append(out, c.events[(c.eventHead+i)%len(c.events)])
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+// CodexTurnStateRefreshEvents 返回最近的刷新流水，最新的在前。
+func CodexTurnStateRefreshEvents(limit int) []CodexTurnStateRefreshEvent {
+	return currentCodexTurnStateCache().refreshEvents(limit)
 }
 
 // forgetRefreshStats 丢掉某个账号的全部档案，账号被删除时调用。

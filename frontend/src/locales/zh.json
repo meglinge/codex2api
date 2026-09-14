@@ -2172,7 +2172,27 @@
       "fails": "连续失败",
       "cooldown": "冷却剩余",
       "lastRound": "最近一轮",
-      "reason": "失败原因"
+      "reason": "失败原因",
+      "actions": "操作"
+    },
+    "matrix": {
+      "title": "账号 × 模型矩阵",
+      "hint": "每格一个 (账号, 模型)。悬停看密文长度与连败次数。"
+    },
+    "stream": {
+      "title": "实时刷新流",
+      "hint": "最近 300 轮刷新，最新在上。只存进程内存，重启清空。",
+      "empty": "还没有刷新记录。"
+    },
+    "action": {
+      "refresh": "强制刷新（绕过 TTL）",
+      "clearCooldown": "解除冷却",
+      "invalidate": "清除缓存值",
+      "refreshOk": "刷新成功，密文 {{len}} 字节",
+      "refreshFailed": "刷新失败：{{reason}}",
+      "cooldownCleared": "冷却已解除",
+      "cooldownNone": "这一格当前没有本模块挂的冷却",
+      "invalidated": "缓存值已清除，下次请求会重新 ping"
     },
     "status": {
       "healthy": "健康",

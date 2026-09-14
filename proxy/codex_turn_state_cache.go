@@ -43,9 +43,13 @@ type codexTurnStateCache struct {
 	persistMu sync.Mutex
 	waiters   map[string]*codexTurnStateRefreshWaiter
 
-	// stats 是每格 (账号, 模型) 的刷新档案，只活在进程内存里，供智力管理页读取。
-	statsMu sync.RWMutex
-	stats   map[string]*CodexTurnStateRefreshStat
+	// stats 是每格 (账号, 模型) 的刷新档案，events 是定长流水环，两者都只活在进程
+	// 内存里，供智力管理页读取，共用 statsMu。
+	statsMu   sync.RWMutex
+	stats     map[string]*CodexTurnStateRefreshStat
+	events    []CodexTurnStateRefreshEvent
+	eventHead int
+	eventSeq  int64
 }
 
 type codexTurnStateRefreshWaiter struct {
@@ -181,6 +185,40 @@ func codexTurnStateModelUnavailableError(cause error) error {
 	return opaqueCodexTurnStateRefreshError(errors.Join(errCodexTurnStateModelUnavailable, cause))
 }
 
+// RefreshCodexTurnStateNow 立即为一格重刷：先作废现有 blob 再 ping，绕过 TTL。
+// 供管理页的「强制刷新」按钮使用，返回新的 blob。
+func RefreshCodexTurnStateNow(ctx context.Context, account *auth.Account, model string) (string, error) {
+	cache := currentCodexTurnStateCache()
+	if cache == nil {
+		return "", fmt.Errorf("X-Codex-Turn-State 缓存未初始化")
+	}
+	model = strings.TrimSpace(model)
+	if account == nil || model == "" {
+		return "", fmt.Errorf("缺少账号或模型")
+	}
+	cache.invalidate(account, model)
+	value, err := cache.refresh(ctx, account, model)
+	if err != nil {
+		cache.coolDownModel(account, model, err)
+		return "", err
+	}
+	return value, nil
+}
+
+// ClearCodexTurnStateCooldown 解除本模块给一格挂的冷却。
+// 只动 turn_state_degraded 这个 reason：限流之类的冷却不能被管理页顺手抹掉。
+// 返回 false 表示这一格当前没有本模块挂的冷却。
+func ClearCodexTurnStateCooldown(account *auth.Account, model string) bool {
+	return currentCodexTurnStateCache().clearOwnCooldown(account, model)
+}
+
+// InvalidateCodexTurnState 丢掉一格已缓存的 blob，下一次请求会重新 ping。
+func InvalidateCodexTurnState(account *auth.Account, model string) {
+	if cache := currentCodexTurnStateCache(); cache != nil {
+		cache.invalidate(account, model)
+	}
+}
+
 // refreshDetached 在后台刷新，绝不阻塞调用方。
 // 已经在刷的 key 直接跳过：refresh 内部虽然会共享 waiter，但每个调用方仍要挂一个
 // goroutine 干等，热点账号在 async 模式下能堆出上万个空转 goroutine。
@@ -221,22 +259,24 @@ func (c *codexTurnStateCache) coolDownModel(account *auth.Account, model string,
 		account.ID(), model, cooldown.ResetAt.Format(time.RFC3339), cooldown.BackoffLevel, cause)
 }
 
-// clearOwnCooldown 在刷到健康 blob 后解除本模块挂的冷却。只认自己的 reason：
-// 429 / credits_required 之类的限流冷却不能因为 ping 成功就被抹掉。
-func (c *codexTurnStateCache) clearOwnCooldown(account *auth.Account, model string) {
+// clearOwnCooldown 解除本模块挂的冷却，刷到健康 blob 后与管理页手动解除都走它。
+// 只认自己的 reason：429 / credits_required 之类的限流冷却不能被顺手抹掉。
+// 返回 false 表示这一格当前没有本模块挂的冷却。
+func (c *codexTurnStateCache) clearOwnCooldown(account *auth.Account, model string) bool {
 	if c == nil || c.store == nil || account == nil {
-		return
+		return false
 	}
 	key := strings.ToLower(strings.TrimSpace(model))
 	if key == "" {
-		return
+		return false
 	}
 	for _, cooldown := range account.ActiveModelCooldowns() {
 		if strings.ToLower(cooldown.Model) == key && cooldown.Reason == codexTurnStateCooldownReason {
 			c.store.ClearModelCooldown(account, model)
-			return
+			return true
 		}
 	}
+	return false
 }
 
 // opaqueCodexTurnStateRefreshError 把 ping / 智力校验失败收成可换号的 503。
@@ -403,7 +443,7 @@ func (c *codexTurnStateCache) runRefresh(account *auth.Account, model, key strin
 			waiter.err = fmt.Errorf("保存 X-Codex-Turn-State 失败: %w", err)
 			return
 		}
-		c.clearOwnCooldown(account, model)
+		_ = c.clearOwnCooldown(account, model)
 		waiter.value = value
 		return
 	}
