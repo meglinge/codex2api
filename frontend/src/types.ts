@@ -40,6 +40,67 @@ export interface CodexTurnStateInfo {
 
 export type CodexTurnStateRefreshMode = 'blocking' | 'async'
 
+export type CodexTurnStateCellStatus =
+  | 'healthy'
+  | 'stale'
+  | 'degraded'
+  | 'cooling'
+  | 'missing'
+  | 'unparsed'
+
+export interface CodexTurnStateCell {
+  model: string
+  auto_cached: boolean
+  has_value: boolean
+  value_length: number
+  health?: CodexTurnStateHealth
+  captured_at?: string
+  expires_at?: string
+  remaining_seconds: number
+  expired: boolean
+  cooldown_reason?: string
+  cooldown_reset_at?: string
+  cooldown_remaining_seconds: number
+  cooldown_backoff_level: number
+  refresh_consecutive_fails: number
+  refresh_total_attempts: number
+  refresh_total_successes: number
+  refresh_last_ping_count: number
+  refresh_last_duration_ms: number
+  refresh_last_attempt_at?: string
+  refresh_last_success_at?: string
+  refresh_failure_kind?: string
+  refresh_failure_detail?: string
+  refresh_degraded_cipher_len: number
+  refresh_expected_cipher_len: number
+  status: CodexTurnStateCellStatus
+}
+
+export interface CodexTurnStateAccountRow {
+  account_id: number
+  email: string
+  plan_type: string
+  cells: CodexTurnStateCell[]
+}
+
+export interface CodexTurnStateOverviewSummary {
+  accounts: number
+  cells: number
+  healthy: number
+  degraded: number
+  expired: number
+  missing: number
+  cooling_down: number
+  chronic_failures: number
+}
+
+export interface CodexTurnStateOverview {
+  generated_at: string
+  config: CodexTurnStateCacheSettings
+  summary: CodexTurnStateOverviewSummary
+  accounts: CodexTurnStateAccountRow[]
+}
+
 export interface CodexTurnStateCacheSettings {
   ipv6_proxy_url: string
   models: string[]

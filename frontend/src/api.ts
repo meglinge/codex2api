@@ -152,6 +152,7 @@ import type {
   ChannelTestSettings,
   ChannelTestSettingsResponse,
   CodexTurnStateCacheSettings,
+  CodexTurnStateOverview,
   AntigravitySettingsResponse,
 } from './types'
 
@@ -1018,11 +1019,12 @@ export const api = {
       body: JSON.stringify(patch),
     }),
   getCodexTurnStateCacheSettings: () => request<CodexTurnStateCacheSettings>('/settings/codex-turn-state-cache'),
-  updateCodexTurnStateCacheSettings: (patch: Partial<Pick<CodexTurnStateCacheSettings, 'ipv6_proxy_url' | 'models' | 'ttl_minutes' | 'countries' | 'max_ping_tries'>>) =>
+  updateCodexTurnStateCacheSettings: (patch: Partial<Pick<CodexTurnStateCacheSettings, 'ipv6_proxy_url' | 'models' | 'ttl_minutes' | 'countries' | 'max_ping_tries' | 'refresh_mode' | 'failure_cooldown_seconds'>>) =>
     request<CodexTurnStateCacheSettings>('/settings/codex-turn-state-cache', {
       method: 'PUT',
       body: JSON.stringify(patch),
     }),
+  getCodexTurnStateOverview: () => request<CodexTurnStateOverview>('/codex-turn-states/overview'),
   getInviteGuideSettings: () => request<{ enabled: boolean }>('/settings/invite-guide'),
   updateInviteGuideSettings: (enabled: boolean) =>
     request<{ enabled: boolean }>('/settings/invite-guide', {

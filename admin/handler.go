@@ -1192,6 +1192,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/invite/plan/probe", h.ProbeInviteGuidePlan)
 	api.GET("/accounts/:id/test", h.TestConnection)
 	api.PUT("/accounts/:id/codex-turn-states", h.UpdateAccountCodexTurnStates)
+	api.GET("/codex-turn-states/overview", h.GetCodexTurnStateOverview)
 	api.GET("/accounts/:id/quality-test/options", h.QualityTestOptions)
 	api.POST("/accounts/:id/quality-test", h.CreateQualityTestJob)
 	api.GET("/quality-tests", h.ListQualityTests)

@@ -1,6 +1,20 @@
 package proxy
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
+
+// CodexTurnStateDegradedError 是智力校验未通过的结构化错误。
+// 文案与历史完全一致（日志与 isInternalCodexTurnStateError 都依赖它），额外带上
+// health，让刷新统计和管理页拿密文长度时不必去解析错误字符串。
+type CodexTurnStateDegradedError struct {
+	Health CodexTurnStateHealth
+}
+
+func (e *CodexTurnStateDegradedError) Error() string {
+	return fmt.Sprintf("智力校验未通过: Fernet 密文 %d 字节（降智），期望 %d", e.Health.CipherLen, e.Health.ExpectedCipherLen)
+}
 
 // CodexTurnStateHealth 是一个 X-Codex-Turn-State blob 的智力校验结果，供管理端展示。
 // 规则与 verifyCodexTurnStatePingIntelligence 同源：按套餐期望的 Fernet 密文长度判断，

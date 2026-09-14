@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom'
-import { Activity, AlertCircle, ServerCog, Workflow } from 'lucide-react'
+import { Activity, AlertCircle, Brain, ServerCog, Workflow } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 const tabs = [
@@ -7,6 +7,7 @@ const tabs = [
   { to: '/ops/runtime', labelKey: 'ops.tabs.runtime', icon: <ServerCog className="size-4" /> },
   { to: '/ops/errors', labelKey: 'ops.tabs.errors', icon: <AlertCircle className="size-4" /> },
   { to: '/ops/scheduler', labelKey: 'ops.tabs.scheduler', icon: <Workflow className="size-4" /> },
+  { to: '/ops/intelligence', labelKey: 'ops.tabs.intelligence', icon: <Brain className="size-4" /> },
 ]
 
 export default function OpsTabs() {

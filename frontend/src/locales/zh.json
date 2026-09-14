@@ -2145,6 +2145,58 @@
     "unknown": "未知",
     "usage_limited": "限流"
   },
+  "intelligence": {
+    "title": "智力管理",
+    "desc": "按账号 × 模型看 X-Codex-Turn-State 的降智状态。判定按套餐走：个人套餐健康密文 160 字节（base64 292 字符），Team / K12 / 教育 / 企业自助 192 字节（332 字符）；其它长度视为降智。不要用固定字符长度当阈值。",
+    "loadingTitle": "正在加载智力状态",
+    "errorTitle": "智力管理页加载失败",
+    "stat": {
+      "healthy": "健康 / 总格数",
+      "degraded": "降智",
+      "cooling": "冷却中",
+      "missing": "无缓存",
+      "chronic": "长期刷不出"
+    },
+    "table": {
+      "title": "问题列表",
+      "hint": "按连续失败次数排序。连续失败 ≥ 3 次基本可以认定上游对这一格长期降智，光靠重试不会好转。",
+      "onlyProblems": "只看有问题的",
+      "allHealthy": "所有格子都健康。",
+      "empty": "暂无数据。先在系统设置里勾选参与缓存的模型。"
+    },
+    "col": {
+      "account": "账号",
+      "model": "模型",
+      "status": "状态",
+      "cipher": "密文 实际/期望",
+      "fails": "连续失败",
+      "cooldown": "冷却剩余",
+      "lastRound": "最近一轮",
+      "reason": "失败原因"
+    },
+    "status": {
+      "healthy": "健康",
+      "stale": "已过期",
+      "degraded": "降智",
+      "cooling": "冷却中",
+      "missing": "无缓存",
+      "unparsed": "无法解析"
+    },
+    "failure": {
+      "degraded": "智力校验未通过",
+      "rate_limited": "上游 429 限流",
+      "upstream": "上游非 200",
+      "transport": "连接失败",
+      "empty": "上游未返回",
+      "persist": "落库失败",
+      "other": "其它"
+    },
+    "cipher": {
+      "unparsed": "非法 Fernet"
+    },
+    "lastRound": "{{pings}} 次 / {{seconds}}s",
+    "footnote": "数据于 {{time}} 生成，每 20 秒自动刷新。刷新档案只存在进程内存里，重启后从零开始。"
+  },
   "ops": {
     "title": "系统运维",
     "description": "查看服务运行状态、连接池压力和实时流量表现。",
@@ -2152,7 +2204,8 @@
       "overview": "运行概览",
       "runtime": "运行时状态",
       "errors": "错误日志",
-      "scheduler": "调度面板"
+      "scheduler": "调度面板",
+      "intelligence": "智力管理"
     },
     "loadingTitle": "正在加载系统运维",
     "loadingDesc": "服务状态、连接池和实时流量正在同步。",

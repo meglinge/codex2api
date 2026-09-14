@@ -15,7 +15,7 @@ import (
 // 勾选的模型才会走缓存：值为空或 TTL 到期时，用 IPv6 轮转代理 ping 拿新 blob；
 // 用户请求命中该账号该模型时先等 ping 完成再发出。
 type CodexTurnStateCacheConfig struct {
-	IPv6ProxyURL string `json:"ipv6_proxy_url"`
+	IPv6ProxyURL string   `json:"ipv6_proxy_url"`
 	Models       []string `json:"models"`
 	TTLMinutes   int      `json:"ttl_minutes"`
 	Countries    []string `json:"countries"`

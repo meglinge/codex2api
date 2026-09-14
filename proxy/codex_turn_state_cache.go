@@ -42,6 +42,10 @@ type codexTurnStateCache struct {
 	mu        sync.Mutex
 	persistMu sync.Mutex
 	waiters   map[string]*codexTurnStateRefreshWaiter
+
+	// stats 是每格 (账号, 模型) 的刷新档案，只活在进程内存里，供智力管理页读取。
+	statsMu sync.RWMutex
+	stats   map[string]*CodexTurnStateRefreshStat
 }
 
 type codexTurnStateRefreshWaiter struct {
@@ -93,6 +97,7 @@ func newCodexTurnStateCache(db *database.DB, store *auth.Store, cfg database.Cod
 		store:   store,
 		ping:    ping,
 		waiters: make(map[string]*codexTurnStateRefreshWaiter),
+		stats:   make(map[string]*CodexTurnStateRefreshStat),
 	}
 	normalized := cfg.Normalized()
 	cache.cfg.Store(&normalized)
@@ -357,7 +362,13 @@ func (c *codexTurnStateCache) refresh(ctx context.Context, account *auth.Account
 }
 
 func (c *codexTurnStateCache) runRefresh(account *auth.Account, model, key string, waiter *codexTurnStateRefreshWaiter) {
+	start := time.Now()
+	pings := 0
 	defer func() {
+		// pings==0 表示这一轮被缓存短路了，没真的打上游，不该进档案。
+		if pings > 0 {
+			c.recordRefresh(account, model, pings, time.Since(start), waiter.err)
+		}
 		c.mu.Lock()
 		delete(c.waiters, key)
 		c.mu.Unlock()
@@ -371,6 +382,7 @@ func (c *codexTurnStateCache) runRefresh(account *auth.Account, model, key strin
 
 	var lastErr error
 	for i, proxyURL := range c.config().PingProxyAttempts() {
+		pings = i + 1
 		ctx, cancel := context.WithTimeout(context.Background(), codexTurnStatePingTimeout)
 		ctx = WithSkipStoredCodexTurnState(ctx)
 		value, err := c.ping(ctx, account, model, proxyURL)
@@ -474,7 +486,7 @@ func verifyCodexTurnStatePingIntelligence(value, planType string) error {
 		return errors.New(health.Error)
 	}
 	if health.Degraded {
-		return fmt.Errorf("智力校验未通过: Fernet 密文 %d 字节（降智），期望 %d", health.CipherLen, health.ExpectedCipherLen)
+		return &CodexTurnStateDegradedError{Health: *health}
 	}
 	return nil
 }

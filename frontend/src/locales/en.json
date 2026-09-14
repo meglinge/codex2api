@@ -2145,6 +2145,58 @@
     "unknown": "Unknown",
     "usage_limited": "Rate Limited"
   },
+  "intelligence": {
+    "title": "Intelligence",
+    "desc": "X-Codex-Turn-State degradation per account and model. The verdict follows the plan: personal plans expect a 160-byte ciphertext (292 base64 chars), Team / K12 / Edu / self-serve business expect 192 bytes (332 chars); any other length counts as degraded. Never use a fixed character length as the threshold.",
+    "loadingTitle": "Loading intelligence status",
+    "errorTitle": "Failed to load intelligence",
+    "stat": {
+      "healthy": "Healthy / total",
+      "degraded": "Degraded",
+      "cooling": "Cooling down",
+      "missing": "No cache",
+      "chronic": "Chronic failures"
+    },
+    "table": {
+      "title": "Problem list",
+      "hint": "Sorted by consecutive failures. Three or more in a row means the upstream is degrading this cell persistently; retrying alone will not fix it.",
+      "onlyProblems": "Problems only",
+      "allHealthy": "Every cell is healthy.",
+      "empty": "No data yet. Pick the cached models in system settings first."
+    },
+    "col": {
+      "account": "Account",
+      "model": "Model",
+      "status": "Status",
+      "cipher": "Cipher actual/expected",
+      "fails": "Consecutive fails",
+      "cooldown": "Cooldown left",
+      "lastRound": "Last round",
+      "reason": "Failure"
+    },
+    "status": {
+      "healthy": "Healthy",
+      "stale": "Expired",
+      "degraded": "Degraded",
+      "cooling": "Cooling",
+      "missing": "No cache",
+      "unparsed": "Unparsable"
+    },
+    "failure": {
+      "degraded": "Degradation check failed",
+      "rate_limited": "Upstream 429",
+      "upstream": "Upstream non-200",
+      "transport": "Connection failed",
+      "empty": "Nothing returned",
+      "persist": "Persist failed",
+      "other": "Other"
+    },
+    "cipher": {
+      "unparsed": "Invalid Fernet"
+    },
+    "lastRound": "{{pings}} pings / {{seconds}}s",
+    "footnote": "Generated at {{time}}, auto-refreshing every 20s. Refresh stats live in process memory only and reset on restart."
+  },
   "ops": {
     "title": "Operations",
     "description": "Monitor service health, connection pools, and live traffic.",
@@ -2152,7 +2204,8 @@
       "overview": "Overview",
       "runtime": "Runtime",
       "errors": "Error Logs",
-      "scheduler": "Scheduler"
+      "scheduler": "Scheduler",
+      "intelligence": "Intelligence"
     },
     "loadingTitle": "Loading Operations",
     "loadingDesc": "Syncing service status, connection pools, and traffic.",
