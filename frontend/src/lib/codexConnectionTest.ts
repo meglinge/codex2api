@@ -1,6 +1,8 @@
 // Codex/Responses 测连诊断的类型与纯展示逻辑。与 Claude 的 claudeConnectionTest.ts
 // 平行但独立:字段语义按 Responses API 与 x-codex-* 用量头定义。
 
+import type { CodexTurnStateHealth, CodexTurnStateInfo } from "../types";
+
 export interface CodexTestWindow {
   used_percent?: number;
   window_minutes?: number;
@@ -40,6 +42,8 @@ export interface CodexTestDiagnostics {
   secondary_window?: CodexTestWindow;
   usage?: CodexTestUsage;
   turn_state?: string;
+  /** 最终帧才有:turn_state 的降智校验,规则与后端自动缓存的 ping 校验同源。 */
+  turn_state_health?: CodexTurnStateHealth;
   response_headers?: Array<{ name: string; value: string }>;
   response_body?: string;
   body_truncated?: boolean;
@@ -54,6 +58,32 @@ export function extractCodexTurnState(diagnostics?: CodexTestDiagnostics | null)
     (item) => item.name.trim().toLowerCase() === CODEX_TURN_STATE_HEADER,
   );
   return header?.value.trim() ?? "";
+}
+
+export type CodexTurnStateVerdict = "healthy" | "degraded" | "invalid";
+
+// 降智判定只信后端:解析失败(error)时不给降智结论。
+export function codexTurnStateVerdict(health?: CodexTurnStateHealth | null): CodexTurnStateVerdict {
+  if (!health) return "invalid";
+  if (health.error) return "invalid";
+  return health.degraded ? "degraded" : "healthy";
+}
+
+export type CodexTurnStateTTLState = "active" | "expired" | "not_cached";
+
+// TTL 只对自动缓存覆盖的模型生效;剩余时长按 expires_at 与 now 实时算,
+// 不用响应里的 remaining_seconds 快照,否则弹窗开久了倒计时会停住。
+export function codexTurnStateTTL(
+  info: CodexTurnStateInfo | undefined,
+  now: number,
+): { state: CodexTurnStateTTLState; remainingSeconds: number } {
+  if (!info) return { state: "not_cached", remainingSeconds: 0 };
+  const expiresAt = info.expires_at ? Date.parse(info.expires_at) : Number.NaN;
+  const remaining = Number.isFinite(expiresAt)
+    ? Math.max(0, Math.floor((expiresAt - now) / 1000))
+    : Math.max(0, info.remaining_seconds);
+  if (!info.auto_cached) return { state: "not_cached", remainingSeconds: remaining };
+  return { state: remaining > 0 ? "active" : "expired", remainingSeconds: remaining };
 }
 
 export type CodexTestWindowKind = "5h" | "7d" | "short" | "unknown";

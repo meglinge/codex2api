@@ -367,13 +367,15 @@ func collectCodexTurnStatePing(resp *http.Response) string {
 }
 
 func verifyCodexTurnStatePingIntelligence(value, planType string) error {
-	info, err := inspectCodexTurnStateToken(value)
-	if err != nil {
-		return err
+	health := InspectCodexTurnStateHealth(value, planType)
+	if health == nil {
+		return fmt.Errorf("上游未返回 X-Codex-Turn-State")
 	}
-	want := codexTurnStateHealthyCipherLenForPlan(planType)
-	if info.CipherLen != want {
-		return fmt.Errorf("智力校验未通过: Fernet 密文 %d 字节（降智），期望 %d", info.CipherLen, want)
+	if health.Error != "" {
+		return errors.New(health.Error)
+	}
+	if health.Degraded {
+		return fmt.Errorf("智力校验未通过: Fernet 密文 %d 字节（降智），期望 %d", health.CipherLen, health.ExpectedCipherLen)
 	}
 	return nil
 }

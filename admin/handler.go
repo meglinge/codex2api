@@ -1690,6 +1690,7 @@ type accountResponse struct {
 	Timezone                      string                      `json:"timezone,omitempty"`
 	CustomHeaders                 map[string]string           `json:"custom_headers,omitempty"`
 	CodexTurnStates               map[string]string           `json:"codex_turn_states,omitempty"`
+	CodexTurnStateInfo            codexTurnStateInfoMap       `json:"codex_turn_state_info,omitempty"`
 	HealthTier                    string                      `json:"health_tier"`
 	SchedulerScore                float64                     `json:"scheduler_score"`
 	DispatchScore                 float64                     `json:"dispatch_score"`

@@ -430,6 +430,29 @@ func TestCodexTestRecorderCapturesTurnStateFromHTTPHeaders(t *testing.T) {
 	}
 }
 
+func TestCodexTestRecorderScoresTurnStateHealthOnFinish(t *testing.T) {
+	// 个人套餐期望 160 字节密文；这里给 176，最终帧必须标成降智。
+	blob := fakeAdminCodexTurnStateFernet(176)
+	headers := make(http.Header)
+	headers.Set("x-codex-turn-state", blob)
+	headers.Set("x-codex-plan-type", "plus")
+	resp := &http.Response{StatusCode: 200, Header: headers, Body: io.NopCloser(strings.NewReader(""))}
+	r := newCodexTestRecorder(resp, "gpt-5.4", nil, time.Now())
+	if r.details.TurnStateHealth != nil {
+		t.Fatalf("health must only appear on the final frame: %+v", r.details.TurnStateHealth)
+	}
+	health := r.finish().TurnStateHealth
+	if health == nil || !health.Degraded || health.CipherLen != 176 || health.ExpectedCipherLen != 160 {
+		t.Fatalf("turn_state_health = %+v", health)
+	}
+
+	// 没有 turn-state 时不给校验结果。
+	empty := newCodexTestRecorder(&http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, "gpt-5.4", nil, time.Now())
+	if got := empty.finish().TurnStateHealth; got != nil {
+		t.Fatalf("missing turn-state must not produce health: %+v", got)
+	}
+}
+
 func TestCodexTestRecorderObservesSafetyBuffering(t *testing.T) {
 	headers := make(http.Header)
 	headers.Set("x-codex-safety-buffering-enabled", "true")

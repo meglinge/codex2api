@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/proxy"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/tidwall/gjson"
 )
@@ -80,10 +81,13 @@ type codexTestDiagnostics struct {
 	Usage                      *codexTestUsage  `json:"usage,omitempty"`
 	// TurnState 是上游铸造的 x-codex-turn-state sticky-routing token。HTTP 响应头
 	// 与 WS 的 codex.response.metadata 帧都会写入这里，方便测连弹窗单独复制/回填。
-	TurnState       string            `json:"turn_state,omitempty"`
-	ResponseHeaders []codexTestHeader `json:"response_headers,omitempty"`
-	ResponseBody    string            `json:"response_body,omitempty"`
-	BodyTruncated   bool              `json:"body_truncated,omitempty"`
+	TurnState string `json:"turn_state,omitempty"`
+	// TurnStateHealth 是 TurnState 的智力校验：Fernet 密文长度与账号套餐期望值的对比。
+	// 只在最终帧填充，规则与自动缓存的 ping 校验同源。
+	TurnStateHealth *proxy.CodexTurnStateHealth `json:"turn_state_health,omitempty"`
+	ResponseHeaders []codexTestHeader           `json:"response_headers,omitempty"`
+	ResponseBody    string                      `json:"response_body,omitempty"`
+	BodyTruncated   bool                        `json:"body_truncated,omitempty"`
 }
 
 // codexTestCapture 旁路留存上游正文预览;超限只打截断标记,绝不截断真正被
@@ -532,6 +536,15 @@ func updateCodexTestCount(target **int64, value gjson.Result) {
 func (r *codexTestRecorder) finish() *codexTestDiagnostics {
 	ms := max(int64(0), time.Since(r.start).Milliseconds())
 	r.details.DurationMS = &ms
+	// 套餐取账号侧记录，与自动缓存 ping 时的判定口径一致；缺失时退回本次响应头的 plan。
+	planType := ""
+	if r.account != nil {
+		planType = r.account.GetPlanType()
+	}
+	if planType == "" {
+		planType = r.details.PlanType
+	}
+	r.details.TurnStateHealth = proxy.InspectCodexTurnStateHealth(r.details.TurnState, planType)
 	body := sanitizeCodexTestText(r.capture.String(), r.secrets)
 	var pretty bytes.Buffer
 	if json.Indent(&pretty, []byte(body), "", "  ") == nil {

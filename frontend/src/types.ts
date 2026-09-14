@@ -18,6 +18,26 @@ export interface ChannelTestSettingsResponse {
   model_choices?: Partial<Record<'antigravity' | 'claude', string[]>>
 }
 
+/** X-Codex-Turn-State 的智力校验：Fernet 密文长度对比账号套餐的期望值。 */
+export interface CodexTurnStateHealth {
+  cipher_len: number
+  expected_cipher_len: number
+  degraded: boolean
+  /** 非空表示 blob 无法按 Fernet 解析，此时 degraded 不可信。 */
+  error?: string
+}
+
+/** 账号里某个模型保存的 turn-state 状态。TTL 只对 auto_cached 的模型真正生效。 */
+export interface CodexTurnStateInfo {
+  captured_at?: string
+  expires_at?: string
+  ttl_seconds: number
+  remaining_seconds: number
+  expired: boolean
+  auto_cached: boolean
+  health?: CodexTurnStateHealth
+}
+
 export interface CodexTurnStateCacheSettings {
   ipv6_proxy_url: string
   models: string[]
@@ -346,6 +366,8 @@ export interface AccountRow {
   custom_headers?: Record<string, string> | null
   /** Codex 按模型保存的上游 X-Codex-Turn-State，后续用户请求回放。 */
   codex_turn_states?: Record<string, string> | null
+  /** 与 codex_turn_states 同键：每个模型保存值的降智校验与 TTL 状态。 */
+  codex_turn_state_info?: Record<string, CodexTurnStateInfo> | null
   health_tier?: string
   scheduler_score?: number
   dispatch_score?: number

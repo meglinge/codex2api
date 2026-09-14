@@ -16,12 +16,14 @@ import {
   XCircle,
 } from "lucide-react";
 import { api, getAdminKey, type ProxyRow } from "../api";
-import type { AccountRow } from "../types";
+import type { AccountRow, CodexTurnStateHealth, CodexTurnStateInfo } from "../types";
 import type { CodexTestDiagnostics, CodexTestWindow } from "../lib/codexConnectionTest";
 import {
   clampCodexTestPercent,
   codexTestTokenMetrics,
   codexTestWindowKind,
+  codexTurnStateTTL,
+  codexTurnStateVerdict,
   extractCodexTurnState,
   formatCodexTestMS,
   formatCodexTestReset,
@@ -71,6 +73,101 @@ async function copyTextToClipboard(text: string) {
   }
 }
 
+// 降智徽章:只信后端给的 turn_state_health;没有校验结果时显示"保存后校验"。
+function TurnStateHealthBadge({ health }: { health?: CodexTurnStateHealth | null }) {
+  const { t } = useTranslation();
+  if (!health) {
+    return (
+      <Badge variant="outline" className="text-[10px] font-medium text-muted-foreground">
+        {t("accounts.testTurnStatePendingCheck")}
+      </Badge>
+    );
+  }
+  const verdict = codexTurnStateVerdict(health);
+  if (verdict === "healthy") {
+    return (
+      <Badge
+        variant="outline"
+        className="border-emerald-300 bg-emerald-50 text-[10px] font-medium text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-400"
+      >
+        {t("accounts.testTurnStateHealthy", { len: health.cipher_len })}
+      </Badge>
+    );
+  }
+  if (verdict === "degraded") {
+    return (
+      <Badge
+        variant="outline"
+        className="border-red-300 bg-red-50 text-[10px] font-medium text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-400"
+      >
+        {t("accounts.testTurnStateDegraded", { len: health.cipher_len, expected: health.expected_cipher_len })}
+      </Badge>
+    );
+  }
+  return (
+    <Badge
+      variant="outline"
+      className="border-amber-300 bg-amber-50 text-[10px] font-medium text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-400"
+      title={health.error}
+    >
+      {t("accounts.testTurnStateInvalid")}
+    </Badge>
+  );
+}
+
+function formatTurnStateClock(iso?: string): string {
+  if (!iso) return "";
+  const ts = Date.parse(iso);
+  if (!Number.isFinite(ts)) return "";
+  return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+// TTL 行:自动缓存模型显示倒计时/已过期;其它模型说明不按 TTL 过期。
+function TurnStateTTLLine({ info, now }: { info?: CodexTurnStateInfo; now: number }) {
+  const { t } = useTranslation();
+  if (!info) return null;
+  const ttl = codexTurnStateTTL(info, now);
+  const captured = formatTurnStateClock(info.captured_at);
+  const text =
+    ttl.state === "active"
+      ? t("accounts.testTurnStateTTLActive", {
+          time: formatCodexTestReset(ttl.remainingSeconds),
+          at: formatTurnStateClock(info.expires_at),
+        })
+      : ttl.state === "expired"
+        ? t("accounts.testTurnStateTTLExpired")
+        : t("accounts.testTurnStateTTLNotCached");
+  return (
+    <span
+      className={cn(
+        "text-[11px] tabular-nums",
+        ttl.state === "expired" ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground",
+      )}
+    >
+      {text}
+      {captured ? ` · ${t("accounts.testTurnStateCapturedAt", { at: captured })}` : ""}
+    </span>
+  );
+}
+
+interface TurnStateInfoSnapshot {
+  values: Record<string, string>;
+  info: Record<string, CodexTurnStateInfo>;
+}
+
+function snapshotTurnStateInfo(account: AccountRow): TurnStateInfoSnapshot {
+  return {
+    values: { ...(account.codex_turn_states ?? {}) },
+    info: { ...(account.codex_turn_state_info ?? {}) },
+  };
+}
+
+// 只有输入框里的值与后端校验时的值一致,校验结果才算数。
+function turnStateInfoFor(snapshot: TurnStateInfoSnapshot, model: string, value: string): CodexTurnStateInfo | undefined {
+  if (!value || (snapshot.values[model] ?? "").trim() !== value) return undefined;
+  return snapshot.info[model];
+}
+
 interface TestEvent {
   type: "test_start" | "content" | "diagnostics" | "test_complete" | "error";
   text?: string;
@@ -115,6 +212,12 @@ export default function TestConnectionModal({
   const [turnStates, setTurnStates] = useState<Record<string, string>>(
     () => ({ ...(account.codex_turn_states ?? {}) }),
   );
+  // 每个模型保存值的降智校验与 TTL,来自账号详情;保存成功后重新拉一次账号刷新。
+  // 连同校验时的值一起存,输入框里改了还没保存的值不会套用旧结论。
+  const [turnStateInfo, setTurnStateInfo] = useState<TurnStateInfoSnapshot>(() =>
+    snapshotTurnStateInfo(account),
+  );
+  const [now, setNow] = useState(() => Date.now());
   const [pingTurnState, setPingTurnState] = useState("");
   const [turnStateChanged, setTurnStateChanged] = useState(false);
   const persistTurnStatesRef = useRef(turnStates);
@@ -145,15 +248,28 @@ export default function TestConnectionModal({
     !isClaudeAccount && !isAntigravityAccount && !isOpenAIResponsesAccount;
   const canPersistTurnStates = isCodexAccount && account.status !== "deleted";
 
+  const refreshTurnStateInfo = useCallback(async () => {
+    try {
+      const fresh = await api.getAccount(account.id);
+      setTurnStateInfo(snapshotTurnStateInfo(fresh));
+      setNow(Date.now());
+    } catch {
+      /* 拉不到就保留旧状态,不打断保存流程 */
+    }
+  }, [account.id]);
+
   const persistTurnStates = useCallback(
     (next: Record<string, string>, immediate = false) => {
       setTurnStates(next);
       persistTurnStatesRef.current = next;
       if (!canPersistTurnStates) return;
       const save = () => {
-        void api.updateAccountCodexTurnStates(account.id, next).catch(() => {
-          showToast(t("accounts.testTurnStateSaveFailed"), "error");
-        });
+        void api
+          .updateAccountCodexTurnStates(account.id, next)
+          .then(() => refreshTurnStateInfo())
+          .catch(() => {
+            showToast(t("accounts.testTurnStateSaveFailed"), "error");
+          });
       };
       if (persistTimerRef.current) {
         clearTimeout(persistTimerRef.current);
@@ -165,7 +281,7 @@ export default function TestConnectionModal({
       }
       persistTimerRef.current = setTimeout(save, 400);
     },
-    [account.id, canPersistTurnStates, showToast, t],
+    [account.id, canPersistTurnStates, refreshTurnStateInfo, showToast, t],
   );
 
   const persistTurnState = useCallback(
@@ -189,6 +305,20 @@ export default function TestConnectionModal({
   useEffect(() => {
     setTurnStates({ ...(account.codex_turn_states ?? {}) });
   }, [account.id, account.codex_turn_states]);
+
+  useEffect(() => {
+    setTurnStateInfo({
+      values: { ...(account.codex_turn_states ?? {}) },
+      info: { ...(account.codex_turn_state_info ?? {}) },
+    });
+  }, [account.id, account.codex_turn_state_info, account.codex_turn_states]);
+
+  // 剩余 TTL 倒计时:每 30 秒推进一次时钟,弹窗开着也能看到到期。
+  useEffect(() => {
+    if (!isCodexAccount) return;
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, [isCodexAccount]);
 
   useEffect(() => {
     if (!isCodexAccount) return;
@@ -757,7 +887,10 @@ export default function TestConnectionModal({
             </p>
             <div className="space-y-1.5">
               <div className="flex items-center justify-between gap-2 text-[11px] font-semibold text-muted-foreground">
-                <span>{t("accounts.testTurnStatePing")}</span>
+                <span className="flex items-center gap-1.5">
+                  {t("accounts.testTurnStatePing")}
+                  {pingTurnState ? <TurnStateHealthBadge health={diagnostics?.turn_state_health} /> : null}
+                </span>
                 {pingTurnState ? (
                   <div className="flex items-center gap-1">
                     <Button
@@ -803,24 +936,39 @@ export default function TestConnectionModal({
               <div className="text-[11px] font-semibold text-muted-foreground">
                 {t("accounts.testTurnStateByModel")}
               </div>
-              <div className="max-h-48 space-y-2 overflow-auto pr-0.5">
-                {modelSelectOptions.map((option) => (
-                  <label key={option.value} className="block space-y-1">
-                    <span className="block text-[11px] text-muted-foreground" style={monoStyle}>
-                      {option.label}
-                    </span>
-                    <Input
-                      value={turnStates[option.value] ?? ""}
-                      onChange={(event) => {
-                        persistTurnState(option.value, event.target.value, false);
-                      }}
-                      placeholder={t("accounts.testTurnStatePlaceholder")}
-                      disabled={running}
-                      className="h-8 font-mono text-[11px]"
-                    />
-                  </label>
-                ))}
+              <div className="max-h-56 space-y-2 overflow-auto pr-0.5">
+                {modelSelectOptions.map((option) => {
+                  const saved = (turnStates[option.value] ?? "").trim();
+                  const info = turnStateInfoFor(turnStateInfo, option.value, saved);
+                  return (
+                    <div key={option.value} className="space-y-1">
+                      <label className="block space-y-1">
+                        <span className="block text-[11px] text-muted-foreground" style={monoStyle}>
+                          {option.label}
+                        </span>
+                        <Input
+                          value={turnStates[option.value] ?? ""}
+                          onChange={(event) => {
+                            persistTurnState(option.value, event.target.value, false);
+                          }}
+                          placeholder={t("accounts.testTurnStatePlaceholder")}
+                          disabled={running}
+                          className="h-8 font-mono text-[11px]"
+                        />
+                      </label>
+                      {saved ? (
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                          <TurnStateHealthBadge health={info?.health} />
+                          <TurnStateTTLLine info={info} now={now} />
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
               </div>
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                {t("accounts.testTurnStateHealthHint")}
+              </p>
               {selectedTurnState ? (
                 <p className="text-[11px] leading-relaxed text-muted-foreground">
                   {t("accounts.testTurnStateReplayHint")}

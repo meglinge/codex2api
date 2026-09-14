@@ -4,6 +4,8 @@ import {
   clampCodexTestPercent,
   codexTestTokenMetrics,
   codexTestWindowKind,
+  codexTurnStateTTL,
+  codexTurnStateVerdict,
   extractCodexTurnState,
   formatCodexTestMS,
   formatCodexTestReset,
@@ -73,6 +75,36 @@ test("turn-state prefers the dedicated field then the response header", () => {
   );
   assert.equal(extractCodexTurnState({ model: "gpt-5.4" }), "");
   assert.equal(extractCodexTurnState(null), "");
+});
+
+test("turn-state verdict trusts the backend health and refuses to judge unparseable blobs", () => {
+  assert.equal(codexTurnStateVerdict({ cipher_len: 160, expected_cipher_len: 160, degraded: false }), "healthy");
+  assert.equal(codexTurnStateVerdict({ cipher_len: 176, expected_cipher_len: 160, degraded: true }), "degraded");
+  assert.equal(
+    codexTurnStateVerdict({ cipher_len: 0, expected_cipher_len: 160, degraded: false, error: "not fernet" }),
+    "invalid",
+  );
+  assert.equal(codexTurnStateVerdict(undefined), "invalid");
+});
+
+test("turn-state ttl counts down from expires_at and only applies to auto-cached models", () => {
+  const now = Date.parse("2026-09-14T12:00:00Z");
+  const base = { ttl_seconds: 2580, remaining_seconds: 999, expired: false };
+  assert.deepEqual(
+    codexTurnStateTTL({ ...base, auto_cached: true, expires_at: "2026-09-14T12:33:00Z" }, now),
+    { state: "active", remainingSeconds: 33 * 60 },
+  );
+  assert.deepEqual(
+    codexTurnStateTTL({ ...base, auto_cached: true, expires_at: "2026-09-14T11:00:00Z" }, now),
+    { state: "expired", remainingSeconds: 0 },
+  );
+  assert.deepEqual(
+    codexTurnStateTTL({ ...base, auto_cached: false, expires_at: "2026-09-14T12:33:00Z" }, now),
+    { state: "not_cached", remainingSeconds: 33 * 60 },
+  );
+  // 没有 expires_at 时退回响应里的快照。
+  assert.deepEqual(codexTurnStateTTL({ ...base, auto_cached: true }, now), { state: "active", remainingSeconds: 999 });
+  assert.deepEqual(codexTurnStateTTL(undefined, now), { state: "not_cached", remainingSeconds: 0 });
 });
 
 test("final diagnostics are recognised by duration_ms only", () => {
