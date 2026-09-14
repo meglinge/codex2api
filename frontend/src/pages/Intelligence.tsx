@@ -234,7 +234,9 @@ export default function Intelligence() {
                               {t(`intelligence.status.${row.status}`)}
                             </Badge>
                           </td>
-                          <td className="px-4 py-2 font-mono text-xs">{cipherLabel(row, t)}</td>
+                          <td className="px-4 py-2 font-mono text-xs">
+                            <CipherCell row={row} />
+                          </td>
                           <td className={`px-4 py-2 text-right font-mono text-xs ${row.refresh_consecutive_fails >= CHRONIC_THRESHOLD ? 'font-bold text-red-500' : ''}`}>
                             {row.refresh_consecutive_fails || '—'}
                           </td>
@@ -419,21 +421,38 @@ function EventStream({ events }: { events: CodexTurnStateRefreshEvent[] }) {
 }
 
 /**
- * 密文长度列：优先展示缓存里那个值的实际/期望长度；没有缓存值时退回最近一次刷新
- * 拿到的降智长度。判定永远用 health / refresh_*，不用 base64 字符串长度做阈值——
- * 团队套餐的健康值是 332 字符，固定阈值会把它们全判成异常。
+ * 密文长度列。两份数据可能同时存在且不一致：缓存里的旧 blob（可能健康但已过期）
+ * 和最近一轮刷新拿到的 blob（可能降智）。「校验未通过」说的是后者，所以最近一轮
+ * 拿到降智值时以它为主，缓存值降为副行；否则显示缓存值。
+ * 判定永远用 health / refresh_*，不用 base64 字符串长度做阈值——团队套餐的健康值是
+ * 332 字符，固定阈值会把它们全判成异常。
  */
-function cipherLabel(row: Row, t: (key: string) => string): string {
-  if (row.health && !row.health.error) {
-    return `${row.health.cipher_len} / ${row.health.expected_cipher_len}`
+function CipherCell({ row }: { row: Row }) {
+  const { t } = useTranslation()
+  const cached = row.health && !row.health.error ? row.health : null
+  const latestDegraded = row.refresh_failure_kind === 'degraded' && row.refresh_degraded_cipher_len > 0
+
+  if (latestDegraded) {
+    return (
+      <div className="leading-tight">
+        <div className="text-red-500">
+          {row.refresh_degraded_cipher_len} / {row.refresh_expected_cipher_len}
+        </div>
+        {cached ? (
+          <div className="text-[10px] text-muted-foreground">
+            {t('intelligence.cipher.cachedValue', { len: cached.cipher_len })}
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+  if (cached) {
+    return <>{cached.cipher_len} / {cached.expected_cipher_len}</>
   }
   if (row.health?.error) {
-    return t('intelligence.cipher.unparsed')
+    return <>{t('intelligence.cipher.unparsed')}</>
   }
-  if (row.refresh_degraded_cipher_len > 0) {
-    return `${row.refresh_degraded_cipher_len} / ${row.refresh_expected_cipher_len}`
-  }
-  return '—'
+  return <>—</>
 }
 
 function formatDuration(seconds: number): string {

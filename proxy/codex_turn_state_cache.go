@@ -171,9 +171,10 @@ func ensureCodexTurnStateReady(ctx context.Context, account *auth.Account, body 
 		}
 		return ctx, codexTurnStateModelUnavailableError(errCodexTurnStateModelUnavailable)
 	}
+	// 冷却由 runRefresh 在一轮结束时挂一次；这里绝不能再挂——同一轮可能有几十个
+	// 请求在等同一个 waiter，各挂一次会把退避档位从 1 直接推到几十（实测 17）。
 	value, err := cache.refresh(ctx, account, model)
 	if err != nil {
-		cache.coolDownModel(account, model, err)
 		return ctx, codexTurnStateModelUnavailableError(err)
 	}
 	return withExpectedCodexTurnState(ctx, account, model, value), nil
@@ -197,12 +198,8 @@ func RefreshCodexTurnStateNow(ctx context.Context, account *auth.Account, model 
 		return "", fmt.Errorf("缺少账号或模型")
 	}
 	cache.invalidate(account, model)
-	value, err := cache.refresh(ctx, account, model)
-	if err != nil {
-		cache.coolDownModel(account, model, err)
-		return "", err
-	}
-	return value, nil
+	// 失败时的冷却由 runRefresh 统一挂，手动刷新也不例外。
+	return cache.refresh(ctx, account, model)
 }
 
 // ClearCodexTurnStateCooldown 解除本模块给一格挂的冷却。
@@ -233,11 +230,8 @@ func (c *codexTurnStateCache) refreshDetached(account *auth.Account, model strin
 	if inFlight {
 		return
 	}
-	go func() {
-		if _, err := c.refresh(context.Background(), account, model); err != nil {
-			c.coolDownModel(account, model, err)
-		}
-	}()
+	// 失败时的冷却由 runRefresh 统一挂，这里只负责把刷新踢到后台。
+	go func() { _, _ = c.refresh(context.Background(), account, model) }()
 }
 
 // coolDownModel 把刷不出健康 blob 的 (账号, 模型) 按退避挂起，让调度器暂时跳过这一格。
@@ -451,6 +445,9 @@ func (c *codexTurnStateCache) runRefresh(account *auth.Account, model, key strin
 		lastErr = fmt.Errorf("上游未返回 X-Codex-Turn-State")
 	}
 	waiter.err = fmt.Errorf("刷新 X-Codex-Turn-State 失败: %w", lastErr)
+	// 一轮跑完全灭，这一格挂一次冷却。只在这里挂：runRefresh 每轮只跑一次，
+	// 而等这轮的请求可能有几十个，放到等待者那边会把退避档位乘上并发数。
+	c.coolDownModel(account, model, waiter.err)
 }
 
 func persistAccountCodexTurnStates(ctx context.Context, db *database.DB, account *auth.Account) error {

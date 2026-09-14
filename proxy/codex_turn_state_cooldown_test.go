@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -64,6 +65,63 @@ func TestTurnStateRefreshFailureCoolsDownOnlyThatModel(t *testing.T) {
 	}
 	if _, ok := cooldownFor(account, "gpt-6-astra"); ok {
 		t.Fatal("a sibling model must not be cooled down by another model's refresh failure")
+	}
+}
+
+// 回归：一轮失败只能挂一次冷却。线上实测同一秒 17 个等待者各挂一次，把退避档位
+// 从 1 直接推到 17、冷却从 60 秒顶到 30 分钟封顶。
+func TestTurnStateOneFailedRoundCoolsDownExactlyOnceRegardlessOfWaiters(t *testing.T) {
+	store := newCooldownTestStore(t)
+	account := &auth.Account{DBID: 107}
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	installTurnStateCache(t, store, database.CodexTurnStateCacheConfig{
+		IPv6ProxyURL:           "socks5://[::1]:1080",
+		Models:                 []string{"gpt-5.6-sol"},
+		TTLMinutes:             43,
+		MaxPingTries:           1,
+		FailureCooldownSeconds: 60,
+	}, func(context.Context, *auth.Account, string, string) (string, error) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+		return "", verifyCodexTurnStatePingIntelligence(fakeCodexTurnStateFernet(208), "team")
+	})
+
+	const waiters = 17
+	var wg sync.WaitGroup
+	body := []byte(`{"model":"gpt-5.6-sol"}`)
+	for i := 0; i < waiters; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := ensureCodexTurnStateReady(context.Background(), account, body); err == nil {
+				t.Error("want failure")
+			}
+		}()
+	}
+	// 第一个请求已经把这轮 ping 拉起来并卡在 release 上；其余请求只要在放行前
+	// 到达就会共享同一个 waiter。给它们一点时间排队，然后放行这唯一的一次 ping。
+	<-entered
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	cooldown, ok := cooldownFor(account, "gpt-5.6-sol")
+	if !ok {
+		t.Fatal("missing cooldown")
+	}
+	if cooldown.BackoffLevel != 0 {
+		t.Fatalf("backoff level = %d after ONE failed round with %d waiters, want 0 (first level)", cooldown.BackoffLevel, waiters)
+	}
+	if remaining := time.Until(cooldown.ResetAt); remaining > 90*time.Second {
+		t.Fatalf("cooldown remaining = %s, want about 60s; waiters must not multiply the backoff", remaining)
+	}
+	stat, _ := CodexTurnStateRefreshStatFor(account.ID(), "gpt-5.6-sol")
+	if stat.TotalAttempts != 1 || stat.ConsecutiveFails != 1 {
+		t.Fatalf("stat = %+v, want exactly one recorded round", stat)
 	}
 }
 

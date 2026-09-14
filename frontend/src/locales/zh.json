@@ -2215,7 +2215,8 @@
       "other": "其它"
     },
     "cipher": {
-      "unparsed": "非法 Fernet"
+      "unparsed": "非法 Fernet",
+      "cachedValue": "缓存 {{len}}（已过期）"
     },
     "lastRound": "{{pings}} 次 / {{seconds}}s",
     "footnote": "数据于 {{time}} 生成，每 20 秒自动刷新。刷新档案只存在进程内存里，重启后从零开始。"

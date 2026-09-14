@@ -2215,7 +2215,8 @@
       "other": "Other"
     },
     "cipher": {
-      "unparsed": "Invalid Fernet"
+      "unparsed": "Invalid Fernet",
+      "cachedValue": "cached {{len}} (expired)"
     },
     "lastRound": "{{pings}} pings / {{seconds}}s",
     "footnote": "Generated at {{time}}, auto-refreshing every 20s. Refresh stats live in process memory only and reset on restart."
