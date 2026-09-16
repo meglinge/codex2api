@@ -12,6 +12,22 @@ const (
 	routingSchedulerSparseRatio  = 4
 )
 
+var routingCacheClock atomic.Int64
+
+func routingCacheNow() int64 {
+	now := time.Now().UnixNano()
+	for {
+		last := routingCacheClock.Load()
+		next := now
+		if next <= last {
+			next = last + 1
+		}
+		if routingCacheClock.CompareAndSwap(last, next) {
+			return next
+		}
+	}
+}
+
 // routingSchedulerEntry wraps a cached per-key scheduler. alias entries point
 // at the shared global scheduler and cost nothing to rebuild, so they use a
 // separate, larger key budget.
@@ -44,7 +60,7 @@ func (s *Store) routingFastScheduler(apiKeyID int64) *FastScheduler {
 	entry, ok := s.routingSchedulers[apiKeyID]
 	s.routingSchedulersMu.RUnlock()
 	if ok {
-		entry.lastHitNS.Store(time.Now().UnixNano())
+		entry.lastHitNS.Store(routingCacheNow())
 		if s.schedulerMetrics != nil {
 			s.schedulerMetrics.routingCacheHits.Add(1)
 		}
@@ -112,7 +128,7 @@ func (s *Store) publishRoutingScheduler(apiKeyID int64, scheduler *FastScheduler
 	}
 	s.ensureRoutingSchedulerCapacityLocked(accounts, alias)
 	entry := &routingSchedulerEntry{scheduler: scheduler, accounts: accounts, alias: alias}
-	entry.lastHitNS.Store(time.Now().UnixNano())
+	entry.lastHitNS.Store(routingCacheNow())
 	s.routingSchedulers[apiKeyID] = entry
 	s.routingSchedulerAccounts += accounts
 	if alias {

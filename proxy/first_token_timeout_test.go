@@ -98,9 +98,12 @@ func TestNormalizeRuntimeSettingsFirstTokenMode(t *testing.T) {
 		t.Fatalf("FirstTokenMode = %q, want loose", settings.FirstTokenMode)
 	}
 
-	settings = NormalizeRuntimeSettings(RuntimeSettings{FirstTokenMode: "invalid"})
-	if settings.FirstTokenMode != FirstTokenModeStrict {
-		t.Fatalf("invalid FirstTokenMode = %q, want strict", settings.FirstTokenMode)
+	// 严格首字开关已取消：strict / 非法值 / 空值都归一化为 loose。
+	for _, mode := range []string{"strict", "invalid", ""} {
+		settings = NormalizeRuntimeSettings(RuntimeSettings{FirstTokenMode: mode})
+		if settings.FirstTokenMode != FirstTokenModeLoose {
+			t.Fatalf("FirstTokenMode %q normalized to %q, want loose", mode, settings.FirstTokenMode)
+		}
 	}
 }
 

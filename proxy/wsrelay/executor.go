@@ -137,10 +137,10 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		return nil, fmt.Errorf("构建 WebSocket URL 失败: %w", err)
 	}
 
-	// Resin 反向代理：改写 WS URL 为 Resin 反代地址
-	if proxy.IsResinEnabled() {
-		wsURL = proxy.BuildWebSocketURL(wsURL)
-	}
+	// 出口链路统一由 ResolveCodexWebsocketEgress 决定(Resin > 代理 > 直连):
+	// Resin 模式下 WS 地址改写为反代路径,拨号侧(createConnection)同样按它跳过代理。
+	egress := proxy.ResolveCodexWebsocketEgress(account, wsURL, effectiveProxyURL(account, proxyOverride))
+	wsURL = egress.URL
 
 	// 准备请求头
 	headers := e.prepareWebsocketHeaders(accessToken, account, accountIDStr, headerSessionID, apiKey, deviceCfg, ginHeaders, wsBody)
@@ -150,10 +150,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	proxy.RecordUpstreamUserAgent(ctx, headers.Get("User-Agent"))
 	proxy.RecordOutboundCodexTurnState(ctx, headers.Get("X-Codex-Turn-State"))
 
-	// Resin 反代：注入账号身份头
-	if proxy.IsResinEnabled() {
-		headers.Set("X-Resin-Account", proxy.ResinAccountID(account))
-	}
+	egress.ApplyHeaders(headers)
 
 	// 获取或创建连接。无显式会话的请求（stateless 连接 ID）在确定性 cache key
 	// 的槽位池内复用连接，避免持续高 RPM 下逐请求握手触发上游限流。
@@ -173,7 +170,9 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	// 续链亲和：上游无服务端存储时，previous_response_id 的上下文只存活在产出
 	// 该响应的那条 WS 连接里。带续链 ID 的请求优先取回原连接（独占成功才用），
 	// 否则落到随机槽位会触发上游 "previous response not found"。
-	poolSessionID := proxy.ResolveCodexWebsocketTransportSessionKey(sessionID, ginHeaders)
+	// 同线程上的后台副请求（request_kind=memory、guardian 子代理）另成一道，
+	// 不与用户在飞轮次同键排队；Desktop 走 HTTP 时元数据只在请求体里。
+	poolSessionID := proxy.ResolveCodexWebsocketTransportSessionKeyWithBody(sessionID, ginHeaders, wsBody)
 	var wc *WsConnection
 	var pr *PendingRequest
 	var err2 error

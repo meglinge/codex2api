@@ -1,6 +1,7 @@
 @import "tailwindcss";
 @import "./website-theme-colors.css";
 @import "./website-theme-ui.css";
+@import "./glass-theme.css";
 
 @custom-variant dark (&:is(.dark *));
 

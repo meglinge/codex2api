@@ -86,13 +86,9 @@ func isFirstTokenResult(parsed gjson.Result) bool {
 	return isFirstTokenEvent(eventType)
 }
 
-func isFirstTokenResultForMode(parsed gjson.Result, mode string) bool {
-	if NormalizeFirstTokenMode(mode) != FirstTokenModeLoose {
-		return isFirstTokenResult(parsed)
-	}
-	return isLooseFirstTokenResult(parsed)
-}
-
+// isLooseFirstTokenResult 是首字统计的唯一口径（宽松首字）：response.created /
+// in_progress 之外的首个非终态响应事件即记为首字，结构帧也算。严格判定
+// isFirstTokenResult 仍用于断流重试的 contentTokenSeen 等内容感知逻辑。
 func isLooseFirstTokenResult(parsed gjson.Result) bool {
 	eventType := strings.TrimSpace(parsed.Get("type").String())
 	if eventType == "" || isPreContentLifecycleEvent(eventType) {

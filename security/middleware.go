@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -58,6 +59,10 @@ func RateLimitMiddleware(requests int, window time.Duration) gin.HandlerFunc {
 // RequestSizeLimiter limits request body size. 管理端账号导入端点(multipart
 // 文件上传)单独放宽到 MaxImportBodySize,其余端点用传入的 maxSize。
 func RequestSizeLimiter(maxSize int64) gin.HandlerFunc {
+	return requestSizeLimiterWithMemory(maxSize, processRequestMemory)
+}
+
+func requestSizeLimiterWithMemory(maxSize int64, budget *requestMemoryBudget) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 导入端点(multipart 文件上传)走流式限制:用 MaxBytesReader 包裹 body 交给
 		// handler,不整体 ReadAll、不缓存 raw_body。避免 200MB 文件在中间件里常驻
@@ -69,10 +74,28 @@ func RequestSizeLimiter(maxSize int64) gin.HandlerFunc {
 			return
 		}
 		limit := maxSize
+		if c.Request.ContentLength > limit {
+			c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"error": gin.H{
+				"message": "请求体过大", "type": "invalid_request_error", "code": "request_too_large",
+			}})
+			return
+		}
+		prepaid := max(c.Request.ContentLength, 0)
+		reservation, admitted := budget.acquire(prepaid)
+		if !admitted {
+			rejectRequestMemory(c)
+			return
+		}
+		defer reservation.Release()
+		c.Set(requestMemoryContextKey, reservation)
 		// Read the request body once, enforce the configured size limit, and cache it
 		// for downstream handlers that need raw JSON without re-reading c.Request.Body.
-		body, err := io.ReadAll(io.LimitReader(c.Request.Body, limit+1))
+		body, err := readRequestMemoryBounded(c.Request.Body, limit, reservation, prepaid)
 		if err != nil {
+			if errors.Is(err, ErrRequestMemoryBudget) {
+				rejectRequestMemory(c)
+				return
+			}
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error": gin.H{
 					"message": "读取请求体失败",

@@ -9,6 +9,7 @@ services:
     environment:
       CODEX_PORT: "2004"
       CODEX_BIND: "0.0.0.0"
+      CODEX_REQUEST_MEMORY_BUDGET_MB: "${CODEX_REQUEST_MEMORY_BUDGET_MB:-}"
       ADMIN_SECRET: "123456"
       CODEX_UPSTREAM_TRANSPORT: "http"
       CODEX_TRANSPORT_MODE: "standard"

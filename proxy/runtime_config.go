@@ -20,6 +20,8 @@ const (
 	StreamFlushPolicyImmediate = "immediate"
 	StreamFlushPolicyCoalesce  = "coalesce"
 
+	// FirstTokenModeStrict 已退役：首字统计统一按宽松口径(loose)记录，
+	// 常量仅保留给旧配置/旧库值的兼容归一化。
 	FirstTokenModeStrict = "strict"
 	FirstTokenModeLoose  = "loose"
 
@@ -40,7 +42,7 @@ const (
 	defaultStreamFlushIntervalMS = 20
 	minStreamFlushIntervalMS     = 1
 	maxStreamFlushIntervalMS     = 1000
-	defaultFirstTokenMode        = FirstTokenModeStrict
+	defaultFirstTokenMode        = FirstTokenModeLoose
 	defaultFirstTokenTimeoutSec  = 0
 	maxFirstTokenTimeoutSec      = 600
 	defaultBillingTierPolicy     = BillingTierPolicyActual
@@ -245,15 +247,10 @@ func NormalizeStreamFlushPolicy(policy string) string {
 	}
 }
 
-func NormalizeFirstTokenMode(mode string) string {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "", FirstTokenModeStrict:
-		return FirstTokenModeStrict
-	case FirstTokenModeLoose:
-		return FirstTokenModeLoose
-	default:
-		return FirstTokenModeStrict
-	}
+// NormalizeFirstTokenMode 统一返回宽松口径：严格首字开关已取消，旧库/旧请求里
+// 残留的 strict 或任意非法值都按 loose 生效。
+func NormalizeFirstTokenMode(_ string) string {
+	return FirstTokenModeLoose
 }
 
 func NormalizeBillingTierPolicy(policy string) string {
@@ -450,9 +447,6 @@ func currentFirstTokenTimeout() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-func currentFirstTokenMode() string {
-	return CurrentRuntimeSettings().FirstTokenMode
-}
 
 // codexContinueThinkingSettings 返回续想折叠开关与最大轮数（一次快照读取）。
 func codexContinueThinkingSettings() (bool, int) {

@@ -2,8 +2,11 @@ package auth
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/codex2api/database"
 )
 
 // plus5hExhausted 构造一个 5h 窗口已打满的 plus 账号：没有积分时它就是 rate_limited。
@@ -71,9 +74,13 @@ func TestUsingCreditsSuppressesRateLimitWhenBalancePositive(t *testing.T) {
 	}
 }
 
-// 积分归零后必须恢复成真实限流——否则调度会一直把请求送进注定 429 的账号。
-func TestUsingCreditsFallsBackToRateLimitedWhenBalanceZero(t *testing.T) {
-	acc := withCredits(plus5hExhausted(), "0.0000000000", true, false, false)
+func stringPtr(s string) *string {
+	return &s
+}
+
+// 积分耗尽（has_credits=false）后必须恢复成真实限流——否则调度会一直把请求送进注定 429 的账号。
+func TestUsingCreditsFallsBackToRateLimitedWhenCreditsExhausted(t *testing.T) {
+	acc := withCredits(plus5hExhausted(), "0.0000000000", false, false, false)
 
 	if !acc.IsPremium5hRateLimited() {
 		t.Error("IsPremium5hRateLimited() = false, want true once credits are gone")
@@ -83,6 +90,55 @@ func TestUsingCreditsFallsBackToRateLimitedWhenBalanceZero(t *testing.T) {
 	}
 	if acc.UsingCredits() {
 		t.Error("UsingCredits() = true, want false once credits are gone")
+	}
+}
+
+// Team 会员：has_credits=true 但 balance 为空（隐藏）时，积分正常生效顶替限流。(issue #662)
+func TestUsingCreditsAllowsTeamHiddenBalanceWhenHasCredits(t *testing.T) {
+	acc := withCredits(plus5hExhausted(), "", true, false, false)
+
+	if acc.IsPremium5hRateLimited() {
+		t.Error("IsPremium5hRateLimited() = true, want false when Team has_credits is true")
+	}
+	if !acc.IsAvailable() {
+		t.Fatal("IsAvailable() = false, want true — Team account with hidden balance should be available")
+	}
+	if !acc.UsingCredits() {
+		t.Fatal("UsingCredits() = false, want true for Team account with has_credits=true")
+	}
+}
+
+// 工作区消费限制达到上限（spend_control.reached=true）时立即停止使用积分。(issue #662)
+func TestUsingCreditsBlockedBySpendControlReached(t *testing.T) {
+	acc := withCredits(plus5hExhausted(), "", true, false, false)
+	reached := true
+	acc.SetCreditBalanceDetails(nil, true, false, false, &reached, "")
+
+	if acc.UsingCredits() {
+		t.Fatal("UsingCredits() = true, want false when spend_control.reached is true")
+	}
+	if acc.IsAvailable() {
+		t.Fatal("IsAvailable() = true, want false when spend_control.reached is true")
+	}
+}
+
+// rate_limit_reached_type 为工作区级 hard-stop 时立即停止使用积分。(issue #662)
+func TestUsingCreditsBlockedByWorkspaceHardStop(t *testing.T) {
+	for _, hardStopType := range []string{
+		"workspace_owner_credits_depleted",
+		"workspace_member_credits_depleted",
+		"workspace_owner_usage_limit_reached",
+		"workspace_member_usage_limit_reached",
+	} {
+		acc := withCredits(plus5hExhausted(), "1000", true, false, false)
+		acc.SetRateLimitReachedType(hardStopType)
+
+		if acc.UsingCredits() {
+			t.Fatalf("UsingCredits() = true for %s, want false", hardStopType)
+		}
+		if acc.IsAvailable() {
+			t.Fatalf("IsAvailable() = true for %s, want false", hardStopType)
+		}
 	}
 }
 
@@ -281,7 +337,7 @@ func TestReleaseUsageWindowCooldownSkipsWhenNoCredits(t *testing.T) {
 
 	acc.CreditEnabled = true
 	acc.CreditSkipUsageWindow = true
-	acc.SetCreditBalance("0", true, false, false)
+	acc.SetCreditBalance("0", false, false, false)
 
 	if store.ReleaseUsageWindowCooldownForCredits(acc) {
 		t.Fatal("released the cooldown with zero credits, want it preserved")
@@ -298,7 +354,7 @@ func TestCleanRateLimitedSkipsAccountsUsingCredits(t *testing.T) {
 
 	covered := withCredits(plus5hExhausted(), "981.7471800000", true, false, false)
 	covered.DBID = 1
-	drained := withCredits(plus5hExhausted(), "0", true, false, false)
+	drained := withCredits(plus5hExhausted(), "0", false, false, false)
 	drained.DBID = 2
 
 	// 前置条件：两者都显示为限流，区别只在积分。
@@ -398,7 +454,7 @@ func TestIgnoreUsageLimitStatusKeepsFreshDispatchRateLimitedWithoutCredits(t *te
 // 积分顶替限流失效，还会被「清理限流账号」当成真限流删掉。
 func TestCreditBalanceSnapshotRoundTrip(t *testing.T) {
 	raw, err := MarshalCreditBalanceSnapshot(CreditBalanceSnapshot{
-		Balance:    "981.7471800000",
+		Balance:    stringPtr("981.7471800000"),
 		HasCredits: true,
 		UpdatedAt:  time.Unix(1754200000, 0),
 	})
@@ -417,16 +473,34 @@ func TestCreditBalanceSnapshotRoundTrip(t *testing.T) {
 	if !acc.RestoreCreditBalanceFromJSON(raw) {
 		t.Fatal("RestoreCreditBalanceFromJSON() = false, want true")
 	}
-	balance, hasCredits, unlimited, overage, ok := acc.GetCreditBalance()
-	if !ok || balance != "981.7471800000" || !hasCredits || unlimited || overage {
-		t.Fatalf("GetCreditBalance() = %q/%t/%t/%t/%t, want 981.7471800000/true/false/false/true",
-			balance, hasCredits, unlimited, overage, ok)
+	credits, ok := acc.GetCreditBalance()
+	if !ok || credits.Balance == nil || *credits.Balance != "981.7471800000" || !credits.HasCredits || credits.Unlimited || credits.OverageLimitReached {
+		t.Fatalf("GetCreditBalance() = %+v/%t, want balance 981.7471800000, has_credits, probed", credits, ok)
 	}
 	if !acc.UsingCredits() {
 		t.Error("UsingCredits() = false after restore, want true — the restored balance must keep the override alive")
 	}
 	if got := acc.RuntimeStatus(); got != "rate_limited" {
 		t.Errorf("RuntimeStatus() = %q, want rate_limited — 状态仍显示限流，只是被积分顶着", got)
+	}
+}
+
+// 兼容旧版本落库的 JSON 快照（balance 字段为纯字符串，无 spend_control 与 rate_limit_reached_type）
+func TestRestoreCreditBalanceFromOldJSONFormat(t *testing.T) {
+	oldJSON := `{"balance":"1234.5000000000","has_credits":true,"unlimited":false,"overage_limit_reached":false,"updated_at":"2026-08-01T12:00:00Z"}`
+	acc := plus5hExhausted()
+	acc.CreditEnabled = true
+	acc.CreditSkipUsageWindow = true
+
+	if !acc.RestoreCreditBalanceFromJSON(oldJSON) {
+		t.Fatal("RestoreCreditBalanceFromJSON(oldJSON) = false, want true")
+	}
+	credits, ok := acc.GetCreditBalance()
+	if !ok || credits.Balance == nil || *credits.Balance != "1234.5000000000" || !credits.HasCredits || credits.Unlimited || credits.OverageLimitReached {
+		t.Fatalf("GetCreditBalance() from old JSON = %+v/%t, want balance 1234.5000000000, has_credits, probed", credits, ok)
+	}
+	if !acc.UsingCredits() {
+		t.Error("UsingCredits() = false after restoring old JSON, want true")
 	}
 }
 
@@ -443,7 +517,7 @@ func TestRestoreCreditBalanceRejectsEmptyOrInvalid(t *testing.T) {
 		if acc.RestoreCreditBalanceFromJSON(raw) {
 			t.Errorf("RestoreCreditBalanceFromJSON(%q) = true, want false", raw)
 		}
-		if _, _, _, _, ok := acc.GetCreditBalance(); ok {
+		if _, ok := acc.GetCreditBalance(); ok {
 			t.Errorf("RestoreCreditBalanceFromJSON(%q) marked the balance as probed", raw)
 		}
 		if acc.UsingCredits() {
@@ -452,10 +526,10 @@ func TestRestoreCreditBalanceRejectsEmptyOrInvalid(t *testing.T) {
 	}
 }
 
-// 余额为 0 的快照要能恢复：它是「积分已用尽」的权威结论，恢复后应恢复真实限流，
+// 积分用尽且无可用积分的快照要能恢复：它是「积分已用尽」的权威结论，恢复后应恢复真实限流，
 // 而不是退回「未探测」——否则重启后又会把请求送进注定 429 的账号。
 func TestRestoreCreditBalanceKeepsDrainedBalance(t *testing.T) {
-	raw, err := MarshalCreditBalanceSnapshot(CreditBalanceSnapshot{Balance: "0", HasCredits: true})
+	raw, err := MarshalCreditBalanceSnapshot(CreditBalanceSnapshot{Balance: stringPtr("0"), HasCredits: false})
 	if err != nil {
 		t.Fatalf("MarshalCreditBalanceSnapshot: %v", err)
 	}
@@ -466,9 +540,204 @@ func TestRestoreCreditBalanceKeepsDrainedBalance(t *testing.T) {
 		t.Fatal("RestoreCreditBalanceFromJSON() = false, want true for a drained balance")
 	}
 	if acc.UsingCredits() {
-		t.Error("UsingCredits() = true for a zero balance, want false")
+		t.Error("UsingCredits() = true for a zero balance with has_credits=false, want false")
 	}
 	if acc.IsAvailable() {
 		t.Error("IsAvailable() = true for a drained credit account, want false")
+	}
+}
+
+func TestPersistCreditBalance_SuccessAndRollbackOnDBError(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "persist-credit-test.db")
+	db, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("database.New: %v", err)
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = db.Close()
+		}
+	}()
+
+	id, err := db.InsertAccountWithCredentials(ctx, "test-account", map[string]interface{}{
+		"plan_type": "team",
+	}, "")
+	if err != nil {
+		t.Fatalf("InsertAccountWithCredentials: %v", err)
+	}
+
+	store := NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &Account{
+		DBID:        id,
+		AccessToken: "at",
+		PlanType:    "team",
+	}
+
+	bal := "50.00"
+	sc := false
+	store.PersistCreditBalance(account, &bal, true, false, false, &sc, "")
+
+	account.mu.RLock()
+	persistedKey := account.creditsPersistedKey
+	account.mu.RUnlock()
+	if persistedKey == "" {
+		t.Fatal("expected creditsPersistedKey to be set after successful PersistCreditBalance")
+	}
+
+	accRow, err := db.GetAccountByID(ctx, id)
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	codexCreditsRaw := accRow.GetCredential("codex_credits")
+	if codexCreditsRaw == "" {
+		t.Fatal("expected codex_credits credential to be written in DB, got empty")
+	}
+
+	// Close DB to force a database error on subsequent update with different balance
+	_ = db.Close()
+	closed = true
+
+	bal2 := "40.00"
+	store.PersistCreditBalance(account, &bal2, true, false, false, &sc, "")
+
+	account.mu.RLock()
+	rolledBackKey := account.creditsPersistedKey
+	account.mu.RUnlock()
+	if rolledBackKey != "" {
+		t.Fatalf("expected creditsPersistedKey to be cleared after DB write failure, got %q", rolledBackKey)
+	}
+}
+
+func TestPersistSparseCreditObservation_SuccessAndRollbackOnDBError(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "sparse-credit-test.db")
+	db, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("database.New: %v", err)
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = db.Close()
+		}
+	}()
+
+	id, err := db.InsertAccountWithCredentials(ctx, "test-sparse-account", map[string]interface{}{
+		"plan_type": "team",
+	}, "")
+	if err != nil {
+		t.Fatalf("InsertAccountWithCredentials: %v", err)
+	}
+
+	store := NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &Account{
+		DBID:        id,
+		AccessToken: "at",
+		PlanType:    "team",
+	}
+
+	bal := "25.00"
+	ov := false
+	store.PersistSparseCreditObservation(account, true, false, &bal, &ov, "")
+
+	account.mu.RLock()
+	persistedKey := account.creditsPersistedKey
+	account.mu.RUnlock()
+	if persistedKey == "" {
+		t.Fatal("expected creditsPersistedKey to be set after successful PersistSparseCreditObservation")
+	}
+
+	// 只有余额变化不落库（余额逐请求递减，留给 wham 探针刷新）。
+	bal2 := "10.00"
+	store.PersistSparseCreditObservation(account, true, false, &bal2, &ov, "")
+	account.mu.RLock()
+	keyAfterBalanceOnly := account.creditsPersistedKey
+	account.mu.RUnlock()
+	if keyAfterBalanceOnly != persistedKey {
+		t.Fatalf("balance-only sparse observation rewrote the snapshot: %q -> %q", persistedKey, keyAfterBalanceOnly)
+	}
+
+	// Close DB to force an error on the next flag change
+	_ = db.Close()
+	closed = true
+
+	ovReached := true
+	store.PersistSparseCreditObservation(account, true, false, &bal2, &ovReached, "")
+
+	account.mu.RLock()
+	rolledBackKey := account.creditsPersistedKey
+	account.mu.RUnlock()
+	if rolledBackKey != "" {
+		t.Fatalf("expected creditsPersistedKey to be cleared after DB write failure, got %q", rolledBackKey)
+	}
+}
+
+// 余额已知且为 0 时即使 has_credits=true 也不放行：刚花掉最后一分积分的那次响应。
+func TestUsingCreditsBlockedWhenKnownBalanceZero(t *testing.T) {
+	for _, balance := range []string{"0", "0.00", "0.0000000000"} {
+		acc := withCredits(plus5hExhausted(), balance, true, false, false)
+		acc.CreditsBalanceKnown = true
+		if acc.UsingCredits() {
+			t.Fatalf("UsingCredits() = true for known balance %q, want false", balance)
+		}
+		if acc.IsAvailable() {
+			t.Fatalf("IsAvailable() = true for known balance %q, want false", balance)
+		}
+	}
+	// unlimited 不看余额。
+	acc := withCredits(plus5hExhausted(), "0", true, true, false)
+	acc.CreditsBalanceKnown = true
+	if !acc.UsingCredits() {
+		t.Fatal("UsingCredits() = false for unlimited credits, want true")
+	}
+}
+
+// 旧版快照把隐藏余额写成 ""：恢复后必须当「未知」而不是「0」，否则 Team 账号升级后先被判无积分。
+func TestRestoreCreditBalanceLegacyEmptyBalanceMeansUnknown(t *testing.T) {
+	acc := plus5hExhausted()
+	acc.CreditEnabled = true
+	acc.CreditSkipUsageWindow = true
+	if !acc.RestoreCreditBalanceFromJSON(`{"balance":"","has_credits":true,"unlimited":false,"overage_limit_reached":false,"updated_at":"2026-08-01T12:00:00Z"}`) {
+		t.Fatal("RestoreCreditBalanceFromJSON() = false, want true")
+	}
+	credits, ok := acc.GetCreditBalance()
+	if !ok || credits.Balance != nil {
+		t.Fatalf("restored credits = %+v/%t, want hidden balance (nil) and probed", credits, ok)
+	}
+	if !acc.UsingCredits() {
+		t.Fatal("UsingCredits() = false after restoring legacy hidden balance, want true")
+	}
+}
+
+// wham 全量快照缺 spend_control / rate_limit_reached_type 时要把旧的 hard-stop 清掉。
+func TestSetCreditBalanceDetailsClearsStaleWorkspaceHardStop(t *testing.T) {
+	acc := withCredits(plus5hExhausted(), "", true, false, false)
+	reached := true
+	acc.SetCreditBalanceDetails(nil, true, false, false, &reached, "workspace_member_credits_depleted")
+	if acc.UsingCredits() {
+		t.Fatal("UsingCredits() = true under hard stop, want false")
+	}
+	acc.SetCreditBalanceDetails(nil, true, false, false, nil, "")
+	if !acc.UsingCredits() {
+		t.Fatal("UsingCredits() = false after wham snapshot without hard stop, want true")
+	}
+	credits, _ := acc.GetCreditBalance()
+	if credits.SpendControlReached != nil || credits.RateLimitReachedType != "" {
+		t.Fatalf("stale hard stop survived wham snapshot: %+v", credits)
+	}
+}
+
+// 响应头缺 rate_limit_reached_type 即「未触达」：sparse 观测必须把旧标记清掉。
+func TestApplySparseCreditsHeadersClearsReachedType(t *testing.T) {
+	acc := withCredits(plus5hExhausted(), "", true, false, false)
+	acc.SetRateLimitReachedType("workspace_owner_credits_depleted")
+	if acc.UsingCredits() {
+		t.Fatal("UsingCredits() = true under hard stop, want false")
+	}
+	acc.ApplySparseCreditsHeaders(true, false, nil, nil, "")
+	if !acc.UsingCredits() {
+		t.Fatal("UsingCredits() = false after response without reached-type, want true")
 	}
 }

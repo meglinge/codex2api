@@ -3,6 +3,7 @@ import { Check, CheckCheck, Globe, Monitor, Moon, Palette, RotateCcw, Search, Sl
 import { useTranslation } from 'react-i18next'
 import PageHeader from '../components/PageHeader'
 import { Button } from '@/components/ui/button'
+import { CinematicThemeSwitcher } from '@/components/ui/cinematic-theme-switcher'
 import { AppearanceThumbnail, ThemeLivePreview, ThemeThumbnail } from '../components/theme/ThemePreview'
 import {
   COLOR_THEMES,
@@ -142,6 +143,9 @@ export default function ThemeSettings() {
           <div className="appearance-mode-heading">
             <h3 id="appearance-mode-label">{t('themeSettings.modeTitle')}</h3>
             <span>{t('themeSettings.modeHint')}</span>
+          </div>
+          <div className="appearance-mode-switcher">
+            <CinematicThemeSwitcher />
           </div>
           <div className="appearance-modes" role="group" aria-labelledby="appearance-mode-label">
             {MODE_OPTIONS.map(({ id, icon: Icon, labelKey }) => (

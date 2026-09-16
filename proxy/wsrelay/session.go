@@ -218,6 +218,10 @@ func (s *Session) RemovePendingRequest(requestID string) {
 	if v, ok := s.pending.LoadAndDelete(requestID); ok {
 		pr := v.(*PendingRequest)
 		pr.Close()
+		// 在途请求结束：唤醒等在这条连接上的同会话 acquire，不必等退避到期。
+		if s.manager != nil {
+			s.manager.notifyAccountWaiters(s.AccountID)
+		}
 	}
 }
 

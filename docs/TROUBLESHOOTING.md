@@ -438,7 +438,7 @@ docker stats codex2api --no-stream
 # 对照进程 RSS、Go heap/GC 和 response-context 逻辑字节
 curl -s -H "X-Admin-Key: your-secret" \
   http://localhost:8080/api/admin/ops/overview |
-  jq '{memory: .memory, response_cache: .response_cache}'
+  jq '{memory: .memory, request_memory: .request_memory, response_cache: .response_cache, response_cache_writer: .response_cache_writer}'
 
 # 查看 Go 内存分析（如启用 pprof）
 curl http://localhost:8080/debug/pprof/heap > heap.prof
@@ -449,8 +449,9 @@ curl http://localhost:8080/debug/pprof/heap > heap.prof
 **优化:**
 
 1. 限制日志保留时间
-2. 如果 L1 逻辑占用和高水位持续接近上限，可在设置页降低 `response_cache_local_max_bytes`；降低后会立即淘汰超出新预算的条目，并可能增加 Memory 模式的 409
-3. 减少并发连接数
+2. 同时对照 L1 的 `current_bytes` 与 `shared_payload_bytes`。多个快照可共享正文，降低逻辑预算可能主要减少可回放的历史响应，并可能增加 Memory 模式的 409，不一定同比降低 RSS。
+3. 检查 `request_memory` 和 `response_cache_writer` 的在途字节、等待数与拒绝数。`CODEX_REQUEST_MEMORY_BUDGET_MB` 控制进程内正文准入；它不包含所有输出、JSON 工作副本或 Go 堆开销。调低会更早返回可重试的 503/1013，调高须结合实际可用内存。
+4. 区分每次累计分配和请求结束后的存活堆。合并流刷新主要降低 flush 频率，不能替代正文生命周期管理；慢 Redis 和慢客户端也可能放大在途内存。
 
 ---
 

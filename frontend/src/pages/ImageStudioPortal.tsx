@@ -24,12 +24,10 @@ import {
   Loader2,
   LogIn,
   LogOut,
-  Moon,
   Pencil,
   RefreshCw,
   ShieldCheck,
   Sparkles,
-  Sun,
   Trash2,
   Upload,
   X,
@@ -37,10 +35,10 @@ import {
 import { api } from '../api'
 import { DEFAULT_SITE_LOGO, useBranding } from '../branding'
 import Pagination from '../components/Pagination'
-import { useTheme } from '../hooks/useTheme'
 import type { CreateImageJobPayload, ImageAsset, ImageGenerationJob, ImageStudioQuota } from '../types'
 import { getErrorMessage } from '../utils/error'
 import { formatBeijingTime } from '../utils/time'
+import { CinematicThemeSwitcher } from '@/components/ui/cinematic-theme-switcher'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -224,7 +222,6 @@ function PortalTabs({ activeView, className }: { activeView: PortalView; classNa
 export default function ImageStudioPortal() {
   const { t, i18n } = useTranslation()
   const { siteName, siteLogo } = useBranding()
-  const { theme, toggle } = useTheme()
   const { view } = useParams()
   const navigate = useNavigate()
   const activeView = normalizeView(view)
@@ -825,14 +822,7 @@ export default function ImageStudioPortal() {
       >
         <Languages className="size-4" />
       </Button>
-      <Button
-        variant="outline"
-        size="icon-sm"
-        onClick={toggle}
-        title={theme === 'dark' ? t('common.switchToLight') : t('common.switchToDark')}
-      >
-        {theme === 'dark' ? <Sun className="size-4" /> : <Moon className="size-4" />}
-      </Button>
+      <CinematicThemeSwitcher size="compact" />
     </div>
   )
 

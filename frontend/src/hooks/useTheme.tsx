@@ -6,7 +6,7 @@ export type Theme = 'light' | 'dark'
 /** User preference: fixed light/dark, or follow OS. */
 export type ThemeMode = 'light' | 'dark' | 'system'
 
-export type WebsiteThemeStyle = 'github' | 'vercel' | 'google' | 'apple' | 'notion' | 'stripe' | 'spotify' | 'slack'
+export type WebsiteThemeStyle = 'github' | 'vercel' | 'google' | 'apple' | 'notion' | 'stripe' | 'spotify' | 'slack' | 'glass'
 
 export type ColorTheme =
   | WebsiteThemeStyle
@@ -98,6 +98,28 @@ export const COLOR_THEMES: ColorThemeDef[] = [
       bg: 'hsl(222 16% 14%)',
       surface: 'hsl(222 14% 17%)',
       muted: 'hsl(222 11% 24%)',
+    },
+  }),
+  def({
+    id: 'glass',
+    nameKey: 'common.theme.glass',
+    descriptionKey: 'themeSettings.themeDesc.glass',
+    group: 'light',
+    recommended: true,
+    uiStyle: 'glass',
+    previewLight: {
+      primary: 'hsl(32 92% 48%)',
+      bg: 'hsl(210 33% 96%)',
+      surface: 'hsl(0 0% 100%)',
+      muted: 'hsl(214 22% 90%)',
+      sidebar: 'hsl(210 40% 98%)',
+    },
+    previewDark: {
+      primary: 'hsl(43 96% 76%)',
+      bg: 'hsl(222 47% 6%)',
+      surface: 'hsl(217 33% 14%)',
+      muted: 'hsl(215 19% 27%)',
+      sidebar: 'hsl(222 41% 8%)',
     },
   }),
   def({

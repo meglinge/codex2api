@@ -1416,3 +1416,147 @@ func TestPickSparkWhamWindow_ParsesCamelCaseAdditionalLimits(t *testing.T) {
 		t.Fatalf("window seconds = %d, want 18000", window.LimitWindowSeconds)
 	}
 }
+
+func TestQueryWhamUsage_ParsesTeamMemberNullBalanceCredits(t *testing.T) {
+	body := `{
+		"user_id": "user-team",
+		"account_id": "acc-team",
+		"email": "team@example.com",
+		"plan_type": "team",
+		"credits": {
+			"has_credits": true,
+			"unlimited": false,
+			"overage_limit_reached": false,
+			"balance": null
+		},
+		"spend_control": {"reached": false, "individual_limit": null},
+		"rate_limit_reached_type": null
+	}`
+
+	var usage WhamUsage
+	if err := json.Unmarshal([]byte(body), &usage); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v", err)
+	}
+
+	if usage.Credits == nil {
+		t.Fatal("usage.Credits is nil, want non-nil")
+	}
+	if !usage.Credits.HasCredits {
+		t.Fatal("usage.Credits.HasCredits = false, want true")
+	}
+	if usage.Credits.Balance != nil {
+		t.Fatalf("usage.Credits.Balance = %v, want nil", *usage.Credits.Balance)
+	}
+
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("database.New: %v", err)
+	}
+	defer db.Close()
+
+	id, err := db.InsertAccountWithCredentials(ctx, "team-acc", map[string]interface{}{"plan_type": "team"}, "")
+	if err != nil {
+		t.Fatalf("InsertAccountWithCredentials: %v", err)
+	}
+
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{
+		DBID:                  id,
+		AccessToken:           "at",
+		PlanType:              "team",
+		CreditEnabled:         true,
+		CreditSkipUsageWindow: true,
+	}
+
+	ApplyWhamUsage(store, account, &usage)
+
+	credits, ok := account.GetCreditBalance()
+	if !ok || !credits.HasCredits || credits.Balance != nil || credits.Unlimited || credits.OverageLimitReached ||
+		(credits.SpendControlReached != nil && *credits.SpendControlReached) || credits.RateLimitReachedType != "" {
+		t.Fatalf("unexpected credit state: %+v, ok=%t", credits, ok)
+	}
+
+	// Should bypass 7d / 5h limits because has_credits is true and no hard stop
+	account.SetUsagePercent7d(100)
+	if !account.SkipsUsageWindowLimits() {
+		t.Fatal("SkipsUsageWindowLimits() = false, want true for team account with has_credits=true")
+	}
+	if !account.IsAvailable() {
+		t.Fatal("IsAvailable() = false, want true for team account with has_credits=true")
+	}
+}
+
+func TestApplyWhamUsage_WorkspaceHardStopPreventsCreditBypass(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("database.New: %v", err)
+	}
+	defer db.Close()
+
+	id, err := db.InsertAccountWithCredentials(ctx, "team-acc-stop", map[string]interface{}{"plan_type": "team"}, "")
+	if err != nil {
+		t.Fatalf("InsertAccountWithCredentials: %v", err)
+	}
+
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{
+		DBID:                  id,
+		AccessToken:           "at",
+		PlanType:              "team",
+		CreditEnabled:         true,
+		CreditSkipUsageWindow: true,
+	}
+
+	body := `{
+		"user_id": "user-team",
+		"account_id": "acc-team",
+		"plan_type": "team",
+		"credits": {
+			"has_credits": true,
+			"unlimited": false,
+			"overage_limit_reached": false,
+			"balance": null
+		},
+		"spend_control": {"reached": false},
+		"rate_limit_reached_type": {"type": "workspace_member_credits_depleted"}
+	}`
+	var usage WhamUsage
+	if err := json.Unmarshal([]byte(body), &usage); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v", err)
+	}
+
+	ApplyWhamUsage(store, account, &usage)
+
+	account.SetUsagePercent7d(100)
+	if account.SkipsUsageWindowLimits() {
+		t.Fatal("SkipsUsageWindowLimits() = true, want false due to workspace_member_credits_depleted")
+	}
+
+	// Test spend_control.reached = true
+	bodySC := `{
+		"user_id": "user-team",
+		"account_id": "acc-team",
+		"plan_type": "team",
+		"credits": {
+			"has_credits": true,
+			"unlimited": false,
+			"overage_limit_reached": false,
+			"balance": null
+		},
+		"spend_control": {"reached": true}
+	}`
+	var usageSC WhamUsage
+	if err := json.Unmarshal([]byte(bodySC), &usageSC); err != nil {
+		t.Fatalf("json.Unmarshal returned error: %v", err)
+	}
+
+	ApplyWhamUsage(store, account, &usageSC)
+
+	if account.SkipsUsageWindowLimits() {
+		t.Fatal("SkipsUsageWindowLimits() = true, want false due to spend_control.reached=true")
+	}
+}

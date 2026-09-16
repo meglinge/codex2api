@@ -2641,6 +2641,30 @@ func TestPrepareResponsesBody_DefaultsNullMessageContent(t *testing.T) {
 	}
 }
 
+func TestPrepareResponsesBody_StripsInputItemInternalMetadata(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.5",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"keep internal_chat_message_metadata_passthrough in text"}],"internal_chat_message_metadata_passthrough":{"turn_id":"t1"}},
+			{"type":"function_call","call_id":"call_1","name":"run","arguments":"{\"internal_chat_message_metadata_passthrough\":1}","internal_chat_message_metadata_passthrough":{"turn_id":"t1"}}
+		]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+
+	for i := 0; i < 2; i++ {
+		if meta := gjson.GetBytes(got, fmt.Sprintf("input.%d.internal_chat_message_metadata_passthrough", i)); meta.Exists() {
+			t.Fatalf("input[%d].internal_chat_message_metadata_passthrough should be stripped, got %s; body=%s", i, meta.Raw, got)
+		}
+	}
+	if text := gjson.GetBytes(got, "input.0.content.0.text").String(); !strings.Contains(text, "internal_chat_message_metadata_passthrough") {
+		t.Fatalf("same-named user content must survive, got %q", text)
+	}
+	if args := gjson.GetBytes(got, "input.1.arguments").String(); !strings.Contains(args, "internal_chat_message_metadata_passthrough") {
+		t.Fatalf("function_call arguments must not be touched, got %q", args)
+	}
+}
+
 func TestPrepareResponsesBody_StripsInputItemIDsForStoreFalse(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-5.4",

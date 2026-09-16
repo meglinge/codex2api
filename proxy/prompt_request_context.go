@@ -57,6 +57,18 @@ func resetPromptRequestSecurityFrame(c *gin.Context) {
 	}
 }
 
+// releasePromptRequestFrameBody drops turn-local payload references before a
+// WebSocket waits for its next message. Connection identity and API-key binding
+// remain available across turns; request bodies and body digests must not.
+func releasePromptRequestFrameBody(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	c.Set("raw_body", nil)
+	c.Set(ingressRequestBodyContextKey, nil)
+	c.Set(promptRequestSecurityContextKey, nil)
+}
+
 func (h *Handler) promptFilterConfigForRequest(c *gin.Context) promptfilter.Config {
 	if h == nil || h.store == nil {
 		return promptfilter.DefaultConfig()

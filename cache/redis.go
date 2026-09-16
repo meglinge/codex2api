@@ -168,6 +168,9 @@ func buildRedisClientOptions(cfg RedisOptions) (*redis.Options, error) {
 	} else if cfg.InsecureSkipVerify && opts.TLSConfig != nil {
 		opts.TLSConfig.InsecureSkipVerify = true
 	}
+	// Honor callers' cache, authentication and lease deadlines during socket
+	// I/O as well as pool waits. Otherwise go-redis uses Background for I/O.
+	opts.ContextTimeoutEnabled = true
 	return opts, nil
 }
 
@@ -500,6 +503,13 @@ func (tc *redisTokenCache) SetResponseContext(ctx context.Context, responseID st
 		return err
 	}
 	return tc.client.Set(ctx, responseContextKey(responseID), payload, ttl).Err()
+}
+
+// SetResponseContextReadOnly accepts immutable cache-owned item bodies. Neither
+// normalization nor encoding modifies them, avoiding a full historical clone
+// at the proxy's asynchronous handoff while preserving the normal wire format.
+func (tc *redisTokenCache) SetResponseContextReadOnly(ctx context.Context, responseID string, items []json.RawMessage, ttl time.Duration) error {
+	return tc.SetResponseContext(ctx, responseID, items, ttl)
 }
 
 func (tc *redisTokenCache) GetResponseContext(ctx context.Context, responseID string) ([]json.RawMessage, error) {

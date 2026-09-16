@@ -838,27 +838,25 @@ func normalizeImageIntentText(text string) string {
 	if text == "" {
 		return ""
 	}
-	replacer := strings.NewReplacer(
-		"\r", " ",
-		"\n", " ",
-		"\t", " ",
-		"，", " ",
-		"。", " ",
-		"！", " ",
-		"？", " ",
-		"；", " ",
-		"：", " ",
-		",", " ",
-		".", " ",
-		"!", " ",
-		"?", " ",
-		";", " ",
-		":", " ",
-		"\"", " ",
-		"'", " ",
-		"`", " ",
-	)
-	return strings.Join(strings.Fields(replacer.Replace(text)), " ")
+	previousSpace := false
+	for _, r := range text {
+		if isImageIntentPunctuation(r) || (unicode.IsSpace(r) && (r != ' ' || previousSpace)) {
+			return strings.Join(strings.FieldsFunc(text, func(r rune) bool {
+				return unicode.IsSpace(r) || isImageIntentPunctuation(r)
+			}), " ")
+		}
+		previousSpace = r == ' '
+	}
+	return text
+}
+
+func isImageIntentPunctuation(r rune) bool {
+	switch r {
+	case '，', '。', '！', '？', '；', '：', ',', '.', '!', '?', ';', ':', '"', '\'', '`':
+		return true
+	default:
+		return false
+	}
 }
 
 func containsAnyPhrase(text string, phrases []string) bool {
@@ -1074,43 +1072,9 @@ func stripResponsesImageGenerationCapabilities(body []byte) []byte {
 		}
 	}
 
-	// 2. Responses Lite: input[].additional_tools.tools[]
-	if input := gjson.GetBytes(body, "input"); input.Exists() && input.IsArray() {
-		items := input.Array()
-		keptItems := make([]interface{}, 0, len(items))
-		mutated := false
-		for _, item := range items {
-			if strings.TrimSpace(item.Get("type").String()) != "additional_tools" {
-				keptItems = append(keptItems, item.Value())
-				continue
-			}
-			nested := item.Get("tools")
-			if !nested.Exists() || !nested.IsArray() {
-				keptItems = append(keptItems, item.Value())
-				continue
-			}
-			keptTools, removed := stripImageGenerationToolsFromArray(nested.Array())
-			if !removed {
-				keptItems = append(keptItems, item.Value())
-				continue
-			}
-			mutated = true
-			if len(keptTools) == 0 {
-				// 载体工具全被剥离：移除整个 additional_tools 项。
-				continue
-			}
-			rebuilt, _ := sjson.SetBytes([]byte(item.Raw), "tools", keptTools)
-			var rebuiltVal interface{}
-			if err := json.Unmarshal(rebuilt, &rebuiltVal); err == nil {
-				keptItems = append(keptItems, rebuiltVal)
-			} else {
-				keptItems = append(keptItems, item.Value())
-			}
-		}
-		if mutated {
-			body, _ = sjson.SetBytes(body, "input", keptItems)
-		}
-	}
+	// 2. Responses Lite: only inspect matching carriers. Ordinary conversation
+	// items stay opaque, including when a different carrier must be rewritten.
+	body = stripResponsesInputImageTools(body)
 
 	// 3. tool_choice：仅删显式指向图片工具的选择
 	if choice := gjson.GetBytes(body, "tool_choice"); choice.Exists() {
@@ -1140,6 +1104,74 @@ func stripResponsesImageGenerationCapabilities(body []byte) []byte {
 		}
 	}
 	return body
+}
+
+func stripResponsesInputImageTools(body []byte) []byte {
+	// The wildcard admits whitespace around the type, matching the existing
+	// TrimSpace policy, and decodes JSON escapes. It returns only a candidate
+	// carrier rather than copying the entire input just to learn none exists.
+	if !gjson.GetBytes(body, `input.#(type%"*additional_tools*")`).Exists() {
+		return body
+	}
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return body
+	}
+	items := input.Array()
+	var replacements map[int][]byte
+	for index, item := range items {
+		if strings.TrimSpace(item.Get("type").String()) != "additional_tools" {
+			continue
+		}
+		nested := item.Get("tools")
+		if !nested.IsArray() {
+			continue
+		}
+		kept, removed := stripImageGenerationToolsFromArray(nested.Array())
+		if !removed {
+			continue
+		}
+		var replacement []byte
+		if len(kept) > 0 {
+			var err error
+			replacement, err = sjson.SetBytes([]byte(item.Raw), "tools", kept)
+			if err != nil {
+				continue
+			}
+		}
+		if replacements == nil {
+			replacements = make(map[int][]byte)
+		}
+		replacements[index] = replacement
+	}
+	if len(replacements) == 0 {
+		return body
+	}
+	var encoded bytes.Buffer
+	encoded.Grow(len(input.Raw))
+	encoded.WriteByte('[')
+	written := false
+	for index, item := range items {
+		replacement, changed := replacements[index]
+		if changed && replacement == nil {
+			continue
+		}
+		if written {
+			encoded.WriteByte(',')
+		}
+		if changed {
+			encoded.Write(replacement)
+		} else {
+			encoded.WriteString(item.Raw)
+		}
+		written = true
+	}
+	encoded.WriteByte(']')
+	updated, err := sjson.SetRawBytes(body, "input", encoded.Bytes())
+	if err != nil {
+		return body
+	}
+	return updated
 }
 
 func validateImagesModel(model string) error {

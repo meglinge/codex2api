@@ -11,15 +11,13 @@ import {
   Loader2,
   Lock,
   Mail,
-  Moon,
   PartyPopper,
   ShieldCheck,
-  Sun,
 } from 'lucide-react'
 import { api } from '../api'
 import { DEFAULT_SITE_LOGO, useBranding } from '../branding'
-import { useTheme } from '../hooks/useTheme'
 import { getErrorMessage } from '../utils/error'
+import { CinematicThemeSwitcher } from '@/components/ui/cinematic-theme-switcher'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -73,7 +71,6 @@ function StepBadge({ index, active, done }: { index: number; active: boolean; do
 export default function AccountPortal() {
   const { t, i18n } = useTranslation()
   const { siteName, siteLogo } = useBranding()
-  const { theme, toggle } = useTheme()
   const logoSrc = siteLogo || DEFAULT_SITE_LOGO
 
   const [contactEmail, setContactEmail] = useState('')
@@ -197,14 +194,7 @@ export default function AccountPortal() {
       >
         <Languages className="size-4" />
       </Button>
-      <Button
-        variant="outline"
-        size="icon-sm"
-        onClick={toggle}
-        title={theme === 'dark' ? t('common.switchToLight') : t('common.switchToDark')}
-      >
-        {theme === 'dark' ? <Sun className="size-4" /> : <Moon className="size-4" />}
-      </Button>
+      <CinematicThemeSwitcher size="compact" />
     </div>
   )
 

@@ -96,7 +96,8 @@ type Config struct {
 	AllowAnonymousV1          bool // 显式允许 /v1/* 在未配置 API Key 时无鉴权放行（默认禁止）
 	APIKeyAuthCacheEnabled    bool
 	MaxRequestBodySize        int
-	SchedulerMaxWaiters       int // Process-local waiting request budget.
+	RequestMemoryBudgetBytes  int64 // Process-local retained HTTP/WS request body budget.
+	SchedulerMaxWaiters       int   // Process-local waiting request budget.
 	SchedulerMaxWaitersPerKey int
 	Database                  DatabaseConfig
 	Cache                     CacheConfig
@@ -162,6 +163,17 @@ func Load(envPath string) (*Config, error) {
 	if v := strings.TrimSpace(os.Getenv("CODEX_MAX_REQUEST_BODY_SIZE_MB")); v != "" {
 		if mb, err := strconv.Atoi(v); err == nil && mb > 0 {
 			cfg.MaxRequestBodySize = mb * 1024 * 1024
+		}
+	}
+	cfg.RequestMemoryBudgetBytes = max(int64(128<<20), int64(cfg.MaxRequestBodySize))
+	if value := strings.TrimSpace(os.Getenv("CODEX_REQUEST_MEMORY_BUDGET_MB")); value != "" {
+		mb, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || mb <= 0 || mb > (1<<63-1)/(1<<20) {
+			return nil, fmt.Errorf("CODEX_REQUEST_MEMORY_BUDGET_MB must be a positive MiB value")
+		}
+		cfg.RequestMemoryBudgetBytes = mb << 20
+		if cfg.RequestMemoryBudgetBytes < int64(cfg.MaxRequestBodySize) {
+			return nil, fmt.Errorf("CODEX_REQUEST_MEMORY_BUDGET_MB must be at least CODEX_MAX_REQUEST_BODY_SIZE_MB")
 		}
 	}
 	cfg.TrustedProxies = parseTrustedProxiesEnv(os.Getenv("CODEX_TRUSTED_PROXIES"))

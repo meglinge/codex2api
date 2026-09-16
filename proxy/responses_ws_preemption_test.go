@@ -166,6 +166,49 @@ func TestResponsesWSSessionPreemptKeySeparatesSubagentThreads(t *testing.T) {
 	}
 }
 
+func TestResponsesWSSessionPreemptKeySeparatesMemoryRequestKind(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	row := &database.APIKeyRow{ID: 11, AllowedGroupIDs: []int64{7}}
+	body := []byte(`{"model":"gpt-5.5","input":"hello"}`)
+	newKindContext := func(kind string) *gin.Context {
+		c := newResponsesWSPreemptTestContext(11, row)
+		c.Request.Header.Set("Session-Id", "shared-session")
+		c.Request.Header.Set("Thread-Id", "shared-session")
+		if kind != "" {
+			c.Request.Header.Set("X-Codex-Turn-Metadata", `{"thread_id":"shared-session","request_kind":"`+kind+`"}`)
+		}
+		return c
+	}
+	keyFor := func(c *gin.Context, raw []byte) responsesWSSessionPreemptKey {
+		t.Helper()
+		key, ok := newResponsesWSSessionPreemptKey(c, raw, resolveRequestSessionIdentity(c.Request.Header, raw))
+		if !ok {
+			t.Fatal("session did not arm preemption")
+		}
+		return key
+	}
+
+	legacy := keyFor(newKindContext(""), body)
+	turn := keyFor(newKindContext("turn"), body)
+	compaction := keyFor(newKindContext("compaction"), body)
+	if turn.sessionHash != legacy.sessionHash || compaction.sessionHash != legacy.sessionHash {
+		t.Fatal("turn/compaction request kinds must keep the legacy shared-session preemption key")
+	}
+	memory := keyFor(newKindContext("memory"), body)
+	if memory.sessionHash == legacy.sessionHash {
+		t.Fatal("request_kind=memory shares the user turn preemption key; a background memory turn would cancel the active user turn")
+	}
+	if repeat := keyFor(newKindContext("memory"), body); repeat.sessionHash != memory.sessionHash {
+		t.Fatal("memory request kind did not keep a stable preemption key")
+	}
+
+	// 头里没有 turn 元数据时按请求体 client_metadata 内嵌的 request_kind 分道。
+	bodyMemory := []byte(`{"model":"gpt-5.5","input":"hello","client_metadata":{"x-codex-turn-metadata":"{\"thread_id\":\"shared-session\",\"request_kind\":\"memory\"}"}}`)
+	if keyFor(newKindContext(""), bodyMemory).sessionHash == legacy.sessionHash {
+		t.Fatal("body-embedded request_kind=memory shares the user turn preemption key")
+	}
+}
+
 func TestWatchResponsesWSSessionPreemptOwnerDetectsRemoteReplacement(t *testing.T) {
 	tokenCache := cache.NewMemory(1)
 	ownerStore := tokenCache.(cache.RuntimeOwnerStore)
@@ -240,6 +283,115 @@ func TestBeginResponsesWSSessionPreemptionCancelsPreviousAndSupportsHandoff(t *t
 		t.Fatalf("second owner = armed:%t err:%v", second.armed, second.ctx.Err())
 	}
 	second.cleanup()
+}
+
+func TestBeginResponsesWSSessionPreemptionNotifiesClientBeforeCancel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := &Handler{}
+	body := []byte(`{"model":"gpt-5.5","prompt_cache_key":"conversation","input":"hello"}`)
+	row := &database.APIKeyRow{ID: 11}
+
+	var notifiedAt atomic.Int64
+	notifyDone := make(chan struct{})
+	firstGin := newResponsesWSPreemptTestContext(11, row)
+	var firstCtx context.Context
+	var firstCleanup func()
+	var armed bool
+	firstCtx, firstCleanup, armed = h.beginResponsesWSSessionPreemptionWithNotify(
+		firstGin.Request.Context(),
+		firstGin,
+		body,
+		resolveRequestSessionIdentity(firstGin.Request.Header, body),
+		func() {
+			if firstCtx.Err() != nil {
+				t.Error("close-frame notification ran after the preempted context was cancelled")
+			}
+			notifiedAt.Store(time.Now().UnixNano())
+			close(notifyDone)
+		},
+	)
+	if !armed {
+		t.Fatal("first session did not arm preemption")
+	}
+	defer firstCleanup()
+	if isResponsesWSSessionPreempted(firstCtx) {
+		t.Fatal("fresh owner must not report preempted")
+	}
+
+	secondGin := newResponsesWSPreemptTestContext(11, row)
+	go func() {
+		_, cleanup, _ := h.beginResponsesWSSessionPreemptionWithNotify(
+			secondGin.Request.Context(),
+			secondGin,
+			body,
+			resolveRequestSessionIdentity(secondGin.Request.Header, body),
+			nil,
+		)
+		cleanup()
+	}()
+
+	select {
+	case <-notifyDone:
+	case <-time.After(time.Second):
+		t.Fatal("preempted owner was never told to close its client connection")
+	}
+	if !isResponsesWSSessionPreempted(firstCtx) {
+		t.Fatal("preempted flag must be visible as soon as the close frame goes out")
+	}
+	select {
+	case <-firstCtx.Done():
+		if !errors.Is(context.Cause(firstCtx), errResponsesWSSessionPreempted) {
+			t.Fatalf("first cancellation cause = %v", context.Cause(firstCtx))
+		}
+	case <-time.After(2 * responsesWSSessionPreemptCloseGrace):
+		t.Fatal("preempted owner was not cancelled after the close frame was delivered")
+	}
+	if notifiedAt.Load() == 0 {
+		t.Fatal("notification timestamp missing")
+	}
+}
+
+func TestBeginResponsesWSSessionPreemptionCancelsEvenWhenNotifyHangs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := &Handler{}
+	body := []byte(`{"model":"gpt-5.5","prompt_cache_key":"conversation","input":"hello"}`)
+	row := &database.APIKeyRow{ID: 11}
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	firstGin := newResponsesWSPreemptTestContext(11, row)
+	firstCtx, firstCleanup, armed := h.beginResponsesWSSessionPreemptionWithNotify(
+		firstGin.Request.Context(),
+		firstGin,
+		body,
+		resolveRequestSessionIdentity(firstGin.Request.Header, body),
+		func() { <-release },
+	)
+	if !armed {
+		t.Fatal("first session did not arm preemption")
+	}
+	defer firstCleanup()
+
+	secondGin := newResponsesWSPreemptTestContext(11, row)
+	go func() {
+		_, cleanup, _ := h.beginResponsesWSSessionPreemption(
+			secondGin.Request.Context(),
+			secondGin,
+			body,
+			resolveRequestSessionIdentity(secondGin.Request.Header, body),
+		)
+		cleanup()
+	}()
+
+	start := time.Now()
+	select {
+	case <-firstCtx.Done():
+	case <-time.After(responsesWSSessionPreemptCloseGrace + 2*time.Second):
+		t.Fatal("hung close-frame write must not keep the preempted owner alive past the grace period")
+	}
+	if elapsed := time.Since(start); elapsed < responsesWSSessionPreemptCloseGrace/2 {
+		t.Fatalf("cancelled after %s, want to wait for the close-frame grace period first", elapsed)
+	}
 }
 
 func TestResponsesWebSocketNewerSameSessionPreemptsBeforeConcurrencyAdmission(t *testing.T) {

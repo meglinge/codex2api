@@ -17,6 +17,7 @@ func TestOpsResponseCacheMappingAndExactJSONShape(t *testing.T) {
 	lastSync := time.Date(2026, 7, 29, 12, 34, 56, 789, time.UTC)
 	snapshot := proxy.ResponseCacheOpsSnapshot{
 		Stats: proxy.ResponseCacheStats{
+			BackendWriteFailures:   67,
 			Entries:                7,
 			Bytes:                  11,
 			HighWaterBytes:         13,
@@ -62,7 +63,7 @@ func TestOpsResponseCacheMappingAndExactJSONShape(t *testing.T) {
 		t.Fatalf("mapped capacity fields = %+v", got)
 	}
 	if got.LocalHits != 19 || got.RemoteMisses != 31 ||
-		got.OversizeBypasses != 47 || got.KnownUnavailableErrors != 59 {
+		got.OversizeBypasses != 47 || got.KnownUnavailableErrors != 59 || got.BackendWriteFailures != 67 {
 		t.Fatalf("mapped counters = %+v", got)
 	}
 	if got.LastConfigSyncAt != lastSync.Format(time.RFC3339Nano) ||
@@ -83,6 +84,7 @@ func TestOpsResponseCacheMappingAndExactJSONShape(t *testing.T) {
 		t.Fatalf("decode response_cache JSON: %v; body=%s", err, data)
 	}
 	wantFields := []string{
+		"backend_write_failures",
 		"shared_payload_bytes",
 		"effective_config",
 		"applied_config",
@@ -203,6 +205,11 @@ func TestGetOpsOverviewIncludesResponseCacheAndMemoryShape(t *testing.T) {
 		t.Fatalf("effective generation = %d, want %d; body=%s", got, wantSnapshot.EffectiveConfig.Generation, body)
 	}
 	for _, path := range []string{
+		"request_memory.limit_bytes",
+		"request_memory.used_bytes",
+		"response_cache_writer.max_active_writes",
+		"response_cache_writer.inflight_logical_bytes",
+		"response_cache.backend_write_failures",
 		"response_cache.entries",
 		"response_cache.local_hits",
 		"response_cache.remote_misses",

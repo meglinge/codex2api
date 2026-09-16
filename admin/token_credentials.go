@@ -1,6 +1,9 @@
 package admin
 
 import (
+	"context"
+	"errors"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -120,6 +123,72 @@ func normalizeTokenCredentialSeed(seed tokenCredentialSeed) tokenCredentialSeed 
 func effectiveWorkspaceIDFromSeed(seed tokenCredentialSeed) string {
 	seed = normalizeTokenCredentialSeed(seed)
 	return openaiidentity.EffectiveWorkspaceID(seed.workspaceID, seed.customHeaders)
+}
+
+// patWhoAmIHydrateTimeout 是单枚 PAT 的 whoami 预算。它不从批量导入的 30s 上下文里扣：
+// 一批一百枚 token 串行补全，几枚慢请求就能把整批的落库预算烧光。
+const patWhoAmIHydrateTimeout = 6 * time.Second
+
+// patWhoAmIHydrator 在一次批量导入内为 PAT 补全工作区身份。网络层失败（超时 / 代理不通）
+// 对同批其余 token 大概率同样失败，命中一次就熔断，剩余 token 直接按纯 AT 入库；
+// 端点按 token 返回 4xx 只说明这枚 token 没权限，不影响其它 token。
+type patWhoAmIHydrator struct {
+	proxyURL string
+	tripped  bool
+}
+
+func (w *patWhoAmIHydrator) hydrate(ctx context.Context, seed tokenCredentialSeed) tokenCredentialSeed {
+	if w == nil || w.tripped {
+		return seed
+	}
+	seed, err := hydrateSeedWithWhoAmI(ctx, seed, w.proxyURL)
+	if err == nil {
+		return seed
+	}
+	var statusErr *patWhoAmIStatusError
+	if errors.As(err, &statusErr) {
+		log.Printf("PAT whoami 身份获取失败（该 token 按纯 AT 入库）: %v", err)
+		return seed
+	}
+	w.tripped = true
+	log.Printf("PAT whoami 网络失败，本批剩余 token 跳过身份补全: %v", err)
+	return seed
+}
+
+// hydrateSeedWithWhoAmI 用 /whoami 补全 PAT 的工作区 / 用户 / 邮箱 / 套餐。
+// 返回的 error 仅供调用方决定是否熔断；seed 总是可用的（失败时原样返回）。
+func hydrateSeedWithWhoAmI(ctx context.Context, seed tokenCredentialSeed, proxyURL string) (tokenCredentialSeed, error) {
+	if seed.accessTokenType != accessTokenTypeCodexAT || strings.TrimSpace(seed.accessToken) == "" {
+		return seed, nil
+	}
+	if seed.workspaceID != "" && seed.email != "" && seed.planType != "" {
+		return seed, nil
+	}
+	whoamiCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), patWhoAmIHydrateTimeout)
+	defer cancel()
+	meta, err := QueryPersonalAccessTokenMetadata(whoamiCtx, seed.accessToken, proxyURL)
+	if err != nil {
+		return seed, err
+	}
+	if meta == nil {
+		return seed, nil
+	}
+	if seed.workspaceID == "" && meta.ChatGPTAccountID != "" {
+		seed.workspaceID = meta.ChatGPTAccountID
+	}
+	if seed.accountID == "" && meta.ChatGPTAccountID != "" {
+		seed.accountID = meta.ChatGPTAccountID
+	}
+	if seed.userID == "" && meta.ChatGPTUserID != "" {
+		seed.userID = meta.ChatGPTUserID
+	}
+	if seed.email == "" && meta.Email != nil {
+		seed.email = strings.TrimSpace(*meta.Email)
+	}
+	if seed.planType == "" && meta.ChatGPTPlanType != "" {
+		seed.planType = meta.ChatGPTPlanType
+	}
+	return seed, nil
 }
 
 const accessTokenTypeCodexAT = "codex_at"

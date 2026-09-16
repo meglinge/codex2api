@@ -99,6 +99,10 @@ type WsConnection struct {
 	// 永久 reader 失败回调。Manager 使用指针级 CompareAndDelete 精确移除
 	// 当前连接，避免误删同 PoolKey 下已经重建的连接。
 	onReadFailure func(wc *WsConnection)
+
+	// Protected by the owning Manager's respConnMu. Once removed from the pool,
+	// late completion callbacks must never retain this connection again.
+	responseBindingsDisabled bool
 }
 
 func effectiveProxyURL(account *auth.Account, proxyOverride string) string {
@@ -261,12 +265,18 @@ type Manager struct {
 	mu sync.RWMutex
 
 	// pool key 级别串行化，避免同一逻辑 session 在 acquire 阶段竞争同一条连接
-	keyLocks sync.Map
+	keyLocks refCountedLockRegistry[string]
 	// 账号级串行化连接获取，确保跨 session/pool key 创建连接时仍能严格执行
 	// 每账号连接上限，避免大量短会话各留一条空闲连接。
-	accountLocks   sync.Map
+	accountLocks   refCountedLockRegistry[int64]
 	capacityMu     sync.Mutex
 	pendingCreates map[int64]int
+
+	// 账号级等待唤醒：busy/容量等待者在同账号连接释放、销毁、新建或在途请求结束时
+	// 立即被唤醒重新选连，不再空等整个退避间隔（最多 AcquireMaxBackoff）。
+	// 每次 notify 关闭并替换当前 channel；只有等待者存在时才有条目。
+	waitNotifyMu sync.Mutex
+	waitNotify   map[int64]chan struct{}
 
 	// response_id -> 连接 绑定（续链亲和）。上游 chatgpt backend 无服务端存储时，
 	// previous_response_id 的上下文只存活在产生该响应的那条 WS 连接里；带续链 ID
@@ -359,8 +369,12 @@ func (m *Manager) evictExpired() {
 			return true
 		}
 		if wc.IsExpired() || !wc.IsConnected() || isRotatableOverAge(wc) {
-			m.connections.Delete(key)
+			m.connections.CompareAndDelete(key, wc)
+			m.removeResponseConnBindings(wc)
 			wc.Close()
+			if wc.session != nil {
+				m.notifyAccountWaiters(wc.session.AccountID)
+			}
 		}
 		return true
 	})
@@ -371,11 +385,12 @@ func (m *Manager) evictExpired() {
 			return true
 		}
 		if s.IsExpired() || !s.IsConnected() {
-			m.sessions.Delete(key)
+			m.sessions.CompareAndDelete(key, s)
 			s.Close()
 		}
 		return true
 	})
+	m.evictResponseConnBindings(time.Now())
 }
 
 // Stop 停止管理器
@@ -390,10 +405,14 @@ func (m *Manager) Stop() {
 func (m *Manager) closeAll() {
 	m.connections.Range(func(key, value any) bool {
 		wc := value.(*WsConnection)
-		m.connections.Delete(key)
+		m.connections.CompareAndDelete(key, wc)
+		m.removeResponseConnBindings(wc)
 		wc.Close()
 		return true
 	})
+	m.respConnMu.Lock()
+	m.respConnBindings = nil
+	m.respConnMu.Unlock()
 
 	m.sessions.Range(func(key, value any) bool {
 		s := value.(*Session)
@@ -431,26 +450,47 @@ func (m *Manager) getOnConnected() func(accountID int64, session *Session) {
 	return m.onConnected
 }
 
-func (m *Manager) keyLock(key string) *sync.Mutex {
-	if v, ok := m.keyLocks.Load(key); ok {
-		return v.(*sync.Mutex)
-	}
-	mu := &sync.Mutex{}
-	if actual, loaded := m.keyLocks.LoadOrStore(key, mu); loaded {
-		return actual.(*sync.Mutex)
-	}
-	return mu
+type referencedMutex struct {
+	mu   sync.Mutex
+	refs int
 }
 
-func (m *Manager) accountLock(accountID int64) *sync.Mutex {
-	if v, ok := m.accountLocks.Load(accountID); ok {
-		return v.(*sync.Mutex)
+// A reference covers the caller's entire use of the mutex, including waiting
+// for it and temporarily unlocking it. Deleting locks when a connection closes
+// would let a new caller race an existing waiter using a different mutex.
+type refCountedLockRegistry[K comparable] struct {
+	mu    sync.Mutex
+	locks map[K]*referencedMutex
+}
+
+func (r *refCountedLockRegistry[K]) retain(key K) (*sync.Mutex, func()) {
+	r.mu.Lock()
+	if r.locks == nil {
+		r.locks = make(map[K]*referencedMutex)
 	}
-	mu := &sync.Mutex{}
-	if actual, loaded := m.accountLocks.LoadOrStore(accountID, mu); loaded {
-		return actual.(*sync.Mutex)
+	entry := r.locks[key]
+	if entry == nil {
+		entry = &referencedMutex{}
+		r.locks[key] = entry
 	}
-	return mu
+	entry.refs++
+	r.mu.Unlock()
+	return &entry.mu, func() {
+		r.mu.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(r.locks, key)
+		}
+		r.mu.Unlock()
+	}
+}
+
+func (m *Manager) keyLock(key string) (*sync.Mutex, func()) {
+	return m.keyLocks.retain(key)
+}
+
+func (m *Manager) accountLock(accountID int64) (*sync.Mutex, func()) {
+	return m.accountLocks.retain(accountID)
 }
 
 func accountConnectionLimit(account *auth.Account) int {
@@ -620,6 +660,54 @@ func (m *Manager) releaseAccountConnectionCapacity(accountID int64) {
 		m.pendingCreates[accountID] = pending - 1
 	}
 	m.capacityMu.Unlock()
+	m.notifyAccountWaiters(accountID)
+}
+
+// accountWaitSignal 返回账号当前的等待唤醒 channel：下一次 notifyAccountWaiters 会关闭它。
+// 等待者必须在检查池状态之前取到 channel，才不会漏掉检查与等待之间发生的变化。
+func (m *Manager) accountWaitSignal(accountID int64) <-chan struct{} {
+	m.waitNotifyMu.Lock()
+	defer m.waitNotifyMu.Unlock()
+	if m.waitNotify == nil {
+		m.waitNotify = make(map[int64]chan struct{})
+	}
+	ch, ok := m.waitNotify[accountID]
+	if !ok {
+		ch = make(chan struct{})
+		m.waitNotify[accountID] = ch
+	}
+	return ch
+}
+
+// notifyAccountWaiters 唤醒该账号所有等待中的 acquire：连接释放/销毁/新建、在途请求结束、
+// 拨号占位归还时调用。没有等待者时是一次 map 查找。
+func (m *Manager) notifyAccountWaiters(accountID int64) {
+	if m == nil {
+		return
+	}
+	m.waitNotifyMu.Lock()
+	ch, ok := m.waitNotify[accountID]
+	if ok {
+		delete(m.waitNotify, accountID)
+	}
+	m.waitNotifyMu.Unlock()
+	if ok {
+		close(ch)
+	}
+}
+
+// waitForAccountChange 等待账号池变化、退避到期或上下文取消，返回实际等待时长。
+func waitForAccountChange(ctx context.Context, wake <-chan struct{}, backoff time.Duration) (time.Duration, error) {
+	start := time.Now()
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return time.Since(start), ctx.Err()
+	case <-wake:
+	case <-timer.C:
+	}
+	return time.Since(start), nil
 }
 
 // AcquireConnection 获取或创建连接
@@ -633,14 +721,18 @@ func (m *Manager) AcquireConnection(
 	proxyOverride string,
 ) (*WsConnection, *PendingRequest, error) {
 	key := m.poolKey(account.ID(), wsURL, sessionKey, effectiveProxyURL(account, proxyOverride))
-	lock := m.keyLock(key)
-	accountLock := m.accountLock(account.ID())
+	lock, releaseKeyLock := m.keyLock(key)
+	defer releaseKeyLock()
+	accountLock, releaseAccountLock := m.accountLock(account.ID())
+	defer releaseAccountLock()
 	wait := AcquireInitialBackoff
 	var waited time.Duration
 	var createLeaseFailures int
 	var busyOverflowAttempted bool
 
 	for {
+		// 先取唤醒信号再检查池状态：检查之后发生的释放/销毁一定会关闭这个 channel。
+		wake := m.accountWaitSignal(account.ID())
 		lock.Lock()
 		if v, ok := m.connections.Load(key); ok {
 			wc := v.(*WsConnection)
@@ -694,12 +786,12 @@ func (m *Manager) AcquireConnection(
 				if maxWait := busyAcquireMaxWait(); waited >= maxWait {
 					return nil, nil, fmt.Errorf("acquire websocket connection timed out after %s waiting for busy session", maxWait)
 				}
-				select {
-				case <-ctx.Done():
-					return nil, nil, ctx.Err()
-				case <-time.After(wait):
+				// 在途请求结束（RemovePendingRequest）或连接被销毁时立即唤醒，退避只是兜底。
+				slept, waitErr := waitForAccountChange(ctx, wake, wait)
+				if waitErr != nil {
+					return nil, nil, waitErr
 				}
-				waited += wait
+				waited += slept
 				if wait < AcquireMaxBackoff {
 					wait *= 2
 					if wait > AcquireMaxBackoff {
@@ -717,12 +809,12 @@ func (m *Manager) AcquireConnection(
 			if maxWait := busyAcquireMaxWait(); waited >= maxWait {
 				return nil, nil, fmt.Errorf("acquire websocket connection timed out after %s waiting for account connection capacity", maxWait)
 			}
-			select {
-			case <-ctx.Done():
-				return nil, nil, ctx.Err()
-			case <-time.After(wait):
+			// 同账号连接销毁/拨号占位归还时立即唤醒重试容量预留，退避只是兜底。
+			slept, waitErr := waitForAccountChange(ctx, wake, wait)
+			if waitErr != nil {
+				return nil, nil, waitErr
 			}
-			waited += wait
+			waited += slept
 			if wait < AcquireMaxBackoff {
 				wait *= 2
 				if wait > AcquireMaxBackoff {
@@ -797,11 +889,13 @@ func (m *Manager) tryAcquireBusyOverflow(
 ) (*WsConnection, *PendingRequest, bool) {
 	proxyURL := effectiveProxyURL(account, proxyOverride)
 	accountLimit := accountConnectionLimit(account)
-	accountLock := m.accountLock(account.ID())
+	accountLock, releaseAccountLock := m.accountLock(account.ID())
+	defer releaseAccountLock()
 	for i := 1; i <= BusyOverflowSlots; i++ {
 		slotSession := fmt.Sprintf("%s%s%d", baseSessionKey, busyOverflowKeyInfix, i)
 		key := m.poolKey(account.ID(), wsURL, slotSession, proxyURL)
-		lock := m.keyLock(key)
+		lock, releaseKeyLock := m.keyLock(key)
+		defer releaseKeyLock()
 		lock.Lock()
 		if v, ok := m.connections.Load(key); ok {
 			wc := v.(*WsConnection)
@@ -913,12 +1007,14 @@ func (m *Manager) AcquireReusableConnection(
 	if slots < 1 || slots > accountLimit {
 		slots = accountLimit
 	}
-	accountLock := m.accountLock(account.ID())
+	accountLock, releaseAccountLock := m.accountLock(account.ID())
+	defer releaseAccountLock()
 	// 第一遍：复用空闲连接（探活失败或已断开的顺手清理，让第二遍可以补位）
 	for i := 0; i < slots; i++ {
 		slotSession := fmt.Sprintf("%s#%d", baseKey, i)
 		key := m.poolKey(account.ID(), wsURL, slotSession, proxyURL)
-		lock := m.keyLock(key)
+		lock, releaseKeyLock := m.keyLock(key)
+		defer releaseKeyLock()
 		lock.Lock()
 		if v, ok := m.connections.Load(key); ok {
 			wc := v.(*WsConnection)
@@ -956,7 +1052,8 @@ func (m *Manager) AcquireReusableConnection(
 	for i := 0; i < slots; i++ {
 		slotSession := fmt.Sprintf("%s#%d", baseKey, i)
 		key := m.poolKey(account.ID(), wsURL, slotSession, proxyURL)
-		lock := m.keyLock(key)
+		lock, releaseKeyLock := m.keyLock(key)
+		defer releaseKeyLock()
 		lock.Lock()
 		if _, ok := m.connections.Load(key); ok {
 			lock.Unlock()
@@ -1122,11 +1219,11 @@ func (m *Manager) createConnection(
 	dialerCopy := *m.dialer
 	dialer := &dialerCopy
 
-	// 配置代理（Resin 反代模式下跳过，URL 已包含 Resin 地址）
+	// 拨号代理与 ExecuteRequestViaWebsocket 同一套判定:Resin 承担出站时不配代理
+	// (传入的 wsURL 已是 Resin 反代地址);poolKey 仍按第 2 层代理分池,保持既有键不变。
 	proxyURL := effectiveProxyURL(account, proxyOverride)
-
-	if !proxy.IsResinEnabled() && proxyURL != "" {
-		if err := configureWebsocketDialerProxy(dialer, proxyURL); err != nil {
+	if dialProxy := proxy.CodexDialProxyURL(account, proxyURL); dialProxy != "" {
+		if err := configureWebsocketDialerProxy(dialer, dialProxy); err != nil {
 			return nil, err
 		}
 	}
@@ -1185,9 +1282,13 @@ func (m *Manager) RemoveConnection(accountID int64, wsURL string, sessionKey str
 	key := m.poolKey(accountID, wsURL, sessionKey, proxyURL)
 	if v, ok := m.connections.LoadAndDelete(key); ok {
 		wc := v.(*WsConnection)
+		m.removeResponseConnBindings(wc)
 		wc.Close()
+		if wc.session != nil {
+			m.sessions.CompareAndDelete(key, wc.session)
+		}
 	}
-	m.sessions.Delete(key)
+	m.notifyAccountWaiters(accountID)
 }
 
 // DiscardConnection 关闭并从连接池移除一条坏连接。
@@ -1205,11 +1306,53 @@ func (m *Manager) DiscardConnection(wc *WsConnection) {
 			m.sessions.CompareAndDelete(wc.PoolKey, wc.session)
 		}
 	}
+	m.removeResponseConnBindings(wc)
 	if wc.session != nil {
 		wc.session.StopHeartbeat()
 		wc.session.SetConnected(false)
 	}
 	_ = wc.Close()
+	if wc.session != nil {
+		m.notifyAccountWaiters(wc.session.AccountID)
+	}
+}
+
+// removeResponseConnBindings releases the strong references to an unusable
+// connection. Keep its reader queue intact: an active consumer may still need
+// the already received frames and terminal read error after an upstream close.
+func (m *Manager) removeResponseConnBindings(wc *WsConnection) {
+	m.respConnMu.Lock()
+	defer m.respConnMu.Unlock()
+	wc.responseBindingsDisabled = true
+	for responseID, binding := range m.respConnBindings {
+		if binding.conn == wc {
+			delete(m.respConnBindings, responseID)
+		}
+	}
+}
+
+// responseConnBindingLiveLocked requires respConnMu. Pool identity prevents a
+// late completion for a replaced socket from keeping the old socket alive.
+func (m *Manager) responseConnBindingLiveLocked(wc *WsConnection) bool {
+	if wc == nil || wc.responseBindingsDisabled || !wc.IsConnected() {
+		return false
+	}
+	current, ok := m.connections.Load(wc.PoolKey)
+	return ok && current == wc
+}
+
+func (m *Manager) evictResponseConnBindings(now time.Time) {
+	m.respConnMu.Lock()
+	defer m.respConnMu.Unlock()
+	m.evictResponseConnBindingsLocked(now)
+}
+
+func (m *Manager) evictResponseConnBindingsLocked(now time.Time) {
+	for responseID, binding := range m.respConnBindings {
+		if !binding.expiresAt.After(now) || !m.responseConnBindingLiveLocked(binding.conn) {
+			delete(m.respConnBindings, responseID)
+		}
+	}
 }
 
 // BindResponseConn 记录 response_id 由哪条连接产出（续链亲和）。
@@ -1220,16 +1363,21 @@ func (m *Manager) BindResponseConn(responseID string, wc *WsConnection, sessionK
 	}
 	now := time.Now()
 	m.respConnMu.Lock()
+	defer m.respConnMu.Unlock()
+	select {
+	case <-m.stopCleanup:
+		return
+	default:
+	}
+	if !m.responseConnBindingLiveLocked(wc) {
+		return
+	}
 	if m.respConnBindings == nil {
 		m.respConnBindings = make(map[string]responseConnBinding, 64)
 	}
 	// 有界保护：先清一轮过期项，仍超限则拒绝新增（旧绑定比新绑定更可能被续链）。
 	if len(m.respConnBindings) >= responseConnBindingMaxEntries {
-		for k, b := range m.respConnBindings {
-			if now.After(b.expiresAt) {
-				delete(m.respConnBindings, k)
-			}
-		}
+		m.evictResponseConnBindingsLocked(now)
 	}
 	if len(m.respConnBindings) < responseConnBindingMaxEntries {
 		m.respConnBindings[responseID] = responseConnBinding{
@@ -1240,7 +1388,6 @@ func (m *Manager) BindResponseConn(responseID string, wc *WsConnection, sessionK
 			expiresAt:  now.Add(responseConnBindingTTL),
 		}
 	}
-	m.respConnMu.Unlock()
 }
 
 // lookupResponseConn 返回 response_id 绑定的连接及其池内 sessionKey。
@@ -1253,22 +1400,16 @@ func (m *Manager) lookupResponseConn(responseID string, accountID int64, apiKey 
 	}
 	now := time.Now()
 	m.respConnMu.Lock()
+	defer m.respConnMu.Unlock()
 	binding, ok := m.respConnBindings[responseID]
-	if ok && (now.After(binding.expiresAt) || binding.accountID != accountID || binding.apiKey != apiKey) {
-		if now.After(binding.expiresAt) {
-			delete(m.respConnBindings, responseID)
-		}
-		ok = false
-	}
-	m.respConnMu.Unlock()
-	if !ok || binding.conn == nil {
+	if !ok {
 		return nil, ""
 	}
-	// 指针级校验：连接必须仍在池中且是同一条（防止复用已重建槽位的陈旧绑定）。
-	if v, exists := m.connections.Load(binding.conn.PoolKey); !exists || v != binding.conn {
+	if !binding.expiresAt.After(now) || !m.responseConnBindingLiveLocked(binding.conn) || binding.conn.IsExpired() || binding.conn.IsOverAge() {
+		delete(m.respConnBindings, responseID)
 		return nil, ""
 	}
-	if !binding.conn.IsConnected() || binding.conn.IsExpired() || binding.conn.IsOverAge() {
+	if binding.accountID != accountID || binding.apiKey != apiKey {
 		return nil, ""
 	}
 	return binding.conn, binding.sessionKey
@@ -1283,8 +1424,10 @@ func (m *Manager) AcquirePreferredConnection(responseID string, accountID int64,
 	if wc == nil {
 		return nil, nil, ""
 	}
-	accountLock := m.accountLock(accountID)
-	lock := m.keyLock(wc.PoolKey)
+	accountLock, releaseAccountLock := m.accountLock(accountID)
+	defer releaseAccountLock()
+	lock, releaseKeyLock := m.keyLock(wc.PoolKey)
+	defer releaseKeyLock()
 	lock.Lock()
 	defer lock.Unlock()
 	// pool-key 加锁后复验：期间可能被其他请求占用或销毁。
@@ -1407,6 +1550,7 @@ func (m *Manager) removeConnectionFromPool(wc *WsConnection) {
 	if wc.session != nil {
 		m.sessions.CompareAndDelete(wc.PoolKey, wc.session)
 	}
+	m.removeResponseConnBindings(wc)
 }
 
 // StartHeartbeat 启动连接心跳

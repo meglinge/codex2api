@@ -14,6 +14,7 @@ test("writable settings payload omits response cache generation regardless of va
       future_setting: "preserved",
       codex_images_main_model: "gpt-5.6-sol",
       codex_images_default_main_model: "gpt-5.6-luna",
+      codex_egress: { mode: "resin", resin_enabled: true },
     };
 
     const payload = buildWritableSettingsPayload(settings);

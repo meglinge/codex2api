@@ -176,6 +176,9 @@ func TestGetAccountPageStatsMarksSyncedWhenUpstreamHasNoData(t *testing.T) {
 		mu.Unlock()
 		return &proxy.WhamDailyUsageResponse{}, nil, nil
 	}
+	handler.queryWhamDailyTokenBreakdown = func(context.Context, *auth.Account, string, string, string) (*proxy.WhamDailyTokenBreakdownResponse, *http.Response, error) {
+		return &proxy.WhamDailyTokenBreakdownResponse{}, nil, nil
+	}
 
 	key := strconv.FormatInt(id, 10)
 	first := invokeAccountPageStats(t, handler, []int64{id})
@@ -240,6 +243,9 @@ func TestWhamDailyBackfillFailureCooldownSkipsRetry(t *testing.T) {
 		mu.Lock()
 		calls++
 		mu.Unlock()
+		return nil, nil, errWhamDailyUsageUnavailable
+	}
+	handler.queryWhamDailyTokenBreakdown = func(context.Context, *auth.Account, string, string, string) (*proxy.WhamDailyTokenBreakdownResponse, *http.Response, error) {
 		return nil, nil, errWhamDailyUsageUnavailable
 	}
 

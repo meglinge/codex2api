@@ -197,7 +197,7 @@ func TestMarkUsage7dRateLimitedAppliesWhenCreditsDrained(t *testing.T) {
 		CreditEnabled:         true,
 		CreditSkipUsageWindow: true,
 	}
-	acc.SetCreditBalance("0", true, false, false)
+	acc.SetCreditBalance("0", false, false, false)
 	acc.SetUsagePercent7d(100)
 	acc.SetReset7dAt(time.Now().Add(time.Hour))
 

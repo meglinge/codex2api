@@ -32,6 +32,16 @@ type streamFlushWriter struct {
 	diag          *streamPhaseDiagnostics
 }
 
+// Small buffers are reused across token events; an exceptional large event
+// must not keep its allocation alive for the rest of a long stream.
+func (w *streamFlushWriter) resetBuffer() {
+	if w.buffer.Cap() > 256<<10 {
+		w.buffer = bytes.Buffer{}
+	} else {
+		w.buffer.Reset()
+	}
+}
+
 // streamPhaseDiagnostics 采集流阶段的断流现场判据。
 //
 // 上游 RST_STREAM（如 "INTERNAL_ERROR; received from peer"）有两类互斥成因，
@@ -348,7 +358,7 @@ func (w *streamFlushWriter) WriteSSEComment(comment string) error {
 		if err := w.writeUnderlying(w.buffer.Bytes()); err != nil {
 			return err
 		}
-		w.buffer.Reset()
+		w.resetBuffer()
 	}
 	if err := w.writeUnderlyingString(comment); err != nil {
 		return err
@@ -365,7 +375,7 @@ func (w *streamFlushWriter) Flush() error {
 		if err := w.writeUnderlying(w.buffer.Bytes()); err != nil {
 			return err
 		}
-		w.buffer.Reset()
+		w.resetBuffer()
 	}
 	if w.outputScanner != nil {
 		pending, err := w.outputScanner.Flush()
@@ -392,7 +402,7 @@ func (w *streamFlushWriter) Finalize() error {
 		if err := w.writeUnderlying(w.buffer.Bytes()); err != nil {
 			return err
 		}
-		w.buffer.Reset()
+		w.resetBuffer()
 	}
 	if w.outputScanner != nil {
 		pending, err := w.outputScanner.Finalize()

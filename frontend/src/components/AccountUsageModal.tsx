@@ -23,7 +23,7 @@ import {
 import Modal from './Modal'
 import { api } from '../api'
 import type { AccountKeyStat, AccountModelStat, AccountRow, AccountUsageDayStat, AccountUsageDetail, ResetCreditItem, WhamDailyUsageBreakdownEntry, WhamDailyUsageCycle, WhamDailyUsageItem, WhamDailyUsageResponse, WhamDailyUsageSplit } from '../types'
-import { formatUsageNumber, officialUsdFromDailyItems, supportsOfficialUsage } from '../lib/usageFormat'
+import { formatUsageNumber, officialUsdFromDailyItems, supportsOfficialUsage, isWorkspaceCreditHardStop } from '../lib/usageFormat'
 import { useShowFullUsageNumbers } from '../hooks/useShowFullUsageNumbers'
 import { getErrorMessage } from '../utils/error'
 import { formatBeijingTime } from '../utils/time'
@@ -1358,23 +1358,31 @@ function CreditSettings({
 }) {
   const { t } = useTranslation()
   // 积分门的几种状态，用来告诉用户这个开关此刻到底生不生效：
-  // unlimited / 有余额 → 顶替限流；余额 0 或上游报超额 → 已恢复限流；未探测 → 按没积分处理。
-  const balance = Number.parseFloat((account.credits_balance ?? '').trim())
+  // unlimited / has_credits 为 true → 顶替限流；上游报超额或工作区受限 → 已恢复限流；未探测 → 按没积分处理。
+  const rawBalance = (account.credits_balance ?? '').trim()
+  const balance = Number.parseFloat(rawBalance)
   const unlimited = account.credits_unlimited === true
-  const probed = account.credits_balance != null || unlimited
+  const probed = account.credits_valid === true || account.credits_balance != null || unlimited
   const overageReached = account.credits_overage_limit_reached === true
+  const hardStopped = overageReached || isWorkspaceCreditHardStop(account)
   const hasCredits =
-    !overageReached &&
-    (unlimited || (account.credits_has_credits === true && Number.isFinite(balance) && balance > 0))
+    !hardStopped &&
+    (unlimited || account.credits_has_credits === true)
+
+  const balanceDisplay = rawBalance !== '' && Number.isFinite(balance) && balance > 0
+    ? formatCreditsBalance(balance)
+    : null
 
   const skipHint = !probed
     ? t('accounts.creditSkipWindowHintUnprobed')
-    : unlimited
-      ? t('accounts.creditSkipWindowHintUnlimited')
-      : hasCredits
-        ? t('accounts.creditSkipWindowHintActive', { balance: formatCreditsBalance(balance) })
-        : overageReached
-          ? t('accounts.creditSkipWindowHintOverage')
+    : hardStopped
+      ? (overageReached ? t('accounts.creditSkipWindowHintOverage') : t('accounts.creditSkipWindowHintHardStopped'))
+      : unlimited
+        ? t('accounts.creditSkipWindowHintUnlimited')
+        : hasCredits
+          ? (balanceDisplay
+              ? t('accounts.creditSkipWindowHintActive', { balance: balanceDisplay })
+              : t('accounts.creditSkipWindowHintAvailable'))
           : t('accounts.creditSkipWindowHintDrained')
 
   // 两列同真才算开。历史数据里只开了一列的组合在后端本就不生效，显示为关是准确的。

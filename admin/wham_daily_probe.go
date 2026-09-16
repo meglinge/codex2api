@@ -137,6 +137,8 @@ func whamDailyUsageDueTargets(all []*auth.Account, lastAttempt map[int64]time.Ti
 }
 
 func (h *Handler) runWhamDailyUsageProbe(ctx context.Context, lastAttempt map[int64]time.Time) {
+	// 先把缺工作区的 PAT 补全，补上的账号本轮就能进候选。(issue #662)
+	h.hydratePATWorkspaces(ctx)
 	all := h.whamDailyUsageProbeTargets()
 	if len(all) == 0 {
 		return
@@ -266,14 +268,18 @@ func whamDailyUsageChannelSupported(account *auth.Account) bool {
 	return !(account.IsOpenAIResponsesAPI() || account.IsGrokAPI() || account.IsClaudeOAuth() || account.IsAntigravityAPI())
 }
 
-// isCodexATAccount 识别 at-... 形态的纯 AT 凭据。这类凭据能调用
+// isCodexATAccount 识别 at-... 形态的纯 AT 凭据。未补充工作区 ID 的纯 AT 凭据能调用
 // Codex Responses，但不具备 ChatGPT WHAM analytics 稳定需要的工作区鉴权，
 // 不能把「Responses 可用」等同于「官方结算统计可用」。(issue #564)
+// 若已通过 whoami 或自定义头获取到了有效工作区 ID，则允许进行官方统计同步。(issue #662)
 func isCodexATAccount(account *auth.Account) bool {
 	if account == nil {
 		return false
 	}
-	return accessTokenTypeForToken(account.GetAccessToken()) == accessTokenTypeCodexAT
+	if accessTokenTypeForToken(account.GetAccessToken()) != accessTokenTypeCodexAT {
+		return false
+	}
+	return strings.TrimSpace(account.EffectiveAccountID()) == ""
 }
 
 func whamDailyUsageAutoRefreshEligible(account *auth.Account, now time.Time) bool {

@@ -418,10 +418,11 @@ func (db *DB) GetProxyRiskScoringProfile(ctx context.Context, id int64) (*ProxyR
 	if id <= 0 {
 		return nil, errors.New("profile id is invalid")
 	}
-	row := db.conn.QueryRowContext(ctx, `SELECT id,name,provider,enabled,priority,base_url,access_token,scamalytics_host,scamalytics_user,scamalytics_key,timeout_seconds,concurrency,request_delay_ms,cache_ttl_seconds,max_checks_per_job,daily_check_limit,credit_reserve,allow_force_refresh,resolve_hostnames,allow_private_targets,docs_url,tutorial_url,daily_used_date,daily_used_count,credits_remaining,credits_used,credit_reset_at,last_quota_checked_at,last_error,created_at,updated_at FROM proxy_risk_scoring_profiles WHERE id=$1`, id)
+	query := `SELECT id,name,provider,enabled,priority,base_url,access_token,scamalytics_host,scamalytics_user,scamalytics_key,timeout_seconds,concurrency,request_delay_ms,cache_ttl_seconds,max_checks_per_job,daily_check_limit,credit_reserve,allow_force_refresh,resolve_hostnames,allow_private_targets,docs_url,tutorial_url,daily_used_date,daily_used_count,credits_remaining,credits_used,credit_reset_at,last_quota_checked_at,last_error,created_at,updated_at FROM proxy_risk_scoring_profiles WHERE id=$1`
 	if db.isSQLite() {
-		row = db.conn.QueryRowContext(ctx, `SELECT id,name,provider,enabled,priority,base_url,access_token,scamalytics_host,scamalytics_user,scamalytics_key,timeout_seconds,concurrency,request_delay_ms,cache_ttl_seconds,max_checks_per_job,daily_check_limit,credit_reserve,allow_force_refresh,resolve_hostnames,allow_private_targets,docs_url,tutorial_url,daily_used_date,daily_used_count,credits_remaining,credits_used,credit_reset_at,last_quota_checked_at,last_error,created_at,updated_at FROM proxy_risk_scoring_profiles WHERE id=?`, id)
+		query = `SELECT id,name,provider,enabled,priority,base_url,access_token,scamalytics_host,scamalytics_user,scamalytics_key,timeout_seconds,concurrency,request_delay_ms,cache_ttl_seconds,max_checks_per_job,daily_check_limit,credit_reserve,allow_force_refresh,resolve_hostnames,allow_private_targets,docs_url,tutorial_url,daily_used_date,daily_used_count,credits_remaining,credits_used,credit_reset_at,last_quota_checked_at,last_error,created_at,updated_at FROM proxy_risk_scoring_profiles WHERE id=?`
 	}
+	row := db.conn.QueryRowContext(ctx, query, id)
 	profile, err := scanProxyRiskScoringProfile(row)
 	if err != nil {
 		return nil, err

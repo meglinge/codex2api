@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -68,6 +69,12 @@ func (h *Handler) RealtimeWebSocket(c *gin.Context) {
 	}()
 
 	state := realtimeTextSession{Model: strings.TrimSpace(c.Query("model"))}
+	stateMemory, _ := security.TryAcquireRequestMemory(0)
+	defer stateMemory.Release()
+	rejectMemory := func() {
+		_ = writeResponsesWSErrorWithin(conn, api.NewAPIError(api.ErrCodeServiceUnavailable, "Server request memory capacity is temporarily exhausted; retry later", api.ErrorTypeServer), responsesWSOverloadWriteTimeout)
+		closeResponsesWSWithin(conn, websocket.CloseTryAgainLater, "request memory capacity exhausted", responsesWSOverloadWriteTimeout)
+	}
 	if err := writeResponsesWSMessage(conn, marshalRealtimeServerEvent(map[string]any{
 		"type": "session.created",
 		"session": map[string]any{
@@ -83,27 +90,45 @@ func (h *Handler) RealtimeWebSocket(c *gin.Context) {
 		} else {
 			_ = conn.SetReadDeadline(time.Time{})
 		}
-		messageType, payload, err := conn.ReadMessage()
+		messageType, reader, err := conn.NextReader()
 		if err != nil {
+			return
+		}
+		payload, frameMemory, err := security.ReadRequestMemory(reader, int64(security.MaxRequestBodySize))
+		if err != nil {
+			if errors.Is(err, security.ErrRequestMemoryBudget) {
+				rejectMemory()
+			}
 			return
 		}
 		_ = conn.SetReadDeadline(time.Time{})
 		if messageType != websocket.TextMessage && messageType != websocket.BinaryMessage {
+			frameMemory.Release()
 			_ = writeResponsesWSError(conn, api.NewAPIError(api.ErrCodeInvalidRequest, "unsupported websocket message type", api.ErrorTypeInvalidRequest))
 			continue
 		}
 		payload, forwardedEventID := stripNewAPIPolicyWebSocketEventID(payload)
 
 		ack, forward, apiErr := normalizeRealtimeTextClientEvent(&state, payload)
+		if !stateMemory.TryResize(state.retainedLogicalBytes()) {
+			rejectMemory()
+			frameMemory.Release()
+			return
+		}
 		if apiErr != nil {
 			_ = writeResponsesWSError(conn, apiErr)
+			frameMemory.Release()
 			continue
 		}
 		if len(ack) > 0 {
 			if err := writeResponsesWSMessage(conn, ack); err != nil {
+				frameMemory.Release()
 				return
 			}
 		}
+		// Session acknowledgements can echo a large original frame. Retain its
+		// admission until the write finishes; forwarding obtains its own lease.
+		frameMemory.Release()
 		if len(forward) == 0 {
 			continue
 		}
@@ -137,14 +162,29 @@ func (h *Handler) RealtimeWebSocket(c *gin.Context) {
 			state.appendHistory(completedOutput...)
 		}
 		state.Items = nil
+		if !stateMemory.TryResize(state.retainedLogicalBytes()) {
+			rejectMemory()
+			return
+		}
 	}
+}
+
+func (s *realtimeTextSession) retainedLogicalBytes() int64 {
+	size := int64(len(s.Model) + len(s.Instructions) + len(s.Tools) + len(s.ToolChoice))
+	for _, item := range s.Items {
+		size += int64(len(item))
+	}
+	for _, item := range s.History {
+		size += int64(len(item))
+	}
+	return size
 }
 
 func normalizeRealtimeTextClientEvent(state *realtimeTextSession, raw []byte) (ack []byte, forward []byte, apiErr *api.APIError) {
 	if state == nil {
 		return nil, nil, api.NewAPIError(api.ErrCodeServerError, "realtime session state is unavailable", api.ErrorTypeServer)
 	}
-	trimmed := []byte(strings.TrimSpace(string(raw)))
+	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || len(trimmed) > security.MaxRequestBodySize || !gjson.ValidBytes(trimmed) {
 		return nil, nil, api.NewAPIError(api.ErrCodeInvalidRequest, "invalid realtime websocket request payload", api.ErrorTypeInvalidRequest)
 	}
@@ -156,19 +196,19 @@ func normalizeRealtimeTextClientEvent(state *realtimeTextSession, raw []byte) (a
 			return nil, nil, api.NewAPIError(api.ErrCodeMissingField, "session is required in session.update", api.ErrorTypeInvalidRequest)
 		}
 		if model := strings.TrimSpace(session.Get("model").String()); model != "" {
-			state.Model = model
+			state.Model = strings.Clone(model)
 		}
 		if realtimeModalitiesContainAudio(session.Get("output_modalities")) || realtimeModalitiesContainAudio(session.Get("modalities")) {
 			return nil, nil, api.NewAPIError(api.ErrCodeInvalidRequest, "Codex2API /v1/realtime currently supports text modalities only", api.ErrorTypeInvalidRequest)
 		}
 		if instructions := session.Get("instructions"); instructions.Exists() {
-			state.Instructions = instructions.String()
+			state.Instructions = strings.Clone(instructions.String())
 		}
 		if tools := session.Get("tools"); tools.Exists() {
-			state.Tools = append(state.Tools[:0], tools.Raw...)
+			state.Tools = append(json.RawMessage(nil), tools.Raw...)
 		}
 		if toolChoice := session.Get("tool_choice"); toolChoice.Exists() {
-			state.ToolChoice = append(state.ToolChoice[:0], toolChoice.Raw...)
+			state.ToolChoice = append(json.RawMessage(nil), toolChoice.Raw...)
 		}
 		return marshalRealtimeServerEvent(map[string]any{
 			"type":    "session.updated",
@@ -298,7 +338,11 @@ func (state *realtimeTextSession) appendHistory(items ...json.RawMessage) {
 	}
 	for len(state.History) > 0 && (len(state.History) > realtimeTextHistoryMaxItems || state.historyBytes > realtimeTextHistoryMaxBytes) {
 		state.historyBytes -= len(state.History[0])
+		state.History[0] = nil
 		state.History = state.History[1:]
+	}
+	if len(state.History) == 0 {
+		state.History = nil
 	}
 }
 

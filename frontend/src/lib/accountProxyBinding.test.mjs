@@ -203,3 +203,34 @@ test("egress summary only shows for a successful test", () => {
   assert.equal(formatProxyEgressSummary(failed), "");
   assert.equal(formatProxyEgressSummary(null), "");
 });
+
+test("resin overrides every layer of the proxy chain for codex accounts", () => {
+  const ctx = buildProxyBindingContext({
+    proxies: [healthy, disabled],
+    groups: [{ id: 5, name: "hk", proxy_urls: ["http://hk-01:8080"] }],
+    poolEnabled: true,
+    globalProxy: "",
+    resinEnabled: true,
+  });
+
+  // 未绑定 + 池开着但只有一条:正常会报 pool,Resin 下一律 resin 且可调度。
+  const unbound = resolveAccountProxyBinding({}, ctx);
+  assert.equal(unbound.kind, "resin");
+  assert.equal(unbound.url, "");
+  assert.equal(unbound.usable, true);
+
+  // 绑定到已禁用托管代理:正常会 fail-closed,Resin 承担出口后不再被跳过。
+  const pinned = resolveAccountProxyBinding({ proxy_url: disabled.url }, ctx);
+  assert.equal(pinned.kind, "resin");
+  assert.equal(pinned.url, disabled.url, "keeps the overridden URL for the tooltip");
+  assert.equal(pinned.proxy, disabled);
+  assert.equal(pinned.usable, true);
+
+  // 组代理同样被覆盖。
+  assert.equal(resolveAccountProxyBinding({ group_ids: [5] }, ctx).kind, "resin");
+
+  // 未传 resinEnabled 的页面(中继渠道)行为不变。
+  const plain = buildProxyBindingContext({ proxies: [healthy], poolEnabled: true });
+  assert.equal(plain.resinEnabled, false);
+  assert.equal(resolveAccountProxyBinding({}, plain).kind, "pool");
+});

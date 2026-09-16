@@ -105,6 +105,7 @@ import {
   needsUsageReload,
   officialUsdValue,
   supportsOfficialUsage,
+  isWorkspaceCreditHardStop,
 } from "../lib/usageFormat";
 import {
   applyOptionalWorkspaceRouteHeader,
@@ -530,12 +531,20 @@ function formatAccessTokenBadge(account: AccountRow): string {
   return account.access_token_type === "codex_at" ? "codex_at" : "AT";
 }
 
-// getCreditBalanceDisplay 返回 credits 积分余额徽标应显示的文本；无余额（或未探测）返回 null。
+// getCreditBalanceDisplay 返回 credits 积分余额徽标应显示的文本；无余额（或未探测、已达硬限制）返回 null。
 function getCreditBalanceDisplay(account: AccountRow): string | null {
-  if (!account.credits_has_credits) return null;
+  if (account.credits_valid === false) return null;
+  if (isWorkspaceCreditHardStop(account) || account.credits_overage_limit_reached) return null;
   if (account.credits_unlimited) return "∞";
+  if (!account.credits_has_credits) return null;
   const balance = (account.credits_balance ?? "").trim();
-  return balance ? balance : null;
+  if (!balance) return "✓"; // 上游隐藏了余额（Team 成员）：有积分但看不到数字
+  const parsed = Number.parseFloat(balance);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return balance;
+  }
+  // 余额已知且为 0：与后端 creditsAvailableLocked 一致，不算可用积分
+  return null;
 }
 
 function getInitialAnalysisVisibility(): boolean {
@@ -1338,7 +1347,9 @@ const AccountTableRow = memo(function AccountTableRow({
                                               ? t(
                                                   "accounts.creditsBalanceUnlimited",
                                                 )
-                                              : t(
+                                              : getCreditBalanceDisplay(account) === "✓"
+                                                ? t("accounts.creditsBalanceAvailable")
+                                                : t(
                                                   "accounts.creditsBalanceBadge",
                                                   {
                                                     balance:
@@ -2083,6 +2094,8 @@ export default function Accounts() {
   // 开启时成立,所以开关与全局代理都得跟着代理池一起进来。
   const [proxyPoolEnabled, setProxyPoolEnabled] = useState(false);
   const [globalProxyURL, setGlobalProxyURL] = useState("");
+  // Resin 启用时 Codex 账号出站整层改经 Resin,徽章要报 resin 而不是下面任何一层。
+  const [resinEnabled, setResinEnabled] = useState(false);
   // 单个对象且引用稳定:memo 行组件的 props 里不能出现每轮新建的数组/对象,
   // 否则整表 memo 失效(账号页性能优化的既有教训)。
   // 分组用全量而非 codexGroups:后端解析组代理时不看渠道,迁移前挂在别的渠道组里
@@ -2094,8 +2107,9 @@ export default function Accounts() {
         groups: allGroups,
         poolEnabled: proxyPoolEnabled,
         globalProxy: globalProxyURL,
+        resinEnabled,
       }),
-    [proxyPool, allGroups, proxyPoolEnabled, globalProxyURL],
+    [proxyPool, allGroups, proxyPoolEnabled, globalProxyURL, resinEnabled],
   );
   const [lazyMode, setLazyMode] = useState(false);
   const [accountPortalEnabled, setAccountPortalEnabled] = useState(false);
@@ -2683,6 +2697,7 @@ export default function Accounts() {
         setAccountPortalEnabled(Boolean(settings.public_account_portal_page_enabled));
         setProxyPoolEnabled(Boolean(settings.proxy_pool_enabled));
         setGlobalProxyURL((settings.proxy_url ?? "").trim());
+        setResinEnabled(Boolean(settings.codex_egress?.resin_enabled));
       })
       .catch(() => undefined);
     return () => { cancelled = true; };
@@ -13623,7 +13638,9 @@ function AccountMobileCard({
                   title={
                     account.credits_unlimited
                       ? t("accounts.creditsBalanceUnlimited")
-                      : t("accounts.creditsBalanceBadge", { balance: creditBalance })
+                      : creditBalance === "✓"
+                        ? t("accounts.creditsBalanceAvailable")
+                        : t("accounts.creditsBalanceBadge", { balance: creditBalance })
                   }
                 >
                   <Coins className="size-3" />

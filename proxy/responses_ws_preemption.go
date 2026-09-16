@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/codex2api/cache"
@@ -25,9 +26,19 @@ const (
 	responsesWSSessionPreemptWatchInterval = 2 * time.Second
 	responsesWSSessionPreemptCacheTimeout  = 2 * time.Second
 	responsesWSSessionPreemptHandoffWait   = 2 * time.Second
+	// responsesWSSessionPreemptCloseGrace 是被抢占连接从关闭帧写出到上下文被取消的最长等待：
+	// 关闭帧一开始就写，其余时间只是等写完成，到点直接取消。
+	responsesWSSessionPreemptCloseGrace    = time.Second
+	responsesWSSessionPreemptedCloseReason = "session preempted by a newer connection"
 )
 
 type responsesWSSessionPreemptContextKey struct{}
+
+// responsesWSSessionPreemptState 随抢占上下文传递：preempted 在关闭帧发出前就置位，
+// 让旧连接在被取消之前遇到的读写错误也能归类为"被抢占"。
+type responsesWSSessionPreemptState struct {
+	preempted atomic.Bool
+}
 
 type responsesWSSessionPreemptKey struct {
 	apiKeyID    int64
@@ -88,7 +99,7 @@ func newResponsesWSSessionPreemptKey(c *gin.Context, rawBody []byte, identity re
 		return responsesWSSessionPreemptKey{}, false
 	}
 	scopeHash := responsesWSSessionPreemptScopeHash(c, identity)
-	sessionHash := responsesWSSessionPreemptIdentityHash(rawBody, identity, responsesWSTransportLane(c, identity))
+	sessionHash := responsesWSSessionPreemptIdentityHash(rawBody, identity, responsesWSTransportLane(c, rawBody, identity))
 	if scopeHash == "" || sessionHash == "" {
 		return responsesWSSessionPreemptKey{}, false
 	}
@@ -150,7 +161,7 @@ func normalizedResponsesWSPreemptGroupIDs(ids []int64) []int64 {
 	return result
 }
 
-func responsesWSTransportLane(c *gin.Context, identity requestSessionIdentity) string {
+func responsesWSTransportLane(c *gin.Context, rawBody []byte, identity requestSessionIdentity) string {
 	if c == nil || c.Request == nil {
 		return ""
 	}
@@ -161,7 +172,7 @@ func responsesWSTransportLane(c *gin.Context, identity requestSessionIdentity) s
 	if base == "" {
 		return ""
 	}
-	lane := ResolveCodexWebsocketTransportSessionKey(base, c.Request.Header)
+	lane := ResolveCodexWebsocketTransportSessionKeyWithBody(base, c.Request.Header, rawBody)
 	if lane == base {
 		return ""
 	}
@@ -212,13 +223,21 @@ func (h *Handler) responsesWSSessionPreemptOwnerStore() cache.RuntimeOwnerStore 
 }
 
 func (h *Handler) beginResponsesWSSessionPreemption(ctx context.Context, c *gin.Context, rawBody []byte, identity requestSessionIdentity) (context.Context, func(), bool) {
+	return h.beginResponsesWSSessionPreemptionWithNotify(ctx, c, rawBody, identity, nil)
+}
+
+// beginResponsesWSSessionPreemptionWithNotify 与 beginResponsesWSSessionPreemption 相同，
+// 另外登记 notifyPreempted：本连接被更新的连接取代时，先调用它给旧客户端发带原因的
+// 关闭帧，再取消上下文。客户端因此拿到 1013 立即重试，而不是在裸 1006 断开后
+// 静默等到自己的空闲超时。
+func (h *Handler) beginResponsesWSSessionPreemptionWithNotify(ctx context.Context, c *gin.Context, rawBody []byte, identity requestSessionIdentity, notifyPreempted func()) (context.Context, func(), bool) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if h == nil || ctx.Err() != nil {
 		return ctx, func() {}, false
 	}
-	if armed, _ := ctx.Value(responsesWSSessionPreemptContextKey{}).(bool); armed {
+	if state, _ := ctx.Value(responsesWSSessionPreemptContextKey{}).(*responsesWSSessionPreemptState); state != nil {
 		return ctx, func() {}, true
 	}
 	key, ok := newResponsesWSSessionPreemptKey(c, rawBody, identity)
@@ -226,10 +245,33 @@ func (h *Handler) beginResponsesWSSessionPreemption(ctx context.Context, c *gin.
 		return ctx, func() {}, false
 	}
 
-	preemptCtx, cancel := context.WithCancelCause(ctx)
+	state := &responsesWSSessionPreemptState{}
+	preemptCtx, cancel := context.WithCancelCause(context.WithValue(ctx, responsesWSSessionPreemptContextKey{}, state))
 	var preemptOnce sync.Once
 	preempt := func() {
-		preemptOnce.Do(func() { cancel(errResponsesWSSessionPreempted) })
+		preemptOnce.Do(func() {
+			state.preempted.Store(true)
+			if notifyPreempted == nil {
+				cancel(errResponsesWSSessionPreempted)
+				return
+			}
+			// 取消会让旧连接的处理循环立刻退出并 Close 底层 socket，关闭帧必须先于
+			// 取消写出；通知在独立协程里做，不阻塞取代它的新连接。
+			notified := make(chan struct{})
+			go func() {
+				defer close(notified)
+				notifyPreempted()
+			}()
+			go func() {
+				timer := time.NewTimer(responsesWSSessionPreemptCloseGrace)
+				defer timer.Stop()
+				select {
+				case <-notified:
+				case <-timer.C:
+				}
+				cancel(errResponsesWSSessionPreempted)
+			}()
+		})
 	}
 	owner := []byte(uuid.NewString())
 	ownerStore := h.responsesWSSessionPreemptOwnerStore()
@@ -282,7 +324,7 @@ func (h *Handler) beginResponsesWSSessionPreemption(ctx context.Context, c *gin.
 		}
 		cancel(nil)
 	}
-	return context.WithValue(preemptCtx, responsesWSSessionPreemptContextKey{}, true), cleanup, true
+	return preemptCtx, cleanup, true
 }
 
 func watchResponsesWSSessionPreemptOwner(ctx context.Context, ownerStore cache.RuntimeOwnerStore, key responsesWSSessionPreemptKey, owner []byte, onLost func()) func() {
@@ -321,5 +363,11 @@ func watchResponsesWSSessionPreemptOwner(ctx context.Context, ownerStore cache.R
 }
 
 func isResponsesWSSessionPreempted(ctx context.Context) bool {
-	return ctx != nil && errors.Is(context.Cause(ctx), errResponsesWSSessionPreempted)
+	if ctx == nil {
+		return false
+	}
+	if state, _ := ctx.Value(responsesWSSessionPreemptContextKey{}).(*responsesWSSessionPreemptState); state != nil && state.preempted.Load() {
+		return true
+	}
+	return errors.Is(context.Cause(ctx), errResponsesWSSessionPreempted)
 }

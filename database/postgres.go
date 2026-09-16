@@ -1456,7 +1456,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS usage_log_flush_interval_seconds INT DEFAULT 5;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS stream_flush_policy VARCHAR(20) DEFAULT 'immediate';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS stream_flush_interval_ms INT DEFAULT 20;
-	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS first_token_mode VARCHAR(20) DEFAULT 'strict';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS first_token_mode VARCHAR(20) DEFAULT 'loose';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS first_token_timeout_seconds INT DEFAULT 0;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS billing_tier_policy VARCHAR(20) DEFAULT 'actual';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS image_storage_config TEXT DEFAULT '{}';
@@ -2487,13 +2487,10 @@ func normalizeBillingTierPolicy(policy string) string {
 	}
 }
 
-func normalizeFirstTokenMode(mode string) string {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "loose":
-		return "loose"
-	default:
-		return "strict"
-	}
+// normalizeFirstTokenMode 统一返回 loose：严格首字开关已取消，旧行里的 strict
+// 按宽松口径生效，列保留只为兼容旧库。
+func normalizeFirstTokenMode(_ string) string {
+	return "loose"
 }
 
 // NormalizeAutoResetCreditsBeforeExpiryMinutes 将临期自动消费阈值限制在
@@ -2624,7 +2621,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(usage_log_flush_interval_seconds, 5),
 			       COALESCE(stream_flush_policy, 'immediate'),
 			       COALESCE(stream_flush_interval_ms, 20),
-			       COALESCE(NULLIF(TRIM(first_token_mode), ''), 'strict'),
+			       COALESCE(NULLIF(TRIM(first_token_mode), ''), 'loose'),
 			       COALESCE(first_token_timeout_seconds, 0),
 			       COALESCE(NULLIF(TRIM(billing_tier_policy), ''), 'actual'),
 			       COALESCE(image_storage_config, '{}'),

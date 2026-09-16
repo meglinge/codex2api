@@ -100,79 +100,64 @@ func TestIsFirstTokenPayload(t *testing.T) {
 	}
 }
 
-func TestIsFirstTokenResultForMode(t *testing.T) {
+func TestLooseFirstTokenResult(t *testing.T) {
 	cases := []struct {
 		name       string
 		data       string
-		mode       string
 		wantStrict bool
-		wantMode   bool
+		wantLoose  bool
 	}{
 		{
 			name:       "output_item_added",
 			data:       `{"type":"response.output_item.added","item":{"type":"reasoning"}}`,
-			mode:       FirstTokenModeLoose,
 			wantStrict: false,
-			wantMode:   true,
+			wantLoose:  true,
 		},
 		{
 			name:       "content_part_added",
 			data:       `{"type":"response.content_part.added","part":{"type":"output_text","text":""}}`,
-			mode:       FirstTokenModeLoose,
 			wantStrict: false,
-			wantMode:   true,
+			wantLoose:  true,
 		},
 		{
 			name:       "created",
 			data:       `{"type":"response.created"}`,
-			mode:       FirstTokenModeLoose,
 			wantStrict: false,
-			wantMode:   false,
+			wantLoose:  false,
 		},
 		{
 			name:       "in_progress",
 			data:       `{"type":"response.in_progress"}`,
-			mode:       FirstTokenModeLoose,
 			wantStrict: false,
-			wantMode:   false,
+			wantLoose:  false,
 		},
 		{
 			name:       "completed",
 			data:       `{"type":"response.completed"}`,
-			mode:       FirstTokenModeLoose,
 			wantStrict: false,
-			wantMode:   false,
+			wantLoose:  false,
 		},
 		{
 			name:       "failed",
 			data:       `{"type":"response.failed"}`,
-			mode:       FirstTokenModeLoose,
 			wantStrict: false,
-			wantMode:   false,
+			wantLoose:  false,
 		},
 		{
 			name:       "text_delta",
 			data:       `{"type":"response.output_text.delta","delta":"hello"}`,
-			mode:       FirstTokenModeLoose,
 			wantStrict: true,
-			wantMode:   true,
-		},
-		{
-			name:       "invalid_mode_uses_strict",
-			data:       `{"type":"response.output_item.added","item":{"type":"reasoning"}}`,
-			mode:       "invalid",
-			wantStrict: false,
-			wantMode:   false,
+			wantLoose:  true,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			parsed := gjson.Parse(tc.data)
-			if got := isFirstTokenResultForMode(parsed, FirstTokenModeStrict); got != tc.wantStrict {
-				t.Fatalf("strict mode got %v, want %v", got, tc.wantStrict)
+			if got := isFirstTokenResult(parsed); got != tc.wantStrict {
+				t.Fatalf("strict content check got %v, want %v", got, tc.wantStrict)
 			}
-			if got := isFirstTokenResultForMode(parsed, tc.mode); got != tc.wantMode {
-				t.Fatalf("mode %q got %v, want %v", tc.mode, got, tc.wantMode)
+			if got := isLooseFirstTokenResult(parsed); got != tc.wantLoose {
+				t.Fatalf("loose first token got %v, want %v", got, tc.wantLoose)
 			}
 		})
 	}

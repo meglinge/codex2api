@@ -436,7 +436,11 @@ func (b *codexTelemetryBody) observe(data []byte) {
 			return
 		}
 		b.line(bytes.TrimSuffix(b.pending, []byte{'\r'}))
-		b.pending = b.pending[:0]
+		if cap(b.pending) > 256<<10 {
+			b.pending = nil
+		} else {
+			b.pending = b.pending[:0]
+		}
 		data = data[i+1:]
 	}
 }
@@ -444,7 +448,12 @@ func (b *codexTelemetryBody) observe(data []byte) {
 func (b *codexTelemetryBody) line(line []byte) {
 	if len(line) == 0 {
 		b.processEvent(b.event)
-		b.event, b.dropping = b.event[:0], false
+		if cap(b.event) > 256<<10 {
+			b.event = nil
+		} else {
+			b.event = b.event[:0]
+		}
+		b.dropping = false
 		return
 	}
 	if bytes.HasPrefix(line, []byte("data:")) && !b.dropping {

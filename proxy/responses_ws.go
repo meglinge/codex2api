@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,7 @@ import (
 const (
 	responsesWSFirstMessageTimeout        = 30 * time.Second
 	responsesWSWriteTimeout               = 30 * time.Second
+	responsesWSOverloadWriteTimeout       = time.Second
 	responsesWSFriendlyUpstreamErr        = "上游服务临时繁忙，请稍后重试"
 	newAPIPolicyWebSocketEventField       = "__newapi_policy_event_id"
 	newAPIPolicyWebSocketCapabilityHeader = "X-Codex2API-Policy-Event-ID"
@@ -104,21 +106,35 @@ type responsesWSForwardOptions struct {
 // turn is backing off, so a client disconnect can cancel an unlimited retry
 // loop without introducing a second concurrent WebSocket reader.
 type responsesWSInboundMessage struct {
-	messageType int
-	payload     []byte
-	turn        int
-	err         error
-	queuedBytes *atomic.Int64
+	messageType   int
+	payload       []byte
+	turn          int
+	err           error
+	queuedBytes   *atomic.Int64
+	requestMemory *security.RequestMemoryReservation
 }
 
 type responsesWSInboundObserver func(responsesWSInboundMessage)
 
 func (m *responsesWSInboundMessage) releaseQueueBudget() {
-	if m == nil || m.queuedBytes == nil {
+	if m == nil {
 		return
 	}
-	m.queuedBytes.Add(-int64(len(m.payload)))
-	m.queuedBytes = nil
+	if m.queuedBytes != nil {
+		m.queuedBytes.Add(-int64(len(m.payload)))
+		m.queuedBytes = nil
+	}
+	if m.requestMemory != nil {
+		m.requestMemory.Release()
+		m.requestMemory = nil
+	}
+}
+
+// The read pump must have stopped before draining the connection's leftovers.
+func drainResponsesWSInboundMessages(messages <-chan responsesWSInboundMessage) {
+	for message := range messages {
+		message.releaseQueueBudget()
+	}
 }
 
 func startResponsesWSReadPump(ctx context.Context, conn *websocket.Conn, observers ...responsesWSInboundObserver) (context.Context, <-chan responsesWSInboundMessage, <-chan struct{}, context.CancelFunc) {
@@ -142,8 +158,16 @@ func startResponsesWSReadPump(ctx context.Context, conn *websocket.Conn, observe
 			} else {
 				_ = conn.SetReadDeadline(time.Time{})
 			}
-			messageType, payload, err := conn.ReadMessage()
+			messageType, reader, err := conn.NextReader()
+			var payload []byte
+			var reservation *security.RequestMemoryReservation
+			if err == nil {
+				payload, reservation, err = security.ReadRequestMemory(reader, queueByteLimit)
+			}
 			if err != nil {
+				if errors.Is(err, security.ErrRequestMemoryBudget) {
+					closeResponsesWSWithin(conn, websocket.CloseTryAgainLater, "request memory capacity exhausted", responsesWSOverloadWriteTimeout)
+				}
 				// Cancel before notifying the consumer. If the bounded handoff
 				// buffer is already full, the active upstream turn still
 				// observes cancellation and will stop without waiting for it.
@@ -158,14 +182,16 @@ func startResponsesWSReadPump(ctx context.Context, conn *websocket.Conn, observe
 			payloadBytes := int64(len(payload))
 			if queuedBytes.Add(payloadBytes) > queueByteLimit {
 				queuedBytes.Add(-payloadBytes)
+				reservation.Release()
 				cancel()
 				return
 			}
 			message := responsesWSInboundMessage{
-				messageType: messageType,
-				payload:     payload,
-				turn:        turn,
-				queuedBytes: &queuedBytes,
+				messageType:   messageType,
+				payload:       payload,
+				turn:          turn,
+				queuedBytes:   &queuedBytes,
+				requestMemory: reservation,
 			}
 			// Observers must stay non-blocking. Realtime uses this hook to signal a
 			// response.cancel while the serial consumer is waiting on an upstream
@@ -178,10 +204,10 @@ func startResponsesWSReadPump(ctx context.Context, conn *websocket.Conn, observe
 			select {
 			case messages <- message:
 			case <-readCtx.Done():
-				queuedBytes.Add(-payloadBytes)
+				message.releaseQueueBudget()
 				return
 			default:
-				queuedBytes.Add(-payloadBytes)
+				message.releaseQueueBudget()
 				// A turn is processed serially. The bounded count and byte budgets
 				// absorb normal Realtime event bursts without allowing a stalled
 				// upstream turn to retain unbounded client input.
@@ -245,6 +271,7 @@ func (h *Handler) ResponsesWebSocket(c *gin.Context) {
 		_ = conn.Close()
 		stopDownstreamKeepalive()
 		<-readPumpDone
+		drainResponsesWSInboundMessages(messages)
 	}()
 
 	for {
@@ -317,6 +344,14 @@ func stripNewAPIPolicyWebSocketEventID(payload []byte) ([]byte, string) {
 }
 
 func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.Conn, rawPayload []byte, policyEventID string, options *responsesWSForwardOptions) (returnErr error) {
+	defer releasePromptRequestFrameBody(c)
+	reservation, admitted := security.TryAcquireRequestMemory(int64(len(rawPayload)))
+	if !admitted {
+		apiErr := api.NewAPIError(api.ErrCodeServiceUnavailable, "Request memory capacity exhausted, please retry later", api.ErrorTypeServer)
+		_ = writeResponsesWSErrorWithin(conn, apiErr, responsesWSOverloadWriteTimeout)
+		return newResponsesWSCloseError(websocket.CloseTryAgainLater, apiErr.Message, apiErr)
+	}
+	defer reservation.Release()
 	if apiErr := h.refreshNewAPIWebSocketBinding(c, time.Now()); apiErr != nil {
 		_ = writeResponsesWSError(conn, apiErr)
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, apiErr)
@@ -417,7 +452,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		c.Set("x-service-tier", resolveServiceTier("", serviceTier))
 	}
 
-	codexBody, _ := PrepareResponsesWebSocketBody(rawBody)
+	codexBody, naturalImageIntent := prepareResponsesWebSocketTurnBody(rawBody)
 	// Pin an available L1 ancestor before upstream generation; defer backend
 	// lookup, merging and serialization until a snapshot is actually needed.
 	// strip 策略：剥离图片工具能力声明后作为普通文本请求继续（issue #411）。
@@ -445,7 +480,12 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	// Only a request that passed payload, prompt-policy and API-key admission may
 	// replace the active owner. Claim before concurrency/account acquisition so
 	// the old request can release those leases for the new one.
-	if preemptCtx, cleanupPreempt, armed := h.beginResponsesWSSessionPreemption(c.Request.Context(), c, rawBody, sessionIdentity); armed {
+	// 被更新的连接取代时先给本连接发 1013 关闭帧再取消：Codex 客户端据此立即重试，
+	// 而不是在裸 1006 断开后静默等到自己的空闲超时。
+	notifyPreempted := func() {
+		closeResponsesWS(conn, websocket.CloseTryAgainLater, responsesWSSessionPreemptedCloseReason)
+	}
+	if preemptCtx, cleanupPreempt, armed := h.beginResponsesWSSessionPreemptionWithNotify(c.Request.Context(), c, rawBody, sessionIdentity, notifyPreempted); armed {
 		originalRequest := c.Request
 		c.Request = originalRequest.WithContext(preemptCtx)
 		defer func() {
@@ -664,7 +704,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		useWebsocket := !wsHTTPFallback.ForceHTTP()
 		// 生图请求改走 HTTP 上游（客户端仍是 WS）：WebSocket 上游传输大体积
 		// 图片数据会卡死（issue #220）；自然语言生图意图也需保留图片工具（issue #288）。
-		if useWebsocket && rawResponsesBodyShouldForceHTTPForImageGeneration(rawBody) {
+		if useWebsocket && (responsesBodyRequestsImageGeneration(rawBody) || naturalImageIntent) {
 			useWebsocket = false
 		}
 		// 体积达到已学习的 1009 阈值时直接首发 HTTP,跳过 WS 必败等待(issue #404)。
@@ -1072,7 +1112,7 @@ func (h *Handler) streamResponsesWSUpstream(
 	var usage *UsageInfo
 	var actualServiceTier string
 	ttftRecorded := false
-	// contentTokenSeen 用严格判定（与 first_token_mode 无关）。loose 模式下
+	// contentTokenSeen 用严格判定（与宽松首字统计无关）。宽松口径下
 	// codex.rate_limits / metadata 会置位 ttftRecorded；本机 2004 还开了
 	// preflight passthrough，这两帧会先写出并置位 wroteAnyBody。若用它们做
 	// 「首包前」判断，previous_response_not_found 降级在真实上游上永远进不去（#541）。
@@ -1153,7 +1193,7 @@ func (h *Handler) streamResponsesWSUpstream(
 		// terminalFailurePayload 取改写前的原始 data，不受影响。
 		clientData = sanitizeCapacityShedEventForClient(eventType, clientData)
 		ttftGuard.MarkProgress(eventType)
-		isFirstToken := isFirstTokenResultForMode(parsed, currentFirstTokenMode())
+		isFirstToken := isLooseFirstTokenResult(parsed)
 		if !ttftRecorded && isFirstToken {
 			firstTokenMs = int(time.Since(start).Milliseconds())
 			ttftRecorded = true
@@ -1593,7 +1633,7 @@ func (h *Handler) streamResponsesWSUpstream(
 }
 
 func normalizeResponsesWebSocketClientPayload(raw []byte) ([]byte, string, *api.APIError) {
-	trimmed := []byte(strings.TrimSpace(string(raw)))
+	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
 		return nil, "", api.NewAPIError(api.ErrCodeInvalidRequest, "empty websocket request payload", api.ErrorTypeInvalidRequest)
 	}
@@ -1695,6 +1735,10 @@ func isResponsesWebSocketUpgradeRequest(r *http.Request) bool {
 }
 
 func writeResponsesWSError(conn *websocket.Conn, apiErr *api.APIError) error {
+	return writeResponsesWSErrorWithin(conn, apiErr, responsesWSWriteTimeout)
+}
+
+func writeResponsesWSErrorWithin(conn *websocket.Conn, apiErr *api.APIError, timeout time.Duration) error {
 	if apiErr == nil {
 		apiErr = api.NewAPIError(api.ErrCodeServerError, "Internal server error", api.ErrorTypeServer)
 	}
@@ -1708,7 +1752,11 @@ func writeResponsesWSError(conn *websocket.Conn, apiErr *api.APIError) error {
 	if err != nil {
 		return err
 	}
-	return writeResponsesWSMessage(conn, payload)
+	if conn == nil {
+		return errResponsesWSClientGone
+	}
+	_ = conn.SetWriteDeadline(time.Now().Add(timeout))
+	return conn.WriteMessage(websocket.TextMessage, payload)
 }
 
 func responsesWSClientUpstreamAPIError(apiErr *api.APIError, hideUpstreamErrors bool) *api.APIError {
@@ -1727,12 +1775,16 @@ func writeResponsesWSMessage(conn *websocket.Conn, payload []byte) error {
 }
 
 func closeResponsesWS(conn *websocket.Conn, code int, reason string) {
+	closeResponsesWSWithin(conn, code, reason, responsesWSWriteTimeout)
+}
+
+func closeResponsesWSWithin(conn *websocket.Conn, code int, reason string, timeout time.Duration) {
 	if conn == nil {
 		return
 	}
 	reason = truncateWebSocketCloseReason(reason)
 	msg := websocket.FormatCloseMessage(code, reason)
-	_ = conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(responsesWSWriteTimeout))
+	_ = conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(timeout))
 }
 
 func truncateWebSocketCloseReason(reason string) string {

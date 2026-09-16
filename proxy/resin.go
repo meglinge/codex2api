@@ -25,13 +25,23 @@ type ResinConfig struct {
 // 全局 Resin 配置（原子指针，支持热更新）
 var resinCfg atomic.Pointer[ResinConfig]
 
-// SetResinConfig 设置全局 Resin 配置；cfg 为 nil 或 BaseURL 为空时禁用 Resin
+// SetResinConfig 设置全局 Resin 配置；cfg 为 nil 或 BaseURL 为空时禁用 Resin。
+// 启用/禁用会同步到 auth 包的出口标记,让调度器的代理池 fail-closed 过滤知道
+// Codex 账号此时由 Resin 承担出站。日志里的地址只保留 scheme://host,路径段
+// 就是 Resin token,不能整段落盘(issue #679)。
 func SetResinConfig(cfg *ResinConfig) {
+	wasEnabled := IsResinEnabled()
 	if cfg != nil && strings.TrimSpace(cfg.BaseURL) != "" && strings.TrimSpace(cfg.PlatformName) != "" {
 		resinCfg.Store(cfg)
-		log.Printf("[Resin] 已启用: platform=%s url=%s", cfg.PlatformName, cfg.BaseURL)
-	} else {
-		resinCfg.Store(nil)
+		auth.SetResinEgressEnabled(true)
+		log.Printf("[Resin] 已启用: platform=%s endpoint=%s;Codex 渠道出站全部经 Resin,代理池/分组代理/账号与全局 proxy_url 对 Codex 不再生效",
+			cfg.PlatformName, MaskResinBaseURL(cfg.BaseURL))
+		return
+	}
+	resinCfg.Store(nil)
+	auth.SetResinEgressEnabled(false)
+	if wasEnabled {
+		log.Printf("[Resin] 已禁用;Codex 渠道出站恢复按 账号 > 分组 > 代理池 > 全局 > 直连 解析")
 	}
 }
 
@@ -52,10 +62,11 @@ func IsResinEnabled() bool {
 // X-Resin-Account；未启用时返回原 URL 与 nil 客户端，由调用方按既有直连
 // transport 兜底。
 func resinMaintenanceTarget(account *auth.Account, targetURL string) (finalURL string, client *http.Client, viaResin bool) {
-	if !IsResinEnabled() || account == nil {
+	egress := ResolveCodexEgress(account, targetURL, "")
+	if !egress.ViaResin() {
 		return targetURL, nil, false
 	}
-	return BuildReverseProxyURL(targetURL), getResinHTTPClient(account), true
+	return egress.URL, egress.Client(), true
 }
 
 // ==================== 反向代理 URL 构建 ====================

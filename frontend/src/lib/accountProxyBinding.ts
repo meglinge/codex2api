@@ -1,5 +1,7 @@
 // 账号代理绑定判定：把后端 resolveProxyForAccountSnapshot 的优先级
 // (账号自绑 > 分组 > 代理池 > 全局 > 直连) 翻译成列表徽章能显示的一个状态。
+// Resin 是这条链之上的整层覆盖(issue #679):启用时 Codex 账号一律报 resin,
+// 账号自绑的 URL 只随徽章提示告知"已被覆盖",不再参与判定。
 //
 // 两条刻意的边界：
 //   1. 继承态只报来源、不报具体 URL。池内与组内都是按账号 ID 粘性散列选路的，
@@ -8,6 +10,8 @@
 //      两边必须恒等；任何"聪明"的归一化都会造出假的失配。
 
 export type AccountProxyBindingKind =
+  // Resin 已启用:该账号所有出站经 Resin,下面各层配置暂不参与
+  | "resin"
   // 账号自绑到代理池里的一条健康条目
   | "bound"
   // 账号自绑到托管代理，但该条已禁用/测试失败/被删除；代理池开启时无可用出口
@@ -48,6 +52,8 @@ export interface ProxyBindingAccount {
 }
 
 export interface ProxyBindingContext {
+  /** Resin 反代已启用(仅 Codex 账号页传 true;中继型渠道不经 Resin)。 */
+  resinEnabled: boolean;
   poolEnabled: boolean;
   globalProxy: string;
   /** 启用池条目数：enabled 且测试未失败，与后端 ListEnabledProxies 同口径。 */
@@ -87,6 +93,7 @@ export function buildProxyBindingContext(input: {
   groups?: ProxyBindingGroup[] | null;
   poolEnabled?: boolean | null;
   globalProxy?: string | null;
+  resinEnabled?: boolean | null;
 }): ProxyBindingContext {
   const managed = new Map<string, ProxyBindingProxy>();
   const usable = new Set<string>();
@@ -104,6 +111,7 @@ export function buildProxyBindingContext(input: {
   }
 
   return {
+    resinEnabled: Boolean(input.resinEnabled),
     poolEnabled: Boolean(input.poolEnabled),
     globalProxy: trimValue(input.globalProxy),
     poolSize: usable.size,
@@ -133,6 +141,16 @@ export function resolveAccountProxyBinding(
   const base = { url: "", proxy: null, groupName: "", usable: true } as const;
 
   const accountProxy = trimValue(account?.proxy_url);
+  // Resin 整层覆盖:出口由 Resin 提供,池空/绑定失效都不再让账号被跳过。
+  // 带上自绑 URL 只为提示"这条配置已被覆盖",不代表它在生效。
+  if (ctx.resinEnabled) {
+    return {
+      ...base,
+      kind: "resin",
+      url: accountProxy,
+      proxy: accountProxy ? (ctx.managed.get(accountProxy) ?? null) : null,
+    };
+  }
   if (accountProxy) {
     const proxy = ctx.managed.get(accountProxy) ?? null;
     if (isManagedProxyUnavailable(accountProxy, ctx)) {

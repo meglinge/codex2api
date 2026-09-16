@@ -11,6 +11,7 @@ import {
   officialUsdFromDailyItems,
   officialUsdValue,
   supportsOfficialUsage,
+  isWorkspaceCreditHardStop,
 } from "./usageFormat.ts";
 
 test("usage reload accepts either optional usage window as sampled", () => {
@@ -116,9 +117,18 @@ test("official cost reload only retries Codex accounts missing the snapshot", ()
   assert.equal(supportsOfficialUsage({}), true);
   assert.equal(supportsOfficialUsage({ access_token_type: "codex_at" }), false);
   assert.equal(supportsOfficialUsage({ access_token_type: " CODEX_AT " }), false);
+  assert.equal(supportsOfficialUsage({ access_token_type: "codex_at", chatgpt_account_id: "acc_123" }), true);
+  assert.equal(supportsOfficialUsage({ access_token_type: "codex_at", effective_workspace_id: "acc_456" }), true);
+  assert.equal(supportsOfficialUsage({ access_token_type: "codex_at", chatgpt_account_id: "", effective_workspace_id: "" }), false);
   assert.equal(supportsOfficialUsage({ openai_responses_api: true }), false);
   assert.equal(supportsOfficialUsage({ grok_api: true }), false);
   assert.equal(supportsOfficialUsage({ claude_api: true }), false);
+
+  assert.equal(isWorkspaceCreditHardStop({ credits_spend_control_reached: true }), true);
+  assert.equal(isWorkspaceCreditHardStop({ credits_rate_limit_reached_type: "workspace_member_credits_depleted" }), true);
+  assert.equal(isWorkspaceCreditHardStop({ credits_rate_limit_reached_type: "WORKSPACE_OWNER_USAGE_LIMIT_REACHED" }), true);
+  assert.equal(isWorkspaceCreditHardStop({ credits_rate_limit_reached_type: "other_limit" }), false);
+  assert.equal(isWorkspaceCreditHardStop({}), false);
   assert.equal(isOfficialCostHiddenAccount({ status: "error" }), true);
   assert.equal(isOfficialCostHiddenAccount({ status: "active" }), false);
   assert.equal(

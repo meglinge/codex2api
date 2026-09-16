@@ -37,7 +37,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { api, type ProxyRow } from "../api";
-import type { AccountRow, ProxyRiskScoreSnapshot, ProxyRiskScoringJob, ProxyRiskScoringProfile } from "../types";
+import type { AccountRow, CodexEgressSummary, ProxyRiskScoreSnapshot, ProxyRiskScoringJob, ProxyRiskScoringProfile } from "../types";
 import ChannelLogo from "../components/ChannelLogo";
 import Modal from "../components/Modal";
 import PageHeader from "../components/PageHeader";
@@ -440,6 +440,8 @@ export default function Proxies() {
   const [proxies, setProxies] = useState<ProxyRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [poolEnabled, setPoolEnabled] = useState(false);
+  // Resin 启用时代理池对 Codex 渠道整层失效,页面顶部必须明说(issue #679)。
+  const [codexEgress, setCodexEgress] = useState<CodexEgressSummary | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [addInput, setAddInput] = useState("");
   const [addLabel, setAddLabel] = useState("");
@@ -563,6 +565,7 @@ export default function Proxies() {
       ]);
       setProxies(proxyRes.proxies);
       setPoolEnabled(settingsRes.proxy_pool_enabled);
+      setCodexEgress(settingsRes.codex_egress ?? null);
       setRiskProfiles(riskRes.profiles ?? []);
     } catch (error) {
       showToast(
@@ -1351,6 +1354,13 @@ export default function Proxies() {
               style={{ width: `${(testAllDone / testAllTotal) * 100}%` }}
             />
           </div>
+        </div>
+      ) : null}
+
+      {codexEgress?.resin_enabled ? (
+        <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3.5 text-xs leading-relaxed text-amber-800 dark:text-amber-200">
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+          <span>{t("proxies.resinOverrideNotice", { endpoint: codexEgress.resin_endpoint || "" })}</span>
         </div>
       ) : null}
 

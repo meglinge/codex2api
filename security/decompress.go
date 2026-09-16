@@ -48,6 +48,10 @@ func isSupportedContentEncoding(encoding string) bool {
 
 // decodeContentEncodingOnce 按单个编码解压 data，解压结果超过 maxSize 时报错。
 func decodeContentEncodingOnce(data []byte, encoding string, maxSize int64) ([]byte, error) {
+	return decodeContentEncodingWithMemory(data, encoding, maxSize, nil)
+}
+
+func decodeContentEncodingWithMemory(data []byte, encoding string, maxSize int64, reservation *RequestMemoryReservation) ([]byte, error) {
 	var reader io.Reader
 	switch encoding {
 	case "zstd":
@@ -85,7 +89,7 @@ func decodeContentEncodingOnce(data []byte, encoding string, maxSize int64) ([]b
 		return nil, fmt.Errorf("unsupported content encoding: %s", encoding)
 	}
 
-	decoded, err := io.ReadAll(io.LimitReader(reader, maxSize+1))
+	decoded, err := readRequestMemoryBounded(reader, maxSize, reservation, 0)
 	if err != nil {
 		if errors.Is(err, zstd.ErrDecoderSizeExceeded) || errors.Is(err, zstd.ErrWindowSizeExceeded) {
 			return nil, errDecompressedBodyTooLarge
@@ -148,8 +152,12 @@ func RequestBodyDecompressor(maxSize int64) gin.HandlerFunc {
 		// 多个编码按施加顺序列出，解码逆序进行。
 		for i := len(encodings) - 1; i >= 0; i-- {
 			var err error
-			decoded, err = decodeContentEncodingOnce(decoded, encodings[i], maxSize)
+			decoded, err = decodeContentEncodingWithMemory(decoded, encodings[i], maxSize, requestMemoryFromContext(c))
 			if err != nil {
+				if errors.Is(err, ErrRequestMemoryBudget) {
+					rejectRequestMemory(c)
+					return
+				}
 				if errors.Is(err, errDecompressedBodyTooLarge) {
 					c.JSON(http.StatusRequestEntityTooLarge, gin.H{
 						"error": gin.H{

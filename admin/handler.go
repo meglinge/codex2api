@@ -81,10 +81,12 @@ type Handler struct {
 	// last/in-flight 避免翻页或前端重试把同一号打爆上游，failedAt 给持续
 	// 失败的账号更长的冷却，syncedOnce 记录「成功同步过但上游没有数据」
 	// （官方统计有滞后），让 page-stats 下发显式空态而不是无限触发回补。
-	whamDailyBackfillMu        sync.Mutex
-	whamDailyBackfillLast      map[int64]time.Time
-	whamDailyBackfillInFlight  map[int64]struct{}
-	whamDailyBackfillFailedAt  map[int64]time.Time
+	whamDailyBackfillMu       sync.Mutex
+	whamDailyBackfillLast     map[int64]time.Time
+	whamDailyBackfillInFlight map[int64]struct{}
+	whamDailyBackfillFailedAt map[int64]time.Time
+	// patWhoAmIFailedAt 记录 PAT 账号 whoami 工作区补全最近一次失败时间（退避用）。
+	patWhoAmIFailedAt          map[int64]time.Time
 	whamDailySyncedOnce        map[int64]struct{}
 	whamDailyDeepSynced        map[int64]whamDailyDeepState
 	recordAccountEvent         func(int64, string, string)
@@ -1729,10 +1731,13 @@ type accountResponse struct {
 	UsagePercentSpark             *float64                    `json:"usage_percent_spark"`
 	RateLimitResetCredits         *int                        `json:"rate_limit_reset_credits"`
 	ApplicableResetCredits        *int                        `json:"applicable_reset_credits"`
+	CreditsValid                  bool                        `json:"credits_valid"`
 	CreditsBalance                *string                     `json:"credits_balance"`
 	CreditsHasCredits             *bool                       `json:"credits_has_credits"`
 	CreditsUnlimited              *bool                       `json:"credits_unlimited"`
 	CreditsOverageLimitReached    *bool                       `json:"credits_overage_limit_reached"`
+	CreditsSpendControlReached    *bool                       `json:"credits_spend_control_reached,omitempty"`
+	CreditsRateLimitReachedType   string                      `json:"credits_rate_limit_reached_type,omitempty"`
 	AutoPause5hThreshold          *float64                    `json:"auto_pause_5h_threshold"`
 	AutoPause7dThreshold          *float64                    `json:"auto_pause_7d_threshold"`
 	AutoPause5hDisabled           bool                        `json:"auto_pause_5h_disabled"`
@@ -3875,6 +3880,7 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 		}
 	}
 
+	whoami := &patWhoAmIHydrator{proxyURL: req.ProxyURL}
 	for i, at := range tokens {
 		name := req.Name
 		if name == "" {
@@ -3888,7 +3894,9 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 			allowDuplicate: req.AllowDuplicate,
 			customHeaders:  customHeaders,
 		})
-		if seed.email != "" && effectiveWorkspaceIDFromSeed(seed) != "" {
+		// codex_at 不走 OAuth 身份去重：whoami 补出来的 email+工作区会撞上同工作区的
+		// OAuth 账号，把 PAT 合并进去等于用 PAT 覆盖它的 access_token。PAT 始终按 token 路由键去重。
+		if seed.accessTokenType != accessTokenTypeCodexAT && seed.email != "" && effectiveWorkspaceIDFromSeed(seed) != "" {
 			id, updated, newAcc, err := h.upsertOAuthIdentityAccountDeferred(ctx, name, req.ProxyURL, seed, "manual_at", overwriteAccountProxy)
 			if err != nil {
 				log.Printf("添加 AT 账号 %d 失败: %v", i+1, err)
@@ -3923,6 +3931,8 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 			seenATRoutes[routeKey] = true
 		}
 
+		// 去重之后再补身份：重导已知批次不该再付 N 次网络往返。
+		seed = whoami.hydrate(ctx, seed)
 		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(seed), req.ProxyURL)
 		if err != nil {
 			log.Printf("添加 AT 账号 %d 失败: %v", i+1, err)
@@ -4008,6 +4018,7 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 	createdIDs := &importedAccountIDs{}
 	pending := make([]*auth.Account, 0, len(tokens))
 
+	whoami := &patWhoAmIHydrator{proxyURL: req.ProxyURL}
 	for i, at := range tokens {
 		name := req.Name
 		if name == "" {
@@ -4017,7 +4028,8 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 		}
 
 		seed := normalizeTokenCredentialSeed(tokenCredentialSeed{accessToken: at, allowDuplicate: req.AllowDuplicate, customHeaders: req.CustomHeaders})
-		if seed.email != "" && effectiveWorkspaceIDFromSeed(seed) != "" {
+		// 同 AddATAccount：codex_at 不进 OAuth 身份去重，见上方注释。
+		if seed.accessTokenType != accessTokenTypeCodexAT && seed.email != "" && effectiveWorkspaceIDFromSeed(seed) != "" {
 			id, updated, newAcc, err := h.upsertOAuthIdentityAccountDeferred(ctx, name, req.ProxyURL, seed, "manual_at", overwriteAccountProxy)
 			if err != nil {
 				log.Printf("添加 AT 账号 %d 失败: %v", i+1, err)
@@ -4051,6 +4063,7 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 			seenATRoutes[routeKey] = true
 		}
 
+		seed = whoami.hydrate(ctx, seed)
 		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(seed), req.ProxyURL)
 		if err != nil {
 			log.Printf("添加 AT 账号 %d 失败: %v", i+1, err)
@@ -9191,6 +9204,9 @@ type settingsResponse struct {
 	ReasoningEffortModels              string                           `json:"reasoning_effort_models"`
 	ResinURL                           string                           `json:"resin_url"`
 	ResinPlatformName                  string                           `json:"resin_platform_name"`
+	// CodexEgress 是后端权威的"Codex 渠道当前由谁承担出站"摘要:Resin 启用时代理池与
+	// proxy_url 对 Codex 不生效,界面据此标注,避免三套配置并存看不出谁在生效(issue #679)。
+	CodexEgress                        proxy.CodexEgressSummary         `json:"codex_egress"`
 	PromptFilterEnabled                bool                             `json:"prompt_filter_enabled"`
 	PromptFilterMode                   string                           `json:"prompt_filter_mode"`
 	PromptFilterThreshold              int                              `json:"prompt_filter_threshold"`
@@ -10197,6 +10213,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		ReasoningEffortModels:               h.store.GetReasoningEffortModels(),
 		ResinURL:                            resinURL,
 		ResinPlatformName:                   resinPlatformName,
+		CodexEgress:                         proxy.CurrentCodexEgressSummary(),
 		PromptFilterEnabled:                 promptFilterCfg.Enabled,
 		PromptFilterMode:                    promptFilterCfg.Mode,
 		PromptFilterThreshold:               promptFilterCfg.Threshold,
@@ -12039,6 +12056,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		ReasoningEffortModels:               h.store.GetReasoningEffortModels(),
 		ResinURL:                            resinURL,
 		ResinPlatformName:                   resinPlatformName,
+		CodexEgress:                         proxy.CurrentCodexEgressSummary(),
 		PromptFilterEnabled:                 promptFilterCfg.Enabled,
 		PromptFilterMode:                    promptFilterCfg.Mode,
 		PromptFilterThreshold:               promptFilterCfg.Threshold,

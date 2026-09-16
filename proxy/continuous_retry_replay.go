@@ -29,6 +29,7 @@ var (
 type continuousRetryReplay struct {
 	memory      bytes.Buffer
 	file        *os.File
+	filePath    string
 	size        int64
 	memoryLimit int64
 	totalLimit  int64
@@ -87,11 +88,10 @@ func (r *continuousRetryReplay) Write(data []byte) (int, error) {
 		if err != nil {
 			return 0, errContinuousRetryReplayStorage
 		}
-		// The open descriptor is sufficient for replay. Removing the directory
-		// entry immediately prevents abandoned attempts from leaving files behind.
+		// The open descriptor is sufficient for replay on POSIX.
+		// On Windows, open files cannot be unlinked, so record filePath to remove on Close.
 		if err := os.Remove(file.Name()); err != nil {
-			_ = file.Close()
-			return 0, errContinuousRetryReplayStorage
+			r.filePath = file.Name()
 		}
 		r.file = file
 		if r.memory.Len() > 0 {
@@ -99,7 +99,7 @@ func (r *continuousRetryReplay) Write(data []byte) (int, error) {
 				_ = r.Close()
 				return 0, errContinuousRetryReplayStorage
 			}
-			r.memory.Reset()
+			r.memory = bytes.Buffer{}
 		}
 	}
 	n, err := r.file.Write(data)
@@ -157,13 +157,17 @@ func (r *continuousRetryReplay) Close() error {
 		return nil
 	}
 	r.closed = true
-	r.memory.Reset()
+	r.memory = bytes.Buffer{}
 	var closeErr error
 	if r.file != nil {
 		if err := r.file.Close(); err != nil {
 			closeErr = errContinuousRetryReplayStorage
 		}
 		r.file = nil
+	}
+	if r.filePath != "" {
+		_ = os.Remove(r.filePath)
+		r.filePath = ""
 	}
 	return closeErr
 }

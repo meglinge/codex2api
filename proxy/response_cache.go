@@ -64,6 +64,7 @@ func responseCacheStoreKey(owner, responseID string) string {
 
 type responseCacheEntry struct {
 	key       string
+	serial    uint64
 	items     []json.RawMessage
 	blobs     []*sharedResponseContextItem
 	bytes     int64
@@ -123,6 +124,9 @@ type ResponseCacheStats struct {
 	// （本地与 Redis 一并跳过）；ChainOwners 是当前处于写入资格窗口内的 owner 数。
 	SkippedWrites uint64
 	ChainOwners   int
+	// BackendWriteFailures includes explicit admission failures and backend
+	// errors. A failed shared write never makes an existing L1 hit unavailable.
+	BackendWriteFailures uint64
 }
 
 type responseCacheState struct {
@@ -137,6 +141,7 @@ type responseCacheState struct {
 	config       responseCacheConfig
 	generation   int64
 	stats        ResponseCacheStats
+	entrySerial  uint64
 	runtimeCache cache.TokenCache
 	lastSyncAt   time.Time
 	lastSyncErr  string
@@ -161,6 +166,7 @@ const (
 	responseCacheLookupReconstructionTooLarge
 	responseCacheLookupBackendCorrupt
 	responseCacheLookupBackendError
+	responseCacheLookupBackendPending
 )
 
 type responseCacheLookupSource uint8
@@ -185,6 +191,7 @@ type responseCacheLookupResult struct {
 
 type responseCacheMarker struct {
 	key       string
+	serial    uint64
 	kind      responseCacheLookupKind
 	expiresAt time.Time
 	element   *list.Element
@@ -228,6 +235,13 @@ func resetResponseCacheStateForTest(config responseCacheConfig) {
 	drainResponseCacheBackendWrites()
 	responseCacheBackendWriter.mu.Lock()
 	responseCacheBackendWriter.draining = false
+	responseCacheBackendWriter.maxActive = responseCacheBackendWriteSlots
+	responseCacheBackendWriter.maxBytes = responseCacheBackendWriteBytes
+	responseCacheBackendWriter.maxWaiters = responseCacheBackendMaxWaiters
+	responseCacheBackendWriter.highWaterActive = 0
+	responseCacheBackendWriter.highWaterBytes = 0
+	responseCacheBackendWriter.queueRejections = 0
+	responseCacheBackendWriter.waitTimeouts = 0
 	responseCacheBackendWriter.mu.Unlock()
 	respCache.mu.Lock()
 	respCache.store = make(map[string]*responseCacheEntry)
@@ -240,6 +254,7 @@ func resetResponseCacheStateForTest(config responseCacheConfig) {
 	respCache.config = config
 	respCache.generation = 0
 	respCache.stats = ResponseCacheStats{}
+	respCache.entrySerial = 0
 	respCache.runtimeCache = nil
 	respCache.lastSyncAt = time.Time{}
 	respCache.lastSyncErr = ""
@@ -322,103 +337,43 @@ func responseCacheWriteAllowed(owner string) bool {
 // setResponseCache 存储响应上下文（按 owner 命名空间隔离）。
 // on_demand 写入策略下，未续链过的 owner 直接跳过（本地与 Redis 一并跳过）。
 func setResponseCache(owner, responseID string, items []json.RawMessage) {
-	if !responseCacheWriteAllowed(owner) {
-		respCache.mu.Lock()
-		respCache.stats.SkippedWrites++
-		respCache.mu.Unlock()
+	if skipResponseCacheWrite(owner) {
 		return
 	}
 	storeKey := responseCacheStoreKey(owner, responseID)
-	runtimeItems, _, _ := admitResponseCache(storeKey, items)
+	runtimeItems, _, _, serial := admitResponseCacheWithTicket(storeKey, items)
 
 	respCache.mu.RLock()
 	runtimeCache := respCache.runtimeCache
 	respCache.mu.RUnlock()
 
 	if runtimeCache != nil && len(runtimeItems) > 0 {
-		writeResponseContextBackend(runtimeCache, responseID, storeKey, runtimeItems)
+		_ = writeResponseContextBackendWithOwnership(runtimeCache, responseID, storeKey, runtimeItems, serial)
 	}
 }
 
-const (
-	// 后台写入并发槽位；耗尽后退回同步写（背压而非丢弃）。
-	responseCacheBackendWriteSlots = 16
-	// 后台写入不在请求路径上，给大载荷留足时间；同步兜底写沿用旧上限。
-	responseCacheBackendWriteTimeout = 2 * time.Second
-	responseCacheBackendSyncTimeout  = 500 * time.Millisecond
-)
-
-var responseCacheBackendWriter = struct {
-	wg       sync.WaitGroup
-	mu       sync.Mutex
-	draining bool
-	slots    chan struct{}
-}{slots: make(chan struct{}, responseCacheBackendWriteSlots)}
-
-// writeResponseContextBackend 把已入 L1 的条目写到共享后端。写入在后台完成，
-// 调用方（响应收尾、串行的 WS 帧循环）不再等 Redis 往返；槽位耗尽时退回同步写，
-// 保证 L1 未命中时共享后端仍能兜底。后台写持有调用方切片的私有克隆，返回后
-// 调用方或后端对各自副本的改动互不可见（memcpy 远比一次 Redis 往返便宜）。
-func writeResponseContextBackend(runtimeCache cache.TokenCache, responseID, storeKey string, items []json.RawMessage) {
-	write := func(payload []json.RawMessage, timeout time.Duration) {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
-		if err := runtimeCache.SetResponseContext(ctx, storeKey, payload, responseCacheTTL); err != nil {
-			log.Printf("写入 Redis response context 失败: response_id=%s err=%v", responseID, err)
-		}
-	}
-	responseCacheBackendWriter.mu.Lock()
-	if responseCacheBackendWriter.draining {
-		responseCacheBackendWriter.mu.Unlock()
-		write(cloneResponseContextItems(items), responseCacheBackendSyncTimeout)
-		return
-	}
-	select {
-	case responseCacheBackendWriter.slots <- struct{}{}:
-		payload := cloneResponseContextItems(items)
-		responseCacheBackendWriter.wg.Add(1)
-		responseCacheBackendWriter.mu.Unlock()
-		go func() {
-			defer func() {
-				<-responseCacheBackendWriter.slots
-				responseCacheBackendWriter.wg.Done()
-			}()
-			write(payload, responseCacheBackendWriteTimeout)
-		}()
-	default:
-		responseCacheBackendWriter.mu.Unlock()
-		write(cloneResponseContextItems(items), responseCacheBackendSyncTimeout)
-	}
-}
-
-// drainResponseCacheBackendWrites 等待后台写入全部落地（测试与关停使用）。
-func drainResponseCacheBackendWrites() {
-	responseCacheBackendWriter.mu.Lock()
-	responseCacheBackendWriter.wg.Wait()
-	responseCacheBackendWriter.mu.Unlock()
-}
-
-// DrainResponseCacheBackendWrites 在关停时等待后台共享后端写入完成，最多等 timeout。
-func DrainResponseCacheBackendWrites(timeout time.Duration) bool {
-	responseCacheBackendWriter.mu.Lock()
-	responseCacheBackendWriter.draining = true
-	responseCacheBackendWriter.mu.Unlock()
-	done := make(chan struct{})
-	go func() {
-		responseCacheBackendWriter.wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-		return true
-	case <-time.After(timeout):
+func skipResponseCacheWrite(owner string) bool {
+	if responseCacheWriteAllowed(owner) {
 		return false
 	}
+	respCache.mu.Lock()
+	respCache.stats.SkippedWrites++
+	respCache.mu.Unlock()
+	return true
 }
 
 func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMessage, bool, bool) {
+	items, admitted, oversize, _ := admitResponseCacheWithTicket(storeKey, items)
+	return items, admitted, oversize
+}
+
+// A ticket lets a backend writer borrow this exact admission after acquiring
+// capacity. Waiting writers must not pin bodies already evicted from L1.
+func admitResponseCacheWithTicket(storeKey string, items []json.RawMessage) ([]json.RawMessage, bool, bool, uint64) {
 	respCache.mu.Lock()
 	defer respCache.mu.Unlock()
+	respCache.entrySerial++
+	serial := respCache.entrySerial
 
 	items = trimResponseContextTail(items, respCache.config.maxItems)
 	items, hashes, normalized := respCache.normalizeResponseContextItemsLocked(items)
@@ -441,8 +396,10 @@ func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMes
 		}
 		if respCache.runtimeCache == nil {
 			respCache.setMarkerLocked(storeKey, responseCacheLookupKnownOversize, time.Now().Add(respCache.config.ttl))
+		} else {
+			respCache.setWriteMarkerLocked(storeKey, responseCacheLookupBackendPending, time.Now().Add(respCache.config.ttl), serial)
 		}
-		return items, false, overL1ByteBudget
+		return items, false, overL1ByteBudget, serial
 	}
 
 	for len(respCache.store)+1 > respCache.config.maxEntries ||
@@ -456,8 +413,10 @@ func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMes
 			}
 			if respCache.runtimeCache == nil {
 				respCache.setMarkerLocked(storeKey, responseCacheLookupKnownOversize, time.Now().Add(respCache.config.ttl))
+			} else {
+				respCache.setWriteMarkerLocked(storeKey, responseCacheLookupBackendPending, time.Now().Add(respCache.config.ttl), serial)
 			}
-			return items, false, overL1ByteBudget
+			return items, false, overL1ByteBudget, serial
 		}
 		reason := responseCacheRemovalByteEviction
 		if len(respCache.store)+1 > respCache.config.maxEntries {
@@ -469,6 +428,7 @@ func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMes
 	retainedItems, blobs := respCache.retainResponseContextItemsLocked(items, hashes, normalized)
 	entry := &responseCacheEntry{
 		key:       storeKey,
+		serial:    serial,
 		items:     retainedItems,
 		blobs:     blobs,
 		bytes:     entryBytes,
@@ -482,7 +442,7 @@ func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMes
 	if respCache.stats.Bytes > respCache.stats.HighWaterBytes {
 		respCache.stats.HighWaterBytes = respCache.stats.Bytes
 	}
-	return items, true, false
+	return items, true, false, entry.serial
 }
 
 func cloneResponseContextItems(items []json.RawMessage) []json.RawMessage {
@@ -590,6 +550,11 @@ func (c *responseCacheState) removeEntryLocked(entry *responseCacheEntry, reason
 		return
 	}
 	delete(c.store, entry.key)
+	// Preserve a bounded identity fence after Redis-backed eviction so an old
+	// asynchronous result cannot overwrite a newer admission's failure state.
+	if c.runtimeCache != nil && reason != responseCacheRemovalReplace && c.markers[entry.key] == nil {
+		c.setWriteMarkerLocked(entry.key, responseCacheLookupBackendPending, entry.expiresAt, entry.serial)
+	}
 	for _, blob := range entry.blobs {
 		blob.refs--
 		if blob.refs == 0 {
@@ -624,7 +589,7 @@ func (c *responseCacheState) removeEntryLocked(entry *responseCacheEntry, reason
 }
 
 func (c *responseCacheState) setMarkerLocked(key string, kind responseCacheLookupKind, expiresAt time.Time) {
-	if key == "" || (kind != responseCacheLookupKnownEvicted && kind != responseCacheLookupKnownOversize) {
+	if key == "" || (kind != responseCacheLookupKnownEvicted && kind != responseCacheLookupKnownOversize && kind != responseCacheLookupBackendError && kind != responseCacheLookupBackendPending) {
 		return
 	}
 	maxExpiry := time.Now().Add(c.config.ttl)
@@ -632,6 +597,7 @@ func (c *responseCacheState) setMarkerLocked(key string, kind responseCacheLooku
 		expiresAt = maxExpiry
 	}
 	if existing := c.markers[key]; existing != nil {
+		existing.serial = 0
 		existing.kind = kind
 		existing.expiresAt = expiresAt
 		c.markerLRU.MoveToFront(existing.element)
@@ -647,6 +613,13 @@ func (c *responseCacheState) setMarkerLocked(key string, kind responseCacheLooku
 		}
 		oldest, _ := element.Value.(*responseCacheMarker)
 		c.removeMarkerLocked(oldest.key)
+	}
+}
+
+func (c *responseCacheState) setWriteMarkerLocked(key string, kind responseCacheLookupKind, expiresAt time.Time, serial uint64) {
+	c.setMarkerLocked(key, kind, expiresAt)
+	if marker := c.markers[key]; marker != nil {
+		marker.serial = serial
 	}
 }
 
@@ -838,6 +811,7 @@ func lookupResponseCacheResultWithOwnership(owner, responseID string, borrow boo
 	entry, ok := respCache.store[storeKey]
 	runtimeCache := respCache.runtimeCache
 	config := respCache.config
+	writeFailed := false
 	expired := false
 	if ok {
 		if !time.Now().Before(entry.expiresAt) {
@@ -866,9 +840,17 @@ func lookupResponseCacheResultWithOwnership(owner, responseID string, borrow boo
 			if time.Now().Before(marker.expiresAt) {
 				respCache.markerLRU.MoveToFront(marker.element)
 				kind := marker.kind
+				if kind == responseCacheLookupBackendPending {
+					kind = responseCacheLookupMiss
+				}
 				respCache.mu.Unlock()
 				return responseCacheLookupResult{Kind: kind}
 			}
+			respCache.removeMarkerLocked(storeKey)
+		}
+	} else if marker := respCache.markers[storeKey]; marker != nil && marker.kind == responseCacheLookupBackendError {
+		writeFailed = time.Now().Before(marker.expiresAt)
+		if !writeFailed {
 			respCache.removeMarkerLocked(storeKey)
 		}
 	}
@@ -889,6 +871,9 @@ func lookupResponseCacheResultWithOwnership(owner, responseID string, borrow boo
 	}
 	switch backendResult.Status {
 	case cache.ResponseContextReadMiss:
+		if writeFailed {
+			return responseCacheLookupResult{Kind: responseCacheLookupBackendError, Err: errResponseCacheBackendWriteFailed, remoteMiss: true}
+		}
 		if expired {
 			return responseCacheLookupResult{Kind: responseCacheLookupExpired, remoteMiss: true}
 		}
@@ -1128,6 +1113,12 @@ func cacheCompletedResponseWithOutputItems(owner string, expandedInputRaw []byte
 		}
 	}
 	if len(replayableOutput) == 0 {
+		return
+	}
+	// This HTTP tool-output path previously built a full snapshot before the
+	// on_demand gate in setResponseCache. Unqualified owners need none of that
+	// work. Native WS store:false has its own ingress fence.
+	if skipResponseCacheWrite(owner) {
 		return
 	}
 

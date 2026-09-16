@@ -76,6 +76,10 @@ func (h *Handler) GetAccountWhamDailyUsage(c *gin.Context) {
 	breakdownRefreshError := ""
 	if c.Query("refresh") == "1" {
 		account := h.findAccountByID(id)
+		if needsPATWorkspaceHydration(account) {
+			// 手动刷新是用户明确要看官方统计：先试着补全工作区，不受退避限制。
+			h.hydratePATWorkspace(c.Request.Context(), account, true)
+		}
 		switch {
 		case account == nil:
 			writeError(c, http.StatusNotFound, "账号不存在")

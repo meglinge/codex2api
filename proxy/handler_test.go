@@ -4932,6 +4932,126 @@ func TestSyncCodexUsageStateCreditAccountSkips7dUsageLimit(t *testing.T) {
 	}
 }
 
+func TestSyncCodexUsageStateTeamMemberNullBalanceCreditsSkips7dUsageLimit(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("database.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	id, err := db.InsertAccountWithCredentials(ctx, "team-null-bal", map[string]interface{}{
+		"plan_type": "team",
+	}, "")
+	if err != nil {
+		t.Fatalf("InsertAccountWithCredentials returned error: %v", err)
+	}
+
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.5"})
+	account := &auth.Account{
+		DBID:                  id,
+		AccessToken:           "at",
+		PlanType:              "team",
+		Status:                auth.StatusReady,
+		HealthTier:            auth.HealthTierHealthy,
+		CreditEnabled:         true,
+		CreditSkipUsageWindow: true,
+	}
+	// Team 成员 has_credits=true 且 balance=null (无显式数值)
+	account.SetCreditBalanceDetails(nil, true, false, false, nil, "")
+	resp := &http.Response{Header: make(http.Header)}
+	resp.Header.Set("x-codex-primary-used-percent", "20")
+	resp.Header.Set("x-codex-primary-window-minutes", "300")
+	resp.Header.Set("x-codex-primary-reset-after-seconds", "1200")
+	resp.Header.Set("x-codex-secondary-used-percent", "100")
+	resp.Header.Set("x-codex-secondary-window-minutes", "10080")
+	resp.Header.Set("x-codex-secondary-reset-after-seconds", "3600")
+
+	result := SyncCodexUsageState(store, account, resp)
+
+	if !result.HasUsage7d || result.UsagePct7d != 100 {
+		t.Fatalf("usage sync result = %+v, want 7d snapshot at 100", result)
+	}
+	if result.Usage7dRateLimited {
+		t.Fatalf("Usage7dRateLimited = true, want false for team account with null balance credits")
+	}
+	if got := account.RuntimeStatus(); got != "rate_limited" {
+		t.Fatalf("RuntimeStatus() = %q, want rate_limited for credit account", got)
+	}
+	if !account.IsAvailable() {
+		t.Fatal("IsAvailable() = false, want true while team credits cover the window")
+	}
+	if !account.UsingCredits() {
+		t.Fatal("UsingCredits() = false, want true while team credits cover the window")
+	}
+}
+
+func TestSyncCodexUsageStateSparseCreditsHeadersObservation(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("database.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	id, err := db.InsertAccountWithCredentials(ctx, "sparse-credit-test", map[string]interface{}{
+		"plan_type": "team",
+	}, "")
+	if err != nil {
+		t.Fatalf("InsertAccountWithCredentials returned error: %v", err)
+	}
+
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.5"})
+	account := &auth.Account{
+		DBID:                  id,
+		AccessToken:           "at",
+		PlanType:              "team",
+		Status:                auth.StatusReady,
+		HealthTier:            auth.HealthTierHealthy,
+		CreditEnabled:         true,
+		CreditSkipUsageWindow: true,
+	}
+
+	resp := &http.Response{Header: make(http.Header)}
+	resp.Header.Set("x-codex-primary-used-percent", "100")
+	resp.Header.Set("x-codex-primary-window-minutes", "300")
+	resp.Header.Set("x-codex-primary-reset-after-seconds", "3600")
+	resp.Header.Set("x-codex-credits-has-credits", "true")
+	resp.Header.Set("x-codex-credits-unlimited", "false")
+	resp.Header.Set("x-codex-credits-balance", "25.50")
+	resp.Header.Set("x-codex-rate-limit-reached-type", "")
+
+	result := SyncCodexUsageState(store, account, resp)
+
+	if !result.CreditsObserved {
+		t.Fatal("CreditsObserved = false, want true")
+	}
+	credits, ok := account.GetCreditBalance()
+	if !ok || !credits.HasCredits || credits.Balance == nil || *credits.Balance != "25.50" {
+		t.Fatalf("account credit balance not updated: %+v, ok=%t", credits, ok)
+	}
+	if !result.UsageWindowLimitsIgnored {
+		t.Fatal("UsageWindowLimitsIgnored = false, want true with credits available")
+	}
+
+	// Now test receiving workspace hard stop header
+	respStop := &http.Response{Header: make(http.Header)}
+	respStop.Header.Set("x-codex-primary-used-percent", "100")
+	respStop.Header.Set("x-codex-primary-window-minutes", "300")
+	respStop.Header.Set("x-codex-primary-reset-after-seconds", "3600")
+	respStop.Header.Set("x-codex-rate-limit-reached-type", "workspace_member_credits_depleted")
+
+	resultStop := SyncCodexUsageState(store, account, respStop)
+	if resultStop.RateLimitReachedType != "workspace_member_credits_depleted" {
+		t.Fatalf("RateLimitReachedType = %q, want workspace_member_credits_depleted", resultStop.RateLimitReachedType)
+	}
+	if resultStop.UsageWindowLimitsIgnored {
+		t.Fatal("UsageWindowLimitsIgnored = true, want false under workspace hard stop")
+	}
+}
+
 // issue #382：响应头仅有 7d 时清除陈旧 5h；完全无用量头时保留 5h。
 func TestSyncCodexUsageState_Clears5hWhenOnly7dHeaders(t *testing.T) {
 	ctx := context.Background()
@@ -6359,5 +6479,77 @@ func TestCodexUnsupportedModelFromBody(t *testing.T) {
 				t.Fatalf("codexUnsupportedModelFromBody(%q) = %q, want %q", test.body, got, test.want)
 			}
 		})
+	}
+}
+
+// 带用量头但没有 reached-type 的响应要清掉之前学到的 workspace hard-stop，
+// 否则工作区充值后积分顶替永远回不来。(issue #662 审查)
+func TestSyncCodexUsageStateClearsStaleWorkspaceHardStop(t *testing.T) {
+	account := &auth.Account{
+		AccessToken:           "at",
+		PlanType:              "team",
+		Status:                auth.StatusReady,
+		HealthTier:            auth.HealthTierHealthy,
+		CreditEnabled:         true,
+		CreditSkipUsageWindow: true,
+	}
+	account.SetCreditBalanceDetails(nil, true, false, false, nil, "")
+
+	stop := &http.Response{Header: make(http.Header)}
+	stop.Header.Set("x-codex-primary-used-percent", "100")
+	stop.Header.Set("x-codex-primary-window-minutes", "300")
+	stop.Header.Set("x-codex-primary-reset-after-seconds", "3600")
+	stop.Header.Set("x-codex-rate-limit-reached-type", "workspace_member_credits_depleted")
+	if result := SyncCodexUsageState(nil, account, stop); result.UsageWindowLimitsIgnored {
+		t.Fatal("UsageWindowLimitsIgnored = true under workspace hard stop, want false")
+	}
+
+	// 无 x-codex 头的响应（比如 5xx）不改变判断。
+	if result := SyncCodexUsageState(nil, account, &http.Response{Header: make(http.Header)}); result.UsageWindowLimitsIgnored {
+		t.Fatal("response without usage headers cleared the hard stop")
+	}
+
+	recovered := &http.Response{Header: make(http.Header)}
+	recovered.Header.Set("x-codex-primary-used-percent", "100")
+	recovered.Header.Set("x-codex-primary-window-minutes", "300")
+	recovered.Header.Set("x-codex-primary-reset-after-seconds", "3600")
+	if result := SyncCodexUsageState(nil, account, recovered); !result.UsageWindowLimitsIgnored {
+		t.Fatal("UsageWindowLimitsIgnored = false after response without reached-type, want true")
+	}
+}
+
+// sparse credits 头不完整（只有 balance）时整组丢弃，不能把 wham 的正确快照盖成「没积分」。
+func TestSyncCodexUsageStateIgnoresPartialCreditsHeaders(t *testing.T) {
+	account := &auth.Account{
+		AccessToken:           "at",
+		PlanType:              "team",
+		Status:                auth.StatusReady,
+		HealthTier:            auth.HealthTierHealthy,
+		CreditEnabled:         true,
+		CreditSkipUsageWindow: true,
+	}
+	account.SetCreditBalanceDetails(nil, true, false, false, nil, "")
+
+	partial := &http.Response{Header: make(http.Header)}
+	partial.Header.Set("x-codex-primary-used-percent", "100")
+	partial.Header.Set("x-codex-primary-window-minutes", "300")
+	partial.Header.Set("x-codex-primary-reset-after-seconds", "3600")
+	partial.Header.Set("x-codex-credits-balance", "12.00")
+	result := SyncCodexUsageState(nil, account, partial)
+	if result.CreditsObserved {
+		t.Fatal("CreditsObserved = true for partial credits headers, want false")
+	}
+	if !result.UsageWindowLimitsIgnored {
+		t.Fatal("partial credits headers clobbered has_credits=true")
+	}
+
+	malformed := &http.Response{Header: make(http.Header)}
+	malformed.Header.Set("x-codex-credits-has-credits", "yes")
+	malformed.Header.Set("x-codex-credits-unlimited", "false")
+	if result := SyncCodexUsageState(nil, account, malformed); result.CreditsObserved {
+		t.Fatal("CreditsObserved = true for unparsable has-credits header, want false")
+	}
+	if credits, _ := account.GetCreditBalance(); !credits.HasCredits {
+		t.Fatalf("malformed headers overwrote credits: %+v", credits)
 	}
 }

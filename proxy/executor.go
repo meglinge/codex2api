@@ -693,14 +693,10 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	// requestBody——它们解析 JSON，拿到压缩帧只会静默失配。
 	outboundBody, contentEncoding := CompressCodexRequestBody(requestBody)
 
-	// Resin 反向代理模式：改写 URL，使用标准 HTTP 客户端
-	var client *http.Client
-	if IsResinEnabled() {
-		endpoint = BuildReverseProxyURL(endpoint)
-		client = getResinHTTPClient(account)
-	} else {
-		client = getPooledClient(account, proxyURL)
-	}
+	// 出口链路统一由 ResolveCodexEgress 决定(Resin > 代理 > 直连,见 egress.go)。
+	egress := ResolveCodexEgress(account, endpoint, proxyURL)
+	endpoint = egress.URL
+	client := egress.Client()
 
 	send := func() (*http.Response, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(outboundBody))
@@ -719,11 +715,8 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		// routing hint 由网关按最终出站 body 合成，须在账号自定义头之后设置。
 		ApplyCodexRoutingHint(req.Header, account, requestBody)
 
-		// Resin 反代：注入账号身份头
-		if IsResinEnabled() {
-			req.Header.Set("X-Resin-Account", ResinAccountID(account))
-		}
-		logCodexFingerprintDebug("http", account, proxyURL, req.Header)
+		egress.ApplyHeaders(req.Header)
+		logCodexFingerprintDebug("http", account, egress.DialProxyURL, req.Header)
 
 		if err := ConsumeAPIKeyModelRequestQuota(ctx, gjson.GetBytes(requestBody, "model").String()); err != nil {
 			return nil, err
@@ -1048,14 +1041,10 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	// compact 端点
 	endpoint := CodexBaseURL + "/responses/compact"
 
-	// Resin 反向代理模式
-	var client *http.Client
-	if IsResinEnabled() {
-		endpoint = BuildReverseProxyURL(endpoint)
-		client = getResinHTTPClient(account)
-	} else {
-		client = getPooledClient(account, proxyURL)
-	}
+	// 出口链路统一由 ResolveCodexEgress 决定(Resin > 代理 > 直连,见 egress.go)。
+	egress := ResolveCodexEgress(account, endpoint, proxyURL)
+	endpoint = egress.URL
+	client := egress.Client()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(requestBody))
 	if err != nil {
@@ -1066,10 +1055,8 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	// routing hint 由网关按最终出站 body 合成，须在账号自定义头之后设置。
 	ApplyCodexRoutingHint(req.Header, account, requestBody)
 
-	if IsResinEnabled() {
-		req.Header.Set("X-Resin-Account", ResinAccountID(account))
-	}
-	logCodexFingerprintDebug("compact", account, proxyURL, req.Header)
+	egress.ApplyHeaders(req.Header)
+	logCodexFingerprintDebug("compact", account, egress.DialProxyURL, req.Header)
 
 	if err := ConsumeAPIKeyModelRequestQuota(ctx, gjson.GetBytes(requestBody, "model").String()); err != nil {
 		return nil, err
