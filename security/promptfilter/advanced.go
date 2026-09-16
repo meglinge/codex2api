@@ -37,6 +37,39 @@ type AdvancedConfig struct {
 	Guard           GuardConfig           `json:"guard"`
 	ReviewAdapter   ReviewAdapterConfig   `json:"review_adapter"`
 	AdaptiveReview  AdaptiveReviewConfig  `json:"adaptive_review"`
+	Scope           ScopeConfig           `json:"scope"`
+}
+
+// ScopeConfig 决定 Prompt 检查对哪些 API Key 生效。按 API Key 绑定的账号分组
+// （allowed_group_ids）圈定：APIKeyGroupIDs 为空表示所有 Key 都检查；非空时只有
+// 绑定了其中至少一个分组的 Key 才检查。没绑定任何分组的 Key 能用所有分组的账号，
+// 是否检查由 IncludeUnboundKeys 单独决定。
+type ScopeConfig struct {
+	APIKeyGroupIDs     []int64 `json:"api_key_group_ids"`
+	IncludeUnboundKeys bool    `json:"include_unbound_keys"`
+}
+
+// Restricted 报告是否圈定了分组。
+func (c ScopeConfig) Restricted() bool {
+	return len(c.APIKeyGroupIDs) > 0
+}
+
+// CoversAPIKey 判断绑定了 groupIDs 这些分组的 Key 是否在检查范围内。
+func (c ScopeConfig) CoversAPIKey(groupIDs []int64) bool {
+	if !c.Restricted() {
+		return true
+	}
+	if len(groupIDs) == 0 {
+		return c.IncludeUnboundKeys
+	}
+	for _, id := range groupIDs {
+		for _, wanted := range c.APIKeyGroupIDs {
+			if id == wanted {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 const (
@@ -304,6 +337,7 @@ func DefaultAdvancedConfig() AdvancedConfig {
 		NewAPI:          NewAPIConfig{MaxClockSkewSeconds: 120},
 		Enforcement:     EnforcementConfig{TerminalBypassModels: []string{"codex-auto-review"}, ConversationLockEnabled: true, ConversationLockTTLHours: 168, UserCyberCooldownMinutes: DefaultUserCyberCooldownMinutes, CYBStrikeEnabled: false, LocalSevereStrikeEnabled: true},
 		Guard:           DefaultGuardConfig(),
+		Scope:           ScopeConfig{APIKeyGroupIDs: []int64{}, IncludeUnboundKeys: true},
 	}
 }
 
@@ -1048,6 +1082,27 @@ func NormalizeAdvancedConfig(cfg AdvancedConfig) AdvancedConfig {
 		}
 	}
 	cfg.Intelligence.Queries = queries
+	cfg.Scope = normalizeScopeConfig(cfg.Scope)
+	return cfg
+}
+
+// normalizeScopeConfig 去掉非法/重复的分组 ID 并排序，保证落库与回显一致；
+// 空列表固定成 [] 而不是 null，前端按数组处理。
+func normalizeScopeConfig(cfg ScopeConfig) ScopeConfig {
+	seen := make(map[int64]struct{}, len(cfg.APIKeyGroupIDs))
+	ids := make([]int64, 0, len(cfg.APIKeyGroupIDs))
+	for _, id := range cfg.APIKeyGroupIDs {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	cfg.APIKeyGroupIDs = ids
 	return cfg
 }
 

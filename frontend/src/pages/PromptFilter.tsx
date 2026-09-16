@@ -17,7 +17,7 @@ import { formatBeijingTime, formatRelativeTime } from '../utils/time'
 import { getErrorMessage } from '../utils/error'
 import { getPromptFilterScoreBand, normalizePromptFilterScore } from '../lib/promptFilterScore'
 import { parseAdvancedConfigDocument, patchAdvancedConfigDocument, readAdvancedConfigPath } from '../types'
-import type { AdvancedConfigObject, AdvancedConfigPatch, PromptFilterLog, PromptFilterMatch, PromptFilterRule, PromptFilterRulesResponse, PromptFilterTestResponse, PromptGuardConfig, PromptGuardLayer, PromptGuardMode, PromptGuardProfile, PromptGuardProvider, PromptIdentityUpdateMode, PromptIntelligenceAIAnalysisResponse, PromptIntelligenceAIProvider, PromptIntelligenceCandidate, PromptIntelligenceEvidenceResponse, PromptIntelligenceGatewayKey, PromptIntelligenceRun, PromptPolicyAuditHealth, PromptPolicyIncident, PromptPolicyIncidentDetailResponse, PromptReviewAPIKeyDescriptor, PromptReviewKeyTestResult, PromptReviewProfile, PromptReviewTestResponse, PromptRiskProfile, PromptRiskProfileDetailResponse, SystemSettings, PromptLogRetention, PromptRiskIncidentSubject, PromptIntelligenceDraftSuggestion } from '../types'
+import type { AccountGroup, AdvancedConfigObject, AdvancedConfigPatch, PromptFilterLog, PromptFilterMatch, PromptFilterRule, PromptFilterRulesResponse, PromptFilterTestResponse, PromptGuardConfig, PromptGuardLayer, PromptGuardMode, PromptGuardProfile, PromptGuardProvider, PromptIdentityUpdateMode, PromptIntelligenceAIAnalysisResponse, PromptIntelligenceAIProvider, PromptIntelligenceCandidate, PromptIntelligenceEvidenceResponse, PromptIntelligenceGatewayKey, PromptIntelligenceRun, PromptPolicyAuditHealth, PromptPolicyIncident, PromptPolicyIncidentDetailResponse, PromptReviewAPIKeyDescriptor, PromptReviewKeyTestResult, PromptReviewProfile, PromptReviewTestResponse, PromptRiskProfile, PromptRiskProfileDetailResponse, SystemSettings, PromptLogRetention, PromptRiskIncidentSubject, PromptIntelligenceDraftSuggestion } from '../types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -225,6 +225,7 @@ type AdvancedProtectionConfig = {
     max_encoded_blocks: number
   }
   context_discount: { enabled: boolean; intent_aware: boolean; max_discount: number; operational_max_discount: number }
+  scope: { api_key_group_ids: number[]; include_unbound_keys: boolean }
   risk: { enabled: boolean; window_seconds: number; block_threshold: number; review_threshold: number; user_weight_percent: number; ip_weight_percent: number; session_weight_percent: number }
   sidecar: {
     enabled: boolean
@@ -338,6 +339,7 @@ const defaultAdvancedProtection: AdvancedProtectionConfig = {
     allow_remote_urls: false,
   },
   output: { enabled: false, strict_only: true },
+  scope: { api_key_group_ids: [], include_unbound_keys: true },
   intelligence: { enabled: false, interval_hours: 24, queries: ['LLM jailbreak prompt injection', 'ChatGPT jailbreak prompt', 'Codex prompt injection jailbreak', '大模型 破限 提示词', 'GPT 破甲 提示词', 'AI 越狱 提示词', '中文 prompt injection 绕过'], max_search_results: 20, model_enabled: false, model: 'gpt-5.5', max_model_calls: 1 },
 }
 
@@ -380,6 +382,19 @@ function parsePromptGuard(value: unknown): PromptGuardEditorConfig {
     allow_trusted_overrides: raw.allow_trusted_overrides === true,
     provider_profiles: providerProfiles,
     layers,
+  }
+}
+
+function parsePromptScope(value: unknown): AdvancedProtectionConfig['scope'] {
+  const raw = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  const ids = Array.isArray(raw.api_key_group_ids)
+    ? raw.api_key_group_ids.filter((id: unknown): id is number => typeof id === 'number' && Number.isInteger(id) && id > 0)
+    : []
+  return {
+    api_key_group_ids: Array.from(new Set(ids)),
+    include_unbound_keys: typeof raw.include_unbound_keys === 'boolean'
+      ? raw.include_unbound_keys
+      : defaultAdvancedProtection.scope.include_unbound_keys,
   }
 }
 
@@ -429,6 +444,7 @@ function parseAdvancedProtection(value: AdvancedConfigObject): AdvancedProtectio
     session: { ...defaultAdvancedProtection.session, ...(value.session || {}) },
     attachment: { ...defaultAdvancedProtection.attachment, ...(value.attachment || {}) },
     output: { ...defaultAdvancedProtection.output, ...(value.output || {}) },
+    scope: parsePromptScope(value.scope),
     intelligence: {
       ...intelligence,
       queries: Array.isArray(intelligence.queries)
@@ -2936,6 +2952,15 @@ function OverviewView({
   const [reviewProfileActionID, setReviewProfileActionID] = useState<string | null>(null)
   const { confirm, confirmDialog } = useConfirmDialog()
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [accountGroups, setAccountGroups] = useState<AccountGroup[]>([])
+  useEffect(() => {
+    if (!advancedOpen) return
+    let cancelled = false
+    api.listAccountGroups()
+      .then((response) => { if (!cancelled) setAccountGroups(response.groups ?? []) })
+      .catch(() => { /* 分组列表拉不到时选择器显示为空，不影响其它设置 */ })
+    return () => { cancelled = true }
+  }, [advancedOpen])
   const [reviewSettingsOpen, setReviewSettingsOpen] = useState(false)
   const [newAPISettingsOpen, setNewAPISettingsOpen] = useState(false)
   const [expertSettingsOpen, setExpertSettingsOpen] = useState(false)
@@ -2981,6 +3006,14 @@ function OverviewView({
   }
   const updateEnforcementSetting = (key: 'conversation_lock_enabled' | 'user_cyber_cooldown_minutes', value: boolean | number) => {
     const patched = patchAdvancedConfigDocument(form.prompt_filter_advanced_config, [{ path: ['enforcement', key], value }])
+    if (!patched.ok) {
+      showToast(t('promptFilter.advancedConfigInvalidSave'), 'error')
+      return
+    }
+    setForm((current) => ({ ...current, prompt_filter_advanced_config: patched.serialized }))
+  }
+  const updateScopeSetting = (key: 'api_key_group_ids' | 'include_unbound_keys', value: number[] | boolean) => {
+    const patched = patchAdvancedConfigDocument(form.prompt_filter_advanced_config, [{ path: ['scope', key], value }])
     if (!patched.ok) {
       showToast(t('promptFilter.advancedConfigInvalidSave'), 'error')
       return
@@ -3281,6 +3314,14 @@ function OverviewView({
                       : modeOptions.find((item) => item.value === protectionStrategy)?.label}
                   </Badge>
                 </div>
+                <div className="mt-1 truncate text-xs text-muted-foreground">
+                  {advancedProtection.scope.api_key_group_ids.length === 0
+                    ? t('promptFilter.scope.summaryAll')
+                    : t('promptFilter.scope.summaryGroups', {
+                        count: advancedProtection.scope.api_key_group_ids.length,
+                        unbound: advancedProtection.scope.include_unbound_keys ? t('promptFilter.scope.summaryUnboundIncluded') : t('promptFilter.scope.summaryUnboundExcluded'),
+                      })}
+                </div>
               </div>
               <div className="rounded-lg border bg-background/80 p-3">
                 <div className="text-xs text-muted-foreground">{t('promptFilter.reviewStrategy')}</div>
@@ -3393,6 +3434,26 @@ function OverviewView({
                     disabled={!advancedProtection.enforcement.conversation_lock_enabled}
                     value={advancedProtection.enforcement.user_cyber_cooldown_minutes}
                     onValueChange={(value) => updateEnforcementSetting('user_cyber_cooldown_minutes', value)}
+                  />
+                </Field>
+              </div>
+              <div className="mt-4 grid gap-4 border-t pt-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+                <Field label={t('promptFilter.scope.groups')} hint={t('promptFilter.scope.groupsHint')}>
+                  <PromptScopeGroupSelect
+                    groups={accountGroups}
+                    value={advancedProtection.scope.api_key_group_ids}
+                    onChange={(value) => updateScopeSetting('api_key_group_ids', value)}
+                    allLabel={t('promptFilter.scope.allKeys')}
+                    placeholder={t('promptFilter.scope.unknownGroups')}
+                    emptyLabel={t('promptFilter.scope.noGroups')}
+                  />
+                </Field>
+                <Field label={t('promptFilter.scope.includeUnbound')} hint={t('promptFilter.scope.includeUnboundHint')}>
+                  <Select
+                    value={advancedProtection.scope.include_unbound_keys ? 'true' : 'false'}
+                    onValueChange={(value) => updateScopeSetting('include_unbound_keys', value === 'true')}
+                    options={booleanOptions}
+                    disabled={advancedProtection.scope.api_key_group_ids.length === 0}
                   />
                 </Field>
               </div>
@@ -5729,6 +5790,65 @@ function PromptFilterLogsTable({ logs, compact = false }: { logs: PromptFilterLo
 
 function SectionTitle({ title }: { title: string }) {
   return <h3 className="text-base font-semibold leading-tight text-foreground">{title}</h3>
+}
+
+// PromptScopeGroupSelect 圈定 Prompt 检查作用的账号分组；空选等于对所有 API Key 生效。
+// 与 APIKeys 页的分组多选同一交互，方便运维对照 Key 的分组授权。
+function PromptScopeGroupSelect({
+  groups,
+  value,
+  onChange,
+  allLabel,
+  placeholder,
+  emptyLabel,
+}: {
+  groups: AccountGroup[]
+  value: number[]
+  onChange: (value: number[]) => void
+  allLabel: string
+  placeholder: string
+  emptyLabel: string
+}) {
+  const byID = new Map(groups.map((group) => [group.id, group]))
+  const selected = value.map((id) => byID.get(id)).filter((group): group is AccountGroup => Boolean(group))
+  const summary = value.length === 0
+    ? allLabel
+    : selected.length > 0
+      ? selected.map((group) => group.name).join(', ')
+      : placeholder
+  const chipClass = (active: boolean, solid = false) => cn(
+    'rounded-md border px-2.5 py-1 text-xs font-semibold transition-colors',
+    active
+      ? solid ? 'border-primary bg-primary text-primary-foreground' : 'border-primary bg-primary/10 text-primary'
+      : 'border-border bg-muted/30 text-muted-foreground hover:text-foreground',
+  )
+  return (
+    <div className="rounded-lg border border-border bg-background p-2">
+      <div className="mb-2 truncate text-sm font-medium text-foreground">{summary}</div>
+      {groups.length === 0 ? (
+        <div className="rounded-md bg-muted/50 px-2 py-2 text-sm text-muted-foreground">{emptyLabel}</div>
+      ) : (
+        <div className="flex flex-wrap gap-1.5">
+          <button type="button" onClick={() => onChange([])} className={chipClass(value.length === 0, true)}>
+            {allLabel}
+          </button>
+          {groups.map((group) => {
+            const active = value.includes(group.id)
+            return (
+              <button
+                key={group.id}
+                type="button"
+                onClick={() => onChange(active ? value.filter((id) => id !== group.id) : [...value, group.id])}
+                className={chipClass(active)}
+              >
+                {group.name}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {

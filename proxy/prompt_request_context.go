@@ -101,9 +101,30 @@ func (h *Handler) promptFilterConfigForRequest(c *gin.Context) promptfilter.Conf
 			}
 		}
 	}
+	// 分组范围是全局闸门：Key 没绑定到圈定的分组就不检查。放在 NewAPI 绑定之后，
+	// 绑定只能在范围内进一步收窄（local_only / off），不能把范围外的 Key 拉回来。
+	if state.config.Enabled && !h.promptFilterScopeCoversRequest(c, state.config.Advanced.Scope) {
+		state.config.Enabled = false
+	}
 	state.configOwner = h
 	state.configReady = true
 	return state.config
+}
+
+// promptFilterScopeCoversRequest 按当前请求 API Key 绑定的账号分组判断是否在
+// Prompt 检查范围内。没有 API Key 身份的请求按「未绑定分组」处理。
+func (h *Handler) promptFilterScopeCoversRequest(c *gin.Context, scope promptfilter.ScopeConfig) bool {
+	if !scope.Restricted() {
+		return true
+	}
+	var groupIDs []int64
+	if apiKeyID := requestAPIKeyID(c); apiKeyID > 0 && h != nil && h.store != nil {
+		// store 侧的允许组是权威源：分组被删除后会同步刷新。
+		groupIDs = h.store.GetAPIKeyAllowedGroups(apiKeyID)
+	} else if row := apiKeyRowFromContext(c); row != nil {
+		groupIDs = row.AllowedGroupIDs
+	}
+	return scope.CoversAPIKey(groupIDs)
 }
 
 // capturePromptRequestIngress retains the already-owned request buffer by
