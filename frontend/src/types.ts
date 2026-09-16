@@ -137,9 +137,7 @@ export interface CodexTurnStateCacheSettings {
   models: string[]
   ttl_minutes: number
   countries: string[]
-  max_ping_tries: number
   refresh_mode: CodexTurnStateRefreshMode
-  failure_cooldown_seconds: number
   model_choices?: string[]
 }
 

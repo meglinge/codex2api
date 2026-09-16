@@ -16,6 +16,8 @@
 
 ### Features
 
+- **`X-Codex-Turn-State` auto-cache refreshes until it gets a healthy blob, on a brand-new connection every ping.** The refresh loop for a (account, model) cell no longer has a retry cap and no longer cools the cell down: a round walks the country list once, each ping goes out on a fresh connection that bypasses the shared client pool (rotating proxies hand out a new exit IP per connection, so reusing a pooled HTTP/2 connection kept hitting the same IP), a failed round releases the waiting requests so the scheduler rotates accounts, and the loop keeps going in the background with a short pause between rounds (skipped when a new request is waiting). The loop stops only when the cell gets a healthy value, the model leaves the cache list, or the account is disabled or removed. `max_ping_tries` and `failure_cooldown_seconds` are gone from the settings API and page, the Intelligence page's "clear cooldown" action is removed, and refresh events are now recorded per ping rather than per round. Resin egress is sticky per account and is left as is.
+
 - **Codex accounts can store per-model `X-Codex-Turn-State` and reuse it on later requests.** The connection-test modal still pings without the header so a new IP can mint an unthrottled blob; that value is filled into the current model and persisted. Replay tests and subsequent user traffic for that account+model send the saved header (and `client_metadata.x-codex-turn-state` when the body already has metadata). A changed upstream value still means the stored blob is stale.
 
 ## v2.9.8 - 2026-09-16

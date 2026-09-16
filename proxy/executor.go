@@ -697,6 +697,12 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	egress := ResolveCodexEgress(account, endpoint, proxyURL)
 	endpoint = egress.URL
 	client := egress.Client()
+	// 要求全新连接的调用（turn-state ping）绕开共享连接池：换连接才换出口 IP。
+	// Resin 按账号粘连，出口由它决定，这里换不了也不该换。
+	var oneShot http.RoundTripper
+	if freshCodexConnection(ctx) && !egress.ViaResin() {
+		client, oneShot = newOneShotCodexClient(egress.DialProxyURL)
+	}
 
 	send := func() (*http.Response, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(outboundBody))
@@ -723,7 +729,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		}
 		resp, err := doTracedUpstreamRequest(client, req, account, proxyURL)
 		if err != nil {
-			if shouldRecyclePooledClient(err) {
+			if oneShot == nil && shouldRecyclePooledClient(err) {
 				recyclePooledClient(account, proxyURL)
 			}
 			return nil, ErrUpstream(0, "请求上游失败", err)
@@ -733,6 +739,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 
 	resp, err := send()
 	if err != nil {
+		releaseOneShotTransport(oneShot)
 		return nil, err
 	}
 
@@ -742,14 +749,19 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		_ = resp.Body.Close()
 		if auth.IsAgentIdentityTaskInvalidResponse(resp.StatusCode, peeked) {
 			if regErr := EnsureCodexAgentIdentityTaskFunc(ctx, account, true); regErr == nil {
-				return send()
+				resp, err = send()
+				if err != nil {
+					releaseOneShotTransport(oneShot)
+					return nil, err
+				}
+				return wrapOneShotResponse(resp, oneShot), nil
 			}
 		}
 		// 非 task 失效或重注册失败：把已读走的 body 还原后原样返回给上层错误处理。
 		resp.Body = io.NopCloser(bytes.NewReader(peeked))
 	}
 
-	return resp, nil
+	return wrapOneShotResponse(resp, oneShot), nil
 }
 
 func ExecuteOpenAIResponsesRequest(ctx context.Context, account *auth.Account, requestBody []byte, proxyOverride string, headers http.Header) (upstreamResponse *http.Response, upstreamErr error) {

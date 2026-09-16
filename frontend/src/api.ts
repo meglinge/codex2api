@@ -1037,7 +1037,7 @@ export const api = {
       body: JSON.stringify(patch),
     }),
   getCodexTurnStateCacheSettings: () => request<CodexTurnStateCacheSettings>('/settings/codex-turn-state-cache'),
-  updateCodexTurnStateCacheSettings: (patch: Partial<Pick<CodexTurnStateCacheSettings, 'ipv6_proxy_url' | 'models' | 'ttl_minutes' | 'countries' | 'max_ping_tries' | 'refresh_mode' | 'failure_cooldown_seconds'>>) =>
+  updateCodexTurnStateCacheSettings: (patch: Partial<Pick<CodexTurnStateCacheSettings, 'ipv6_proxy_url' | 'models' | 'ttl_minutes' | 'countries' | 'refresh_mode'>>) =>
     request<CodexTurnStateCacheSettings>('/settings/codex-turn-state-cache', {
       method: 'PUT',
       body: JSON.stringify(patch),
@@ -1047,11 +1047,6 @@ export const api = {
     request<{ events: CodexTurnStateRefreshEvent[] }>(`/codex-turn-states/events?limit=${limit}`),
   refreshCodexTurnStateCell: (cell: CodexTurnStateCellAction) =>
     request<CodexTurnStateForceRefreshResult>('/codex-turn-states/refresh', {
-      method: 'POST',
-      body: JSON.stringify(cell),
-    }),
-  clearCodexTurnStateCooldown: (cell: CodexTurnStateCellAction) =>
-    request<{ cleared: boolean }>('/codex-turn-states/clear-cooldown', {
       method: 'POST',
       body: JSON.stringify(cell),
     }),

@@ -63,36 +63,11 @@ func TestCodexTurnStateCellActionsValidateInput(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			recorder := postTurnStateAction(t, handler.ClearCodexTurnStateCellCooldown, tc.body)
+			recorder := postTurnStateAction(t, handler.InvalidateCodexTurnStateCell, tc.body)
 			if recorder.Code != tc.want {
 				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, tc.want, recorder.Body.String())
 			}
 		})
-	}
-}
-
-func TestClearCodexTurnStateCellCooldownEndpoint(t *testing.T) {
-	handler, account := newTurnStateActionHandler(t)
-	proxy.ApplyCodexTurnStateCacheConfig(database.CodexTurnStateCacheConfig{
-		Models:     []string{"gpt-6-astra"},
-		TTLMinutes: 43,
-	})
-	t.Cleanup(func() { proxy.ApplyCodexTurnStateCacheConfig(database.CodexTurnStateCacheConfig{}) })
-
-	body := fmt.Sprintf(`{"account_id":%d,"model":"gpt-6-astra"}`, account.ID())
-	// 没有冷却时返回 cleared=false，而不是报错。
-	recorder := postTurnStateAction(t, handler.ClearCodexTurnStateCellCooldown, body)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-	var response struct {
-		Cleared bool `json:"cleared"`
-	}
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if response.Cleared {
-		t.Fatal("cleared = true, want false when nothing was cooled down")
 	}
 }
 

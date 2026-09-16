@@ -1197,7 +1197,6 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/codex-turn-states/overview", h.GetCodexTurnStateOverview)
 	api.GET("/codex-turn-states/events", h.ListCodexTurnStateRefreshEvents)
 	api.POST("/codex-turn-states/refresh", h.RefreshCodexTurnStateCell)
-	api.POST("/codex-turn-states/clear-cooldown", h.ClearCodexTurnStateCellCooldown)
 	api.POST("/codex-turn-states/invalidate", h.InvalidateCodexTurnStateCell)
 	api.GET("/accounts/:id/quality-test/options", h.QualityTestOptions)
 	api.POST("/accounts/:id/quality-test", h.CreateQualityTestJob)

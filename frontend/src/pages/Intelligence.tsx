@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Brain, RotateCw, Snowflake, Trash2 } from 'lucide-react'
+import { Brain, RotateCw, Trash2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { api } from '../api'
 import OpsTabs from '../components/OpsTabs'
@@ -183,7 +183,7 @@ export default function Intelligence() {
   }, [listRows, listPage, listPageSize, listTotalPages])
 
   const runAction = useCallback(
-    async (row: Row, action: 'refresh' | 'clearCooldown' | 'invalidate') => {
+    async (row: Row, action: 'refresh' | 'invalidate') => {
       const key: PendingAction = `${row.accountId}:${row.model}`
       setPending(key)
       try {
@@ -195,11 +195,6 @@ export default function Intelligence() {
           } else {
             showToast(t('intelligence.action.refreshFailed', { reason: result.error ?? '' }), 'error')
           }
-        } else if (action === 'clearCooldown') {
-          const result = await api.clearCodexTurnStateCooldown(cell)
-          showToast(
-            result.cleared ? t('intelligence.action.cooldownCleared') : t('intelligence.action.cooldownNone'),
-            result.cleared ? 'success' : 'info')
         } else {
           await api.invalidateCodexTurnStateCell(cell)
           showToast(t('intelligence.action.invalidated'), 'success')
@@ -396,16 +391,6 @@ export default function Intelligence() {
                                   onClick={() => void runAction(row, 'refresh')}
                                 >
                                   <RotateCw className={`size-3.5 ${busy ? 'animate-spin' : ''}`} />
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  className="size-7"
-                                  disabled={busy || row.cooldown_remaining_seconds <= 0}
-                                  title={t('intelligence.action.clearCooldown')}
-                                  onClick={() => void runAction(row, 'clearCooldown')}
-                                >
-                                  <Snowflake className="size-3.5" />
                                 </Button>
                                 <Button
                                   variant="ghost"

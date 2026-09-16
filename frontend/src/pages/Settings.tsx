@@ -770,7 +770,7 @@ function CodexTurnStateCacheCard() {
     }
   }, [showToast])
 
-  const save = useCallback(async (patch: Partial<Pick<CodexTurnStateCacheSettings, 'ipv6_proxy_url' | 'models' | 'ttl_minutes' | 'countries' | 'max_ping_tries' | 'refresh_mode' | 'failure_cooldown_seconds'>>) => {
+  const save = useCallback(async (patch: Partial<Pick<CodexTurnStateCacheSettings, 'ipv6_proxy_url' | 'models' | 'ttl_minutes' | 'countries' | 'refresh_mode'>>) => {
     setSaving(true)
     try {
       const response = await api.updateCodexTurnStateCacheSettings(patch)
@@ -852,20 +852,6 @@ function CodexTurnStateCacheCard() {
             />
           </SettingField>
           <SettingField
-            label={t('settings.codexTurnStateCache.maxTries')}
-            description={t('settings.codexTurnStateCache.maxTriesDesc')}
-          >
-            <DraftNumberInput
-              min={1}
-              max={32}
-              value={settings?.max_ping_tries ?? 8}
-              disabled={settings === null || saving}
-              onValueChange={(value) => {
-                if (value !== (settings?.max_ping_tries ?? 8)) void save({ max_ping_tries: value })
-              }}
-            />
-          </SettingField>
-          <SettingField
             label={t('settings.codexTurnStateCache.refreshMode')}
             description={t('settings.codexTurnStateCache.refreshModeDesc')}
           >
@@ -879,21 +865,6 @@ function CodexTurnStateCacheCard() {
                 { value: 'async', label: t('settings.codexTurnStateCache.refreshModeAsync') },
               ]}
               disabled={settings === null || saving}
-            />
-          </SettingField>
-          <SettingField
-            label={t('settings.codexTurnStateCache.failureCooldown')}
-            description={t('settings.codexTurnStateCache.failureCooldownDesc')}
-            suffix={t('settings.unit.sec')}
-          >
-            <DraftNumberInput
-              min={5}
-              max={1800}
-              value={settings?.failure_cooldown_seconds ?? 60}
-              disabled={settings === null || saving}
-              onValueChange={(value) => {
-                if (value !== (settings?.failure_cooldown_seconds ?? 60)) void save({ failure_cooldown_seconds: value })
-              }}
             />
           </SettingField>
         </div>

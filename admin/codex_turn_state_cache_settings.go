@@ -2,7 +2,6 @@ package admin
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -24,21 +23,18 @@ func (h *Handler) GetCodexTurnStateCacheSettings(c *gin.Context) {
 
 func (h *Handler) UpdateCodexTurnStateCacheSettings(c *gin.Context) {
 	var req struct {
-		IPv6ProxyURL           *string   `json:"ipv6_proxy_url"`
-		Models                 *[]string `json:"models"`
-		TTLMinutes             *int      `json:"ttl_minutes"`
-		Countries              *[]string `json:"countries"`
-		MaxPingTries           *int      `json:"max_ping_tries"`
-		RefreshMode            *string   `json:"refresh_mode"`
-		FailureCooldownSeconds *int      `json:"failure_cooldown_seconds"`
+		IPv6ProxyURL *string   `json:"ipv6_proxy_url"`
+		Models       *[]string `json:"models"`
+		TTLMinutes   *int      `json:"ttl_minutes"`
+		Countries    *[]string `json:"countries"`
+		RefreshMode  *string   `json:"refresh_mode"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error())
 		return
 	}
-	if req.IPv6ProxyURL == nil && req.Models == nil && req.TTLMinutes == nil && req.Countries == nil &&
-		req.MaxPingTries == nil && req.RefreshMode == nil && req.FailureCooldownSeconds == nil {
-		writeError(c, http.StatusBadRequest, "缺少 ipv6_proxy_url、models、ttl_minutes、countries、max_ping_tries、refresh_mode 或 failure_cooldown_seconds")
+	if req.IPv6ProxyURL == nil && req.Models == nil && req.TTLMinutes == nil && req.Countries == nil && req.RefreshMode == nil {
+		writeError(c, http.StatusBadRequest, "缺少 ipv6_proxy_url、models、ttl_minutes、countries 或 refresh_mode")
 		return
 	}
 	if h.db == nil {
@@ -62,9 +58,6 @@ func (h *Handler) UpdateCodexTurnStateCacheSettings(c *gin.Context) {
 	if req.Countries != nil {
 		cfg.Countries = *req.Countries
 	}
-	if req.MaxPingTries != nil {
-		cfg.MaxPingTries = *req.MaxPingTries
-	}
 	if req.RefreshMode != nil {
 		mode := strings.ToLower(strings.TrimSpace(*req.RefreshMode))
 		if mode != database.CodexTurnStateRefreshModeBlocking && mode != database.CodexTurnStateRefreshModeAsync {
@@ -73,24 +66,14 @@ func (h *Handler) UpdateCodexTurnStateCacheSettings(c *gin.Context) {
 		}
 		cfg.RefreshMode = mode
 	}
-	if req.FailureCooldownSeconds != nil {
-		seconds := *req.FailureCooldownSeconds
-		if seconds < database.MinCodexTurnStateFailureCooldownSeconds || seconds > database.MaxCodexTurnStateFailureCooldownSeconds {
-			writeError(c, http.StatusBadRequest, fmt.Sprintf("failure_cooldown_seconds 需在 %d~%d 之间",
-				database.MinCodexTurnStateFailureCooldownSeconds, database.MaxCodexTurnStateFailureCooldownSeconds))
-			return
-		}
-		cfg.FailureCooldownSeconds = seconds
-	}
 	normalized := cfg.Normalized()
 	if err := h.db.SaveCodexTurnStateCacheConfig(c.Request.Context(), normalized); err != nil {
 		writeError(c, http.StatusInternalServerError, "保存失败: "+err.Error())
 		return
 	}
 	proxy.ApplyCodexTurnStateCacheConfig(normalized)
-	log.Printf("设置已更新: codex_turn_state_cache models=%d ttl=%d countries=%d tries=%d mode=%s cooldown=%ds",
-		len(normalized.Models), normalized.TTLMinutes, len(normalized.Countries), normalized.MaxPingTries,
-		normalized.RefreshMode, normalized.FailureCooldownSeconds)
+	log.Printf("设置已更新: codex_turn_state_cache models=%d ttl=%d countries=%d mode=%s",
+		len(normalized.Models), normalized.TTLMinutes, len(normalized.Countries), normalized.RefreshMode)
 	c.JSON(http.StatusOK, h.buildCodexTurnStateCacheSettingsResponse(normalized))
 }
 

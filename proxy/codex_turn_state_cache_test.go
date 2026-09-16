@@ -113,7 +113,6 @@ func TestEnsureCodexTurnStateReadyRotatesCountriesOnPingFailure(t *testing.T) {
 		Models:       []string{"gpt-5.6-sol"},
 		TTLMinutes:   43,
 		Countries:    []string{"JP", "SG"},
-		MaxPingTries: 2,
 	}, func(_ context.Context, _ *auth.Account, _, proxyURL string) (string, error) {
 		proxies = append(proxies, proxyURL)
 		if len(proxies) == 1 {
@@ -141,7 +140,6 @@ func TestEnsureCodexTurnStateReadyHidesRefreshDiagnostics(t *testing.T) {
 		IPv6ProxyURL: "socks5://[::1]:1080",
 		Models:       []string{"gpt-5.6-sol"},
 		TTLMinutes:   43,
-		MaxPingTries: 1,
 	}, func(context.Context, *auth.Account, string, string) (string, error) {
 		return "", verifyCodexTurnStatePingIntelligence(fakeCodexTurnStateFernet(176), "plus")
 	}))

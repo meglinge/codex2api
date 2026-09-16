@@ -31,9 +31,10 @@ type CodexTurnStateRefreshStat struct {
 	ConsecutiveFails int
 	TotalAttempts    int
 	TotalSuccesses   int
-	// LastPingCount 是最近一轮里实际发出的 ping 次数。等于配置的最大重试次数就说明
-	// 这一轮是跑满了才放弃的。
-	LastPingCount  int
+	// LastPingCount 是当前这次刷新循环里累计发出的 ping 次数（成功即归零重来）。
+	// 刷新不设上限，这个数越大说明这一格被降智得越顽固。
+	LastPingCount int
+	// LastDurationMs 是当前这次刷新循环从开始到最近一次 ping 结束的耗时。
 	LastDurationMs int64
 	// LastFailureKind 是上面那组常量之一，成功时为空。
 	LastFailureKind string
@@ -54,7 +55,8 @@ func (s CodexTurnStateRefreshStat) Healthy() bool {
 // 又不至于让内存随刷新频率增长。
 const codexTurnStateEventRingSize = 300
 
-// CodexTurnStateRefreshEvent 是一轮刷新的流水记录，供管理页的实时刷新流展示。
+// CodexTurnStateRefreshEvent 是一次 ping 的流水记录，供管理页的实时刷新流展示。
+// PingCount 是这次刷新循环里到本条为止累计的 ping 次数。
 type CodexTurnStateRefreshEvent struct {
 	Seq         int64
 	At          time.Time
@@ -111,7 +113,7 @@ func classifyCodexTurnStateFailure(err error) (kind string, cipherLen, expectedL
 	return CodexTurnStateFailureOther, 0, 0
 }
 
-// recordRefresh 记录一轮刷新的结果。pings 是这一轮实际发出的 ping 次数。
+// recordRefresh 记录一次 ping 的结果。pings 是当前这次刷新循环里累计发出的 ping 次数。
 func (c *codexTurnStateCache) recordRefresh(account *auth.Account, model string, pings int, elapsed time.Duration, err error) {
 	if c == nil || account == nil {
 		return
@@ -261,7 +263,10 @@ func CodexTurnStateRefreshStatFor(accountID int64, model string) (CodexTurnState
 	return currentCodexTurnStateCache().refreshStatFor(accountID, model)
 }
 
-// ForgetCodexTurnStateRefreshStats 在账号被移除后清掉它的档案。
+// ForgetCodexTurnStateRefreshStats 在账号被移除后清掉它的档案，并让它名下还在跑的
+// 刷新循环退出。
 func ForgetCodexTurnStateRefreshStats(accountID int64) {
-	currentCodexTurnStateCache().forgetRefreshStats(accountID)
+	cache := currentCodexTurnStateCache()
+	cache.stopRefreshLoopsFor(accountID)
+	cache.forgetRefreshStats(accountID)
 }

@@ -51,16 +51,15 @@ func TestClassifyCodexTurnStateFailure(t *testing.T) {
 	}
 }
 
-// 一轮跑满所有 ping 都失败时，档案要记下轮次、失败归类和降智密文长度。
+// 一轮遍历完国家列表全部失败时，档案要按 ping 计数，并记下失败归类和降智密文长度。
 func TestRefreshStatRecordsExhaustedDegradedRound(t *testing.T) {
-	store := newCooldownTestStore(t)
+	store := newTurnStateTestStore(t)
 	account := &auth.Account{DBID: 201}
 	installTurnStateCache(t, store, database.CodexTurnStateCacheConfig{
 		IPv6ProxyURL: "socks5://user-region-{XX}:pass@host:3000",
 		Models:       []string{"gpt-5.6-terra"},
 		TTLMinutes:   43,
 		Countries:    []string{"JP", "SG", "PH"},
-		MaxPingTries: 3,
 	}, func(context.Context, *auth.Account, string, string) (string, error) {
 		return "", verifyCodexTurnStatePingIntelligence(fakeCodexTurnStateFernet(208), "team")
 	})
@@ -73,9 +72,9 @@ func TestRefreshStatRecordsExhaustedDegradedRound(t *testing.T) {
 		t.Fatal("missing refresh stat")
 	}
 	if stat.LastPingCount != 3 {
-		t.Fatalf("LastPingCount = %d, want 3 (the round was exhausted)", stat.LastPingCount)
+		t.Fatalf("LastPingCount = %d, want 3 (one ping per country)", stat.LastPingCount)
 	}
-	if stat.ConsecutiveFails != 1 || stat.TotalAttempts != 1 || stat.TotalSuccesses != 0 {
+	if stat.ConsecutiveFails != 3 || stat.TotalAttempts != 3 || stat.TotalSuccesses != 0 {
 		t.Fatalf("counters = %+v", stat)
 	}
 	if stat.LastFailureKind != CodexTurnStateFailureDegraded {
@@ -87,14 +86,14 @@ func TestRefreshStatRecordsExhaustedDegradedRound(t *testing.T) {
 	if stat.Healthy() {
 		t.Fatal("a failed round is not healthy")
 	}
-	if stat.LastSuccessAt.IsZero() != true {
+	if !stat.LastSuccessAt.IsZero() {
 		t.Fatal("LastSuccessAt must stay zero")
 	}
 }
 
 // 成功要清零连败计数并抹掉上一次的失败详情。
 func TestRefreshStatResetsOnSuccess(t *testing.T) {
-	store := newCooldownTestStore(t)
+	store := newTurnStateTestStore(t)
 	account := &auth.Account{DBID: 202}
 	healthy := fakeCodexTurnStateFernet(160)
 	fail := true
@@ -102,7 +101,6 @@ func TestRefreshStatResetsOnSuccess(t *testing.T) {
 		IPv6ProxyURL: "socks5://[::1]:1080",
 		Models:       []string{"gpt-6-astra"},
 		TTLMinutes:   43,
-		MaxPingTries: 1,
 	}, func(context.Context, *auth.Account, string, string) (string, error) {
 		if fail {
 			return "", fmt.Errorf(`上游返回 429: {"detail":"Rate limit exceeded"}`)
@@ -110,6 +108,8 @@ func TestRefreshStatResetsOnSuccess(t *testing.T) {
 		return healthy, nil
 	})
 
+	// 轮间间隔拨在 1 小时，每次请求恰好触发一轮（新等待者会 kick 下一轮），
+	// 所以 fail 的翻转不会和后台 ping 抢。
 	body := []byte(`{"model":"gpt-6-astra"}`)
 	for i := 0; i < 2; i++ {
 		if _, err := ensureCodexTurnStateReady(context.Background(), account, body); err == nil {
@@ -139,14 +139,13 @@ func TestRefreshStatResetsOnSuccess(t *testing.T) {
 
 // 命中新鲜缓存没有真的打上游，不能污染档案。
 func TestRefreshStatIgnoresCacheHits(t *testing.T) {
-	store := newCooldownTestStore(t)
+	store := newTurnStateTestStore(t)
 	account := &auth.Account{DBID: 203}
 	account.SetCodexTurnState("gpt-6-astra", fakeCodexTurnStateFernet(160), time.Now())
 	installTurnStateCache(t, store, database.CodexTurnStateCacheConfig{
 		IPv6ProxyURL: "socks5://[::1]:1080",
 		Models:       []string{"gpt-6-astra"},
 		TTLMinutes:   43,
-		MaxPingTries: 1,
 	}, func(context.Context, *auth.Account, string, string) (string, error) {
 		t.Fatal("fresh cache must not ping")
 		return "", nil
@@ -160,12 +159,11 @@ func TestRefreshStatIgnoresCacheHits(t *testing.T) {
 }
 
 func TestRefreshStatsListAndForget(t *testing.T) {
-	store := newCooldownTestStore(t)
+	store := newTurnStateTestStore(t)
 	installTurnStateCache(t, store, database.CodexTurnStateCacheConfig{
 		IPv6ProxyURL: "socks5://[::1]:1080",
 		Models:       []string{"gpt-6-astra", "gpt-5.6-sol"},
 		TTLMinutes:   43,
-		MaxPingTries: 1,
 	}, func(context.Context, *auth.Account, string, string) (string, error) {
 		return "", fmt.Errorf("智力校验未通过")
 	})

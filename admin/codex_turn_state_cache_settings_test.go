@@ -30,7 +30,7 @@ func TestCodexTurnStateCacheSettingsRoundTrip(t *testing.T) {
 	}
 
 	recorder = httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPut, "/api/admin/settings/codex-turn-state-cache", strings.NewReader(`{"ipv6_proxy_url":" socks5://user-region-{XX}:pass@198.44.167.163:3000 ","models":[" gpt-5.6-sol ","gpt-5.6-sol"],"ttl_minutes":43,"countries":["jp","SG"],"max_ping_tries":5}`))
+	request := httptest.NewRequest(http.MethodPut, "/api/admin/settings/codex-turn-state-cache", strings.NewReader(`{"ipv6_proxy_url":" socks5://user-region-{XX}:pass@198.44.167.163:3000 ","models":[" gpt-5.6-sol ","gpt-5.6-sol"],"ttl_minutes":43,"countries":["jp","SG"]}`))
 	request.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -40,7 +40,7 @@ func TestCodexTurnStateCacheSettingsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.IPv6ProxyURL != "socks5://user-region-{XX}:pass@198.44.167.163:3000" || len(cfg.Models) != 1 || cfg.Models[0] != "gpt-5.6-sol" || cfg.TTLMinutes != 43 || cfg.MaxPingTries != 5 || len(cfg.Countries) != 2 || cfg.Countries[0] != "JP" {
+	if cfg.IPv6ProxyURL != "socks5://user-region-{XX}:pass@198.44.167.163:3000" || len(cfg.Models) != 1 || cfg.Models[0] != "gpt-5.6-sol" || cfg.TTLMinutes != 43 || len(cfg.Countries) != 2 || cfg.Countries[0] != "JP" {
 		t.Fatalf("cfg = %+v", cfg)
 	}
 	live, ok := proxy.CurrentCodexTurnStateCacheConfig()
@@ -56,7 +56,7 @@ func TestCodexTurnStateCacheSettingsRoundTrip(t *testing.T) {
 		t.Fatalf("partial PUT status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	cfg, _ = db.LoadCodexTurnStateCacheConfig(context.Background())
-	if cfg.TTLMinutes != 50 || cfg.IPv6ProxyURL != "socks5://user-region-{XX}:pass@198.44.167.163:3000" || cfg.MaxPingTries != 5 {
+	if cfg.TTLMinutes != 50 || cfg.IPv6ProxyURL != "socks5://user-region-{XX}:pass@198.44.167.163:3000" {
 		t.Fatalf("partial cfg = %+v", cfg)
 	}
 }

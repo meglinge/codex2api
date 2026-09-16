@@ -14,7 +14,8 @@ import (
 )
 
 // codexTurnStateForceRefreshTimeout 给一次手动重刷的上限。
-// 一轮最多 max_ping_tries 次 ping，每次 45s 超时，但管理页不能无限转圈。
+// 手动重刷只等当前这一轮（遍历一遍国家列表，每次 ping 45s 超时）；后台循环不会
+// 因为管理页放弃等待而停，但管理页不能无限转圈。
 const codexTurnStateForceRefreshTimeout = 3 * time.Minute
 
 type codexTurnStateCellRequest struct {
@@ -103,17 +104,6 @@ func (h *Handler) RefreshCodexTurnStateCell(c *gin.Context) {
 		"ping_count":  stat.LastPingCount,
 		"duration_ms": stat.LastDurationMs,
 	})
-}
-
-// ClearCodexTurnStateCellCooldown 手动解除一格的 turn-state 冷却。
-// POST /api/admin/codex-turn-states/clear-cooldown
-func (h *Handler) ClearCodexTurnStateCellCooldown(c *gin.Context) {
-	account, model, ok := h.bindCodexTurnStateCell(c)
-	if !ok {
-		return
-	}
-	cleared := proxy.ClearCodexTurnStateCooldown(account, model)
-	c.JSON(http.StatusOK, gin.H{"cleared": cleared})
 }
 
 // InvalidateCodexTurnStateCell 丢掉一格已缓存的 blob，下一次请求会重新 ping。

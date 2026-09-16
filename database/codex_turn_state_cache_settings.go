@@ -12,21 +12,18 @@ import (
 // CodexTurnStateCacheConfig 是全局 X-Codex-Turn-State 自动缓存配置。
 // 和 channel_test_config 一样用独立小 UPDATE，不进 SaveSettings 的巨型 UPSERT。
 //
-// 勾选的模型才会走缓存：值为空或 TTL 到期时，用 IPv6 轮转代理 ping 拿新 blob；
-// 用户请求命中该账号该模型时先等 ping 完成再发出。
+// 勾选的模型才会走缓存：值为空或 TTL 到期时，用 IPv6 轮转代理 ping 拿新 blob，
+// 按国家列表轮转、每次 ping 都新建连接，刷到健康值为止——没有次数上限，也不给
+// 失败的 (账号, 模型) 挂冷却。
 type CodexTurnStateCacheConfig struct {
 	IPv6ProxyURL string   `json:"ipv6_proxy_url"`
 	Models       []string `json:"models"`
 	TTLMinutes   int      `json:"ttl_minutes"`
 	Countries    []string `json:"countries"`
-	MaxPingTries int      `json:"max_ping_tries"`
 	// RefreshMode 决定缓存未命中时用户请求是否等待 ping 完成。
-	// blocking：等 ping 跑完（历史行为）。
-	// async：不等，后台刷新；有旧值就先回放旧值，没有旧值则冷却该模型并换号。
+	// blocking：等当前这一轮 ping 跑完（历史行为）。
+	// async：不等，后台刷新；有旧值就先回放旧值，没有旧值则这次换号。
 	RefreshMode string `json:"refresh_mode"`
-	// FailureCooldownSeconds 是一次刷新彻底失败后，该 (账号, 模型) 的冷却起始时长。
-	// 连续失败按 store 的模型冷却退避逐级翻倍，上限 30 分钟。0 表示用默认值。
-	FailureCooldownSeconds int `json:"failure_cooldown_seconds"`
 }
 
 const (
@@ -34,9 +31,6 @@ const (
 	MinCodexTurnStateCacheTTLMinutes     = 1
 	MaxCodexTurnStateCacheTTLMinutes     = 24 * 60
 	MaxCodexTurnStateCacheModels         = 64
-	DefaultCodexTurnStateCacheMaxTries   = 8
-	MinCodexTurnStateCacheMaxTries       = 1
-	MaxCodexTurnStateCacheMaxTries       = 32
 	MaxCodexTurnStateCacheCountries      = 32
 	codexTurnStateRegionPlaceholder      = "{XX}"
 
@@ -44,10 +38,6 @@ const (
 	CodexTurnStateRefreshModeBlocking = "blocking"
 	// CodexTurnStateRefreshModeAsync 把 ping 挪出请求关键路径。
 	CodexTurnStateRefreshModeAsync = "async"
-
-	DefaultCodexTurnStateFailureCooldownSeconds = 60
-	MinCodexTurnStateFailureCooldownSeconds     = 5
-	MaxCodexTurnStateFailureCooldownSeconds     = 30 * 60
 )
 
 // Normalized 去掉空白模型、钳制 TTL，保证落库与回显一致。
@@ -79,49 +69,22 @@ func (c CodexTurnStateCacheConfig) Normalized() CodexTurnStateCacheConfig {
 			break
 		}
 	}
-	tries := c.MaxPingTries
-	if tries <= 0 {
-		tries = DefaultCodexTurnStateCacheMaxTries
-	}
-	if tries < MinCodexTurnStateCacheMaxTries {
-		tries = MinCodexTurnStateCacheMaxTries
-	}
-	if tries > MaxCodexTurnStateCacheMaxTries {
-		tries = MaxCodexTurnStateCacheMaxTries
-	}
 	mode := strings.ToLower(strings.TrimSpace(c.RefreshMode))
 	if mode != CodexTurnStateRefreshModeAsync {
 		mode = CodexTurnStateRefreshModeBlocking
 	}
-	cooldown := c.FailureCooldownSeconds
-	if cooldown <= 0 {
-		cooldown = DefaultCodexTurnStateFailureCooldownSeconds
-	}
-	if cooldown < MinCodexTurnStateFailureCooldownSeconds {
-		cooldown = MinCodexTurnStateFailureCooldownSeconds
-	}
-	if cooldown > MaxCodexTurnStateFailureCooldownSeconds {
-		cooldown = MaxCodexTurnStateFailureCooldownSeconds
-	}
 	return CodexTurnStateCacheConfig{
-		IPv6ProxyURL:           strings.TrimSpace(c.IPv6ProxyURL),
-		Models:                 models,
-		TTLMinutes:             ttl,
-		Countries:              NormalizeCodexTurnStateCacheCountries(c.Countries),
-		MaxPingTries:           tries,
-		RefreshMode:            mode,
-		FailureCooldownSeconds: cooldown,
+		IPv6ProxyURL: strings.TrimSpace(c.IPv6ProxyURL),
+		Models:       models,
+		TTLMinutes:   ttl,
+		Countries:    NormalizeCodexTurnStateCacheCountries(c.Countries),
+		RefreshMode:  mode,
 	}
 }
 
 // AsyncRefresh 表示缓存未命中时不阻塞用户请求。
 func (c CodexTurnStateCacheConfig) AsyncRefresh() bool {
 	return c.Normalized().RefreshMode == CodexTurnStateRefreshModeAsync
-}
-
-// FailureCooldown 返回一次刷新失败后该 (账号, 模型) 的冷却起始时长。
-func (c CodexTurnStateCacheConfig) FailureCooldown() time.Duration {
-	return time.Duration(c.Normalized().FailureCooldownSeconds) * time.Second
 }
 
 // NormalizeCodexTurnStateCacheCountries 去空白、转大写、去重。
@@ -158,7 +121,8 @@ func ExpandIPv6ProxyURL(template, country string) string {
 	return strings.ReplaceAll(template, codexTurnStateRegionPlaceholder, country)
 }
 
-// PingProxyURLs 按国家列表展开代理 URL，去重后截到最大重试次数。
+// PingProxyURLs 按国家列表展开一轮 ping 要走的代理 URL，去重。没有 {XX} 或没配
+// 国家时一轮只有一个地址，靠每次新建连接让上游轮转出口 IP；没配代理时直连。
 func (c CodexTurnStateCacheConfig) PingProxyURLs() []string {
 	normalized := c.Normalized()
 	template := normalized.IPv6ProxyURL
@@ -181,26 +145,9 @@ func (c CodexTurnStateCacheConfig) PingProxyURLs() []string {
 		}
 		seen[url] = struct{}{}
 		out = append(out, url)
-		if len(out) >= normalized.MaxPingTries {
-			break
-		}
 	}
 	if len(out) == 0 {
 		return []string{template}
-	}
-	return out
-}
-
-// PingProxyAttempts 按最大重试次数循环国家列表。没有 {XX} 时同一代理会重试多次，靠上游轮转 IP。
-func (c CodexTurnStateCacheConfig) PingProxyAttempts() []string {
-	urls := c.PingProxyURLs()
-	max := c.Normalized().MaxPingTries
-	if max < 1 {
-		max = 1
-	}
-	out := make([]string, 0, max)
-	for i := 0; i < max; i++ {
-		out = append(out, urls[i%len(urls)])
 	}
 	return out
 }
@@ -236,6 +183,7 @@ func (c CodexTurnStateCacheConfig) CoversModel(model string) bool {
 }
 
 // LoadCodexTurnStateCacheConfig 读取配置。未配置或 JSON 损坏退回默认 TTL、空模型。
+// 早期版本落库的 max_ping_tries / failure_cooldown_seconds 字段会被忽略。
 func (db *DB) LoadCodexTurnStateCacheConfig(ctx context.Context) (CodexTurnStateCacheConfig, error) {
 	cfg := CodexTurnStateCacheConfig{TTLMinutes: DefaultCodexTurnStateCacheTTLMinutes}
 	if db == nil || db.conn == nil {
