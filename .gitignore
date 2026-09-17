@@ -66,3 +66,6 @@ diagrams/
 /server.log
 # QUALITY_TEST_SVG_SAMPLE 的本地样例，见 docs/CONTRIBUTING.md
 /pelican-bike.html
+
+# 本地临时页面
+rocket-bike.html
