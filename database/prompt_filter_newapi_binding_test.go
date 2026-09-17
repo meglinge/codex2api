@@ -205,8 +205,8 @@ func TestPromptFilterNewAPIBindingPostgresMigrationDDL(t *testing.T) {
 	promptFilterBindingDDLQueryMu.Lock()
 	queries := append([]string(nil), promptFilterBindingDDLQueries...)
 	promptFilterBindingDDLQueryMu.Unlock()
-	if len(queries) != 3 {
-		t.Fatalf("ensure executed %d statements, want DDL, scope migration, and override retirement", len(queries))
+	if len(queries) != 4 {
+		t.Fatalf("ensure executed %d statements, want DDL, scope migration, exempt-user migration, and override retirement", len(queries))
 	}
 	query := queries[0]
 	for _, fragment := range []string{
@@ -224,8 +224,11 @@ func TestPromptFilterNewAPIBindingPostgresMigrationDDL(t *testing.T) {
 	if !strings.Contains(queries[1], "ADD COLUMN IF NOT EXISTS prompt_filter_scope") {
 		t.Fatalf("postgres migration did not add prompt filter scope: %s", queries[1])
 	}
-	if !strings.Contains(queries[2], "SET policy_mode='inherit', policy_profile='inherit'") || !strings.Contains(queries[2], "prompt_filter_scope IN ('inherit','local_only','off')") {
-		t.Fatalf("postgres migration did not retire policy overrides and preserve valid scopes: %s", queries[2])
+	if !strings.Contains(queries[2], "ADD COLUMN IF NOT EXISTS exempt_user_ids TEXT NOT NULL DEFAULT '[]'") {
+		t.Fatalf("postgres migration did not add exempt user ids: %s", queries[2])
+	}
+	if !strings.Contains(queries[3], "SET policy_mode='inherit', policy_profile='inherit'") || !strings.Contains(queries[3], "prompt_filter_scope IN ('inherit','local_only','off')") {
+		t.Fatalf("postgres migration did not retire policy overrides and preserve valid scopes: %s", queries[3])
 	}
 }
 

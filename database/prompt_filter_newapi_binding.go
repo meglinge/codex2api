@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -43,6 +44,7 @@ const sqlitePromptFilterNewAPIBindingsDDL = `CREATE TABLE IF NOT EXISTS prompt_f
 	policy_profile TEXT NOT NULL DEFAULT 'inherit',
 	previous_secret TEXT NOT NULL DEFAULT '',
 	previous_secret_expires_at TIMESTAMP NULL,
+	exempt_user_ids TEXT NOT NULL DEFAULT '[]',
 	updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )`
 
@@ -58,6 +60,7 @@ const postgresPromptFilterNewAPIBindingsDDL = `CREATE TABLE IF NOT EXISTS prompt
 	policy_profile VARCHAR(16) NOT NULL DEFAULT 'inherit',
 	previous_secret TEXT NOT NULL DEFAULT '',
 	previous_secret_expires_at TIMESTAMPTZ NULL,
+	exempt_user_ids TEXT NOT NULL DEFAULT '[]',
 	updated_at TIMESTAMPTZ DEFAULT NOW()
 )`
 
@@ -76,8 +79,18 @@ type PromptFilterNewAPIBinding struct {
 	PolicyProfile           string     `json:"policy_profile"`
 	PreviousSecret          string     `json:"-"`
 	PreviousSecretExpiresAt *time.Time `json:"previous_secret_expires_at,omitempty"`
-	UpdatedAt               time.Time  `json:"updated_at"`
+	// ExemptUserIDs 是该调用方里免检的 NewAPI 用户 ID（X-NewAPI-User-ID）。只对
+	// 签名验证通过的身份生效：未签名或验签失败的请求拿不到豁免。
+	ExemptUserIDs []string  `json:"exempt_user_ids"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
+
+const (
+	// MaxPromptFilterExemptUserIDs / MaxPromptFilterExemptUserIDLength 给豁免名单
+	// 封顶：它跟着绑定进内存快照，每个请求都要扫一遍。
+	MaxPromptFilterExemptUserIDs     = 200
+	MaxPromptFilterExemptUserIDLength = 128
+)
 
 func (db *DB) ensurePromptFilterNewAPIBindingsTable(ctx context.Context) error {
 	ddl := postgresPromptFilterNewAPIBindingsDDL
@@ -91,8 +104,16 @@ func (db *DB) ensurePromptFilterNewAPIBindingsTable(ctx context.Context) error {
 		if err := db.ensureSQLiteColumn(ctx, "prompt_filter_newapi_bindings", "prompt_filter_scope", "TEXT NOT NULL DEFAULT 'inherit'"); err != nil {
 			return err
 		}
-	} else if _, err := db.conn.ExecContext(ctx, `ALTER TABLE prompt_filter_newapi_bindings ADD COLUMN IF NOT EXISTS prompt_filter_scope VARCHAR(16) NOT NULL DEFAULT 'inherit'`); err != nil {
-		return err
+		if err := db.ensureSQLiteColumn(ctx, "prompt_filter_newapi_bindings", "exempt_user_ids", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+			return err
+		}
+	} else {
+		if _, err := db.conn.ExecContext(ctx, `ALTER TABLE prompt_filter_newapi_bindings ADD COLUMN IF NOT EXISTS prompt_filter_scope VARCHAR(16) NOT NULL DEFAULT 'inherit'`); err != nil {
+			return err
+		}
+		if _, err := db.conn.ExecContext(ctx, `ALTER TABLE prompt_filter_newapi_bindings ADD COLUMN IF NOT EXISTS exempt_user_ids TEXT NOT NULL DEFAULT '[]'`); err != nil {
+			return err
+		}
 	}
 	// Binding-level policy overrides were retired. Keep the legacy columns for
 	// a low-risk rolling migration, but neutralize all stored values so an old
@@ -114,6 +135,48 @@ func NormalizePromptFilterScope(value string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// NormalizePromptFilterExemptUserIDs 去空白、去重、丢掉超长项并封顶数量，
+// 保证落库与回显一致。返回值永远非 nil，落库时序列化成 JSON 数组。
+func NormalizePromptFilterExemptUserIDs(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || len(value) > MaxPromptFilterExemptUserIDLength {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+		if len(out) >= MaxPromptFilterExemptUserIDs {
+			break
+		}
+	}
+	return out
+}
+
+func encodePromptFilterExemptUserIDs(values []string) string {
+	raw, err := json.Marshal(NormalizePromptFilterExemptUserIDs(values))
+	if err != nil {
+		return "[]"
+	}
+	return string(raw)
+}
+
+func decodePromptFilterExemptUserIDs(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "null" {
+		return []string{}
+	}
+	var values []string
+	if err := json.Unmarshal([]byte(raw), &values); err != nil {
+		return []string{}
+	}
+	return NormalizePromptFilterExemptUserIDs(values)
 }
 
 func NormalizePromptFilterPolicyMode(value string) (string, bool) {
@@ -149,7 +212,7 @@ func NormalizePromptFilterPlatformCode(value string) (string, bool) {
 }
 
 func (db *DB) ListPromptFilterNewAPIBindings(ctx context.Context) ([]*PromptFilterNewAPIBinding, error) {
-	rows, err := db.conn.QueryContext(ctx, `SELECT api_key_id, platform_code, platform_name, secret, enabled, require_signed_identity, prompt_filter_scope, policy_mode, policy_profile, previous_secret, previous_secret_expires_at, updated_at FROM prompt_filter_newapi_bindings ORDER BY api_key_id`)
+	rows, err := db.conn.QueryContext(ctx, `SELECT api_key_id, platform_code, platform_name, secret, enabled, require_signed_identity, prompt_filter_scope, policy_mode, policy_profile, previous_secret, previous_secret_expires_at, COALESCE(exempt_user_ids, '[]'), updated_at FROM prompt_filter_newapi_bindings ORDER BY api_key_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +229,7 @@ func (db *DB) ListPromptFilterNewAPIBindings(ctx context.Context) ([]*PromptFilt
 }
 
 func (db *DB) GetPromptFilterNewAPIBinding(ctx context.Context, apiKeyID int64) (*PromptFilterNewAPIBinding, error) {
-	return scanPromptFilterNewAPIBinding(db.conn.QueryRowContext(ctx, `SELECT api_key_id, platform_code, platform_name, secret, enabled, require_signed_identity, prompt_filter_scope, policy_mode, policy_profile, previous_secret, previous_secret_expires_at, updated_at FROM prompt_filter_newapi_bindings WHERE api_key_id = $1`, apiKeyID))
+	return scanPromptFilterNewAPIBinding(db.conn.QueryRowContext(ctx, `SELECT api_key_id, platform_code, platform_name, secret, enabled, require_signed_identity, prompt_filter_scope, policy_mode, policy_profile, previous_secret, previous_secret_expires_at, COALESCE(exempt_user_ids, '[]'), updated_at FROM prompt_filter_newapi_bindings WHERE api_key_id = $1`, apiKeyID))
 }
 
 func (db *DB) CreatePromptFilterNewAPIBinding(ctx context.Context, binding *PromptFilterNewAPIBinding) error {
@@ -193,8 +256,9 @@ func (db *DB) CreatePromptFilterNewAPIBinding(ctx context.Context, binding *Prom
 	binding.PromptFilterScope = scope
 	binding.PolicyMode = mode
 	binding.PolicyProfile = profile
+	binding.ExemptUserIDs = NormalizePromptFilterExemptUserIDs(binding.ExemptUserIDs)
 	return db.withSQLiteWriteLock(ctx, func() error {
-		_, err := db.conn.ExecContext(ctx, `INSERT INTO prompt_filter_newapi_bindings (api_key_id, platform_code, platform_name, secret, enabled, require_signed_identity, prompt_filter_scope, policy_mode, policy_profile, previous_secret, previous_secret_expires_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, '', NULL, CURRENT_TIMESTAMP)`, binding.APIKeyID, platformCode, strings.TrimSpace(binding.PlatformName), secret, binding.Enabled, binding.RequireSignedIdentity, scope, mode, profile)
+		_, err := db.conn.ExecContext(ctx, `INSERT INTO prompt_filter_newapi_bindings (api_key_id, platform_code, platform_name, secret, enabled, require_signed_identity, prompt_filter_scope, policy_mode, policy_profile, previous_secret, previous_secret_expires_at, exempt_user_ids, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, '', NULL, $10, CURRENT_TIMESTAMP)`, binding.APIKeyID, platformCode, strings.TrimSpace(binding.PlatformName), secret, binding.Enabled, binding.RequireSignedIdentity, scope, mode, profile, encodePromptFilterExemptUserIDs(binding.ExemptUserIDs))
 		if isPromptFilterNewAPIBindingConflict(err) {
 			return fmt.Errorf("%w: %v", ErrPromptFilterNewAPIBindingConflict, err)
 		}
@@ -222,8 +286,9 @@ func (db *DB) UpdatePromptFilterNewAPIBinding(ctx context.Context, binding *Prom
 	binding.PromptFilterScope = scope
 	binding.PolicyMode = mode
 	binding.PolicyProfile = profile
+	binding.ExemptUserIDs = NormalizePromptFilterExemptUserIDs(binding.ExemptUserIDs)
 	return db.withSQLiteWriteLock(ctx, func() error {
-		result, err := db.conn.ExecContext(ctx, `UPDATE prompt_filter_newapi_bindings SET platform_code=$1, platform_name=$2, enabled=$3, require_signed_identity=$4, prompt_filter_scope=$5, policy_mode=$6, policy_profile=$7, updated_at=CURRENT_TIMESTAMP WHERE api_key_id=$8`, platformCode, strings.TrimSpace(binding.PlatformName), binding.Enabled, binding.RequireSignedIdentity, scope, mode, profile, binding.APIKeyID)
+		result, err := db.conn.ExecContext(ctx, `UPDATE prompt_filter_newapi_bindings SET platform_code=$1, platform_name=$2, enabled=$3, require_signed_identity=$4, prompt_filter_scope=$5, policy_mode=$6, policy_profile=$7, exempt_user_ids=$8, updated_at=CURRENT_TIMESTAMP WHERE api_key_id=$9`, platformCode, strings.TrimSpace(binding.PlatformName), binding.Enabled, binding.RequireSignedIdentity, scope, mode, profile, encodePromptFilterExemptUserIDs(binding.ExemptUserIDs), binding.APIKeyID)
 		if isPromptFilterNewAPIBindingConflict(err) {
 			return fmt.Errorf("%w: %v", ErrPromptFilterNewAPIBindingConflict, err)
 		}
@@ -284,9 +349,11 @@ func (db *DB) DeletePromptFilterNewAPIBinding(ctx context.Context, apiKeyID int6
 func scanPromptFilterNewAPIBinding(scanner interface{ Scan(...interface{}) error }) (*PromptFilterNewAPIBinding, error) {
 	binding := &PromptFilterNewAPIBinding{}
 	var previousExpiryRaw, updatedAtRaw interface{}
-	if err := scanner.Scan(&binding.APIKeyID, &binding.PlatformCode, &binding.PlatformName, &binding.Secret, &binding.Enabled, &binding.RequireSignedIdentity, &binding.PromptFilterScope, &binding.PolicyMode, &binding.PolicyProfile, &binding.PreviousSecret, &previousExpiryRaw, &updatedAtRaw); err != nil {
+	var exemptRaw string
+	if err := scanner.Scan(&binding.APIKeyID, &binding.PlatformCode, &binding.PlatformName, &binding.Secret, &binding.Enabled, &binding.RequireSignedIdentity, &binding.PromptFilterScope, &binding.PolicyMode, &binding.PolicyProfile, &binding.PreviousSecret, &previousExpiryRaw, &exemptRaw, &updatedAtRaw); err != nil {
 		return nil, err
 	}
+	binding.ExemptUserIDs = decodePromptFilterExemptUserIDs(exemptRaw)
 	if normalized, ok := NormalizePromptFilterScope(binding.PromptFilterScope); ok {
 		binding.PromptFilterScope = normalized
 	} else {

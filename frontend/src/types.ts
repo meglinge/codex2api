@@ -3896,6 +3896,8 @@ export interface PromptFilterNewAPIBinding {
   enabled: boolean
   require_signed_identity: boolean
   prompt_filter_scope: PromptFilterScope
+  /** 该调用方里免检的 NewAPI 用户 ID（X-NewAPI-User-ID），仅对签名验证通过的身份生效。 */
+  exempt_user_ids: string[]
   secret_configured: boolean
   secret_masked: string
   previous_secret_active: boolean
@@ -3916,6 +3918,7 @@ export interface CreatePromptFilterNewAPIBindingRequest {
   enabled?: boolean
   require_signed_identity?: boolean
   prompt_filter_scope?: PromptFilterScope
+  exempt_user_ids?: string[]
 }
 
 export type UpdatePromptFilterNewAPIBindingRequest = Partial<

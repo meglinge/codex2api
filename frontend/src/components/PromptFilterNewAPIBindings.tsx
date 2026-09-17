@@ -42,6 +42,8 @@ type BindingForm = {
   enabled: boolean
   requireSignedIdentity: boolean
   promptFilterScope: PromptFilterScope
+  /** 豁免用户 ID 的原始输入，逗号或换行分隔；提交时再拆分去重。 */
+  exemptUserIds: string
 }
 
 const emptyBindingForm: BindingForm = {
@@ -51,6 +53,22 @@ const emptyBindingForm: BindingForm = {
   enabled: true,
   requireSignedIdentity: false,
   promptFilterScope: 'inherit',
+  exemptUserIds: '',
+}
+
+const MAX_EXEMPT_USER_IDS = 200
+
+function parseExemptUserIds(raw: string): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const piece of raw.split(/[\n,;]+/)) {
+    const value = piece.trim()
+    if (!value || value.length > 128 || seen.has(value)) continue
+    seen.add(value)
+    out.push(value)
+    if (out.length >= MAX_EXEMPT_USER_IDS) break
+  }
+  return out
 }
 
 function apiKeyLabel(apiKey: APIKeyRow): string {
@@ -158,6 +176,19 @@ function BindingFormFields({
           “仅本地检测”仍会执行高危规则、会话关联、审计记录与风险画像；“完全跳过”只保留 API Key 和签名身份校验，适合明确受控的内部调用方。
         </span>
       </label>
+      <label className="block space-y-1.5 rounded-lg border border-border/70 bg-muted/20 p-3">
+        <span className="text-sm font-medium">豁免的 NewAPI 用户</span>
+        <textarea
+          value={form.exemptUserIds}
+          rows={3}
+          placeholder="每行或用逗号分隔一个 X-NewAPI-User-ID，例如 1024, 2048"
+          className="flex w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          onChange={(event) => setForm({ ...form, exemptUserIds: event.target.value })}
+        />
+        <span className="block text-xs leading-5 text-muted-foreground">
+          名单里的用户在该调用方下完全跳过 Prompt 检查。只对签名验证通过的身份生效：未签名或验签失败的请求照常检查，所以请确认 NewAPI 已正确配置此绑定的密钥。最多 {MAX_EXEMPT_USER_IDS} 个。
+        </span>
+      </label>
     </div>
   )
 }
@@ -220,6 +251,7 @@ export default function PromptFilterNewAPIBindings() {
       enabled: binding.enabled,
       requireSignedIdentity: binding.require_signed_identity,
       promptFilterScope: binding.prompt_filter_scope || 'inherit',
+      exemptUserIds: (binding.exempt_user_ids ?? []).join('\n'),
     })
     setEditing(binding)
   }
@@ -257,6 +289,7 @@ export default function PromptFilterNewAPIBindings() {
         enabled: createForm.enabled,
         require_signed_identity: createForm.requireSignedIdentity,
         prompt_filter_scope: createForm.promptFilterScope,
+        exempt_user_ids: parseExemptUserIds(createForm.exemptUserIds),
       })
       setCreateOpen(false)
       await load()
@@ -300,6 +333,7 @@ export default function PromptFilterNewAPIBindings() {
         enabled: editForm.enabled,
         require_signed_identity: editForm.requireSignedIdentity,
         prompt_filter_scope: editForm.promptFilterScope,
+        exempt_user_ids: parseExemptUserIds(editForm.exemptUserIds),
       })
       setEditing(null)
       await load()
@@ -472,6 +506,11 @@ export default function PromptFilterNewAPIBindings() {
                                   ? '跳过 Prompt 检查'
                                   : '继承全局审核'}
                             </Badge>
+                            {(binding.exempt_user_ids?.length ?? 0) > 0 ? (
+                              <Badge variant="secondary" title={binding.exempt_user_ids.join(', ')}>
+                                豁免 {binding.exempt_user_ids.length} 个用户
+                              </Badge>
+                            ) : null}
                           </div>
                         </td>
                         <td className="px-3 py-3">

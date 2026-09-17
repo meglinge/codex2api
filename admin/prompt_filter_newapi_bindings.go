@@ -23,20 +23,22 @@ const (
 )
 
 type promptFilterNewAPIBindingCreateRequest struct {
-	APIKeyID              int64  `json:"api_key_id"`
-	PlatformCode          string `json:"platform_code"`
-	PlatformName          string `json:"platform_name"`
-	Enabled               *bool  `json:"enabled"`
-	RequireSignedIdentity *bool  `json:"require_signed_identity"`
-	PromptFilterScope     string `json:"prompt_filter_scope"`
+	APIKeyID              int64    `json:"api_key_id"`
+	PlatformCode          string   `json:"platform_code"`
+	PlatformName          string   `json:"platform_name"`
+	Enabled               *bool    `json:"enabled"`
+	RequireSignedIdentity *bool    `json:"require_signed_identity"`
+	PromptFilterScope     string   `json:"prompt_filter_scope"`
+	ExemptUserIDs         []string `json:"exempt_user_ids"`
 }
 
 type promptFilterNewAPIBindingUpdateRequest struct {
-	PlatformCode          *string `json:"platform_code"`
-	PlatformName          *string `json:"platform_name"`
-	Enabled               *bool   `json:"enabled"`
-	RequireSignedIdentity *bool   `json:"require_signed_identity"`
-	PromptFilterScope     *string `json:"prompt_filter_scope"`
+	PlatformCode          *string   `json:"platform_code"`
+	PlatformName          *string   `json:"platform_name"`
+	Enabled               *bool     `json:"enabled"`
+	RequireSignedIdentity *bool     `json:"require_signed_identity"`
+	PromptFilterScope     *string   `json:"prompt_filter_scope"`
+	ExemptUserIDs         *[]string `json:"exempt_user_ids"`
 }
 
 type promptFilterNewAPIBindingSecretRequest struct {
@@ -51,6 +53,7 @@ type promptFilterNewAPIBindingResponse struct {
 	Enabled                 bool       `json:"enabled"`
 	RequireSignedIdentity   bool       `json:"require_signed_identity"`
 	PromptFilterScope       string     `json:"prompt_filter_scope"`
+	ExemptUserIDs           []string   `json:"exempt_user_ids"`
 	SecretConfigured        bool       `json:"secret_configured"`
 	SecretMasked            string     `json:"secret_masked"`
 	PreviousSecretActive    bool       `json:"previous_secret_active"`
@@ -126,6 +129,7 @@ func (h *Handler) CreatePromptFilterNewAPIBinding(c *gin.Context) {
 	binding := &database.PromptFilterNewAPIBinding{
 		APIKeyID: req.APIKeyID, PlatformCode: code, PlatformName: name, Secret: secret,
 		Enabled: enabled, RequireSignedIdentity: requireSigned, PromptFilterScope: scope,
+		ExemptUserIDs: database.NormalizePromptFilterExemptUserIDs(req.ExemptUserIDs),
 	}
 	mutationCtx, cancelMutation := promptFilterBindingMutationContext(c)
 	defer cancelMutation()
@@ -191,6 +195,9 @@ func (h *Handler) UpdatePromptFilterNewAPIBinding(c *gin.Context) {
 			return
 		}
 		binding.PromptFilterScope = scope
+	}
+	if req.ExemptUserIDs != nil {
+		binding.ExemptUserIDs = database.NormalizePromptFilterExemptUserIDs(*req.ExemptUserIDs)
 	}
 	binding.PlatformCode, binding.PlatformName, ok = validatePromptFilterBindingFields(c, binding.PlatformCode, binding.PlatformName)
 	if !ok {
@@ -395,6 +402,7 @@ func newPromptFilterNewAPIBindingResponse(binding *database.PromptFilterNewAPIBi
 	return promptFilterNewAPIBindingResponse{
 		APIKeyID: binding.APIKeyID, PlatformCode: binding.PlatformCode, PlatformName: binding.PlatformName,
 		Enabled: binding.Enabled, RequireSignedIdentity: binding.RequireSignedIdentity, PromptFilterScope: binding.PromptFilterScope,
+		ExemptUserIDs:    database.NormalizePromptFilterExemptUserIDs(binding.ExemptUserIDs),
 		SecretConfigured: binding.Secret != "", SecretMasked: maskPromptFilterBindingSecret(binding.Secret),
 		PreviousSecretActive: previousActive, PreviousSecretExpiresAt: binding.PreviousSecretExpiresAt,
 		UpdatedAt: binding.UpdatedAt, Secret: reveal,

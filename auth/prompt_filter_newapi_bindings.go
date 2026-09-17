@@ -96,5 +96,7 @@ func clonePromptFilterNewAPIBinding(binding database.PromptFilterNewAPIBinding) 
 		expiresAt := *binding.PreviousSecretExpiresAt
 		binding.PreviousSecretExpiresAt = &expiresAt
 	}
+	// 快照要与调用方彻底解耦：admin 侧改完自己的切片不能透到热路径上。
+	binding.ExemptUserIDs = append([]string(nil), binding.ExemptUserIDs...)
 	return binding
 }

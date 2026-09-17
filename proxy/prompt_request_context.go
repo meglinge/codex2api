@@ -70,6 +70,56 @@ func releasePromptRequestFrameBody(c *gin.Context) {
 }
 
 func (h *Handler) promptFilterConfigForRequest(c *gin.Context) promptfilter.Config {
+	cfg := h.promptFilterBaseConfigForRequest(c)
+	// 用户级豁免不进请求级缓存：capturePromptRequestIngress 会在 body 存进上下文
+	// 之前先解析一次配置，那一刻还验不了签名；等身份验证通过后再问，答案才对。
+	if cfg.Enabled && h.promptFilterNewAPIUserExempt(c, cfg) {
+		cfg.Enabled = false
+	}
+	return cfg
+}
+
+// promptFilterNewAPIUserExempt 判断当前请求的 NewAPI 用户是否在绑定的豁免名单里。
+// 只认签名验证通过的身份：未签名、验签失败或还拿不到 body 时一律不豁免。
+func (h *Handler) promptFilterNewAPIUserExempt(c *gin.Context, cfg promptfilter.Config) bool {
+	if c == nil || h == nil || h.store == nil {
+		return false
+	}
+	binding, bound := h.resolvePromptFilterNewAPIBinding(c)
+	if !bound || !binding.Enabled || len(binding.ExemptUserIDs) == 0 {
+		return false
+	}
+	apiKeyID := requestAPIKeyID(c)
+	if value, exists := c.Get(newAPIIdentityContextKey); exists {
+		// HTTP 在守卫评估里、WS 在握手时已经验过签名，直接复用。
+		if identity, ok := value.(verifiedNewAPIIdentityContext); ok && identity.APIKeyID == apiKeyID {
+			return promptFilterBindingExemptsUser(binding, identity.Identity.UserID)
+		}
+	}
+	body := ingressRequestBody(c, nil)
+	if body == nil {
+		return false
+	}
+	identity, verified := h.verifyNewAPIIdentityContext(c, cfg.Advanced.NewAPI, body)
+	return verified && identity.APIKeyID == apiKeyID && promptFilterBindingExemptsUser(binding, identity.Identity.UserID)
+}
+
+func promptFilterBindingExemptsUser(binding database.PromptFilterNewAPIBinding, userID string) bool {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return false
+	}
+	for _, exempt := range binding.ExemptUserIDs {
+		if strings.TrimSpace(exempt) == userID {
+			return true
+		}
+	}
+	return false
+}
+
+// promptFilterBaseConfigForRequest 解析并缓存请求级配置：全局快照 + API Key 的
+// NewAPI 绑定收窄 + 分组范围闸门。用户级豁免在 promptFilterConfigForRequest 里另算。
+func (h *Handler) promptFilterBaseConfigForRequest(c *gin.Context) promptfilter.Config {
 	if h == nil || h.store == nil {
 		return promptfilter.DefaultConfig()
 	}
