@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand/v2"
 	"net/http"
 	"strconv"
 	"strings"
@@ -943,8 +944,12 @@ func (h *Handler) connectionTestProxyURL(c *gin.Context, account *auth.Account) 
 		return raw, nil
 	}
 	if account != nil && !account.IsRelayStyle() {
-		if ipv6 := strings.TrimSpace(h.codexTurnStateCacheConfig(c.Request.Context()).IPv6ProxyURL); ipv6 != "" {
-			return ipv6, nil
+		cfg := h.codexTurnStateCacheConfig(c.Request.Context())
+		if strings.TrimSpace(cfg.IPv6ProxyURL) != "" {
+			// 模板里的 {XX} 必须按国家列表展开，原样拿去拨号会连到错误的出口。
+			// 与刷新循环同一套展开规则，每次测连随机挑一个国家。
+			urls := cfg.PingProxyURLs()
+			return urls[rand.IntN(len(urls))], nil
 		}
 	}
 	if h == nil || h.store == nil {

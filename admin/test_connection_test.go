@@ -85,6 +85,34 @@ func TestConnectionTestProxyURLDefaultsToTurnStateIPv6(t *testing.T) {
 	}
 }
 
+func TestConnectionTestProxyURLExpandsRegionPlaceholder(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	proxy.ApplyCodexTurnStateCacheConfig(database.CodexTurnStateCacheConfig{
+		IPv6ProxyURL: "socks5://user-region-{XX}:pass@198.44.167.163:3000",
+		Countries:    []string{"JP", "SG"},
+		TTLMinutes:   43,
+	})
+	t.Cleanup(func() {
+		proxy.ApplyCodexTurnStateCacheConfig(database.CodexTurnStateCacheConfig{TTLMinutes: 43})
+	})
+	handler := &Handler{store: auth.NewStore(nil, nil, nil)}
+	want := map[string]bool{
+		"socks5://user-region-JP:pass@198.44.167.163:3000": true,
+		"socks5://user-region-SG:pass@198.44.167.163:3000": true,
+	}
+	for range 20 {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodGet, "/api/admin/accounts/1/test", nil)
+		got, err := handler.connectionTestProxyURL(c, &auth.Account{})
+		if err != nil {
+			t.Fatalf("connectionTestProxyURL() error = %v", err)
+		}
+		if !want[got] {
+			t.Fatalf("proxy = %q, want {XX} expanded to a configured country", got)
+		}
+	}
+}
+
 func TestConnectionAntigravityUsesNativeExecutorAndStreamsContent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	store := auth.NewStore(nil, nil, nil)
