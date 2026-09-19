@@ -48,3 +48,21 @@ func TestInjectStoredCodexTurnStateSkipContext(t *testing.T) {
 		t.Fatalf("ping must not send stored turn-state, got %q", headers.Get(codexTurnStateHeader))
 	}
 }
+
+// 账号同时配了凭据级手动注入值与自动缓存值时，手动值优先：出站头与 WS 帧体必须一致，
+// 不能头是手动值、帧体却被自动缓存值盖掉（上游合并 CodexTurnState 注入后的交互回归）。
+func TestInjectStoredCodexTurnStateYieldsToCredentialInjection(t *testing.T) {
+	account := &auth.Account{
+		CodexTurnStates: map[string]string{"gpt-5.6-sol": "saved-blob"},
+		CodexTurnState:  "manual-blob",
+	}
+	body := []byte(`{"model":"gpt-5.6-sol","client_metadata":{"session_id":"s1"}}`)
+	ctx, body, headers := prepareCodexTurnStateInjection(context.Background(), account, body, nil, true)
+	outBody, outHeaders := injectStoredCodexTurnState(ctx, account, body, headers)
+	if got := outHeaders.Get(codexTurnStateHeader); got != "manual-blob" {
+		t.Fatalf("header = %q, want manual-blob", got)
+	}
+	if got := gjson.GetBytes(outBody, "client_metadata.x-codex-turn-state").String(); got != "manual-blob" {
+		t.Fatalf("client_metadata = %q, want manual-blob", got)
+	}
+}

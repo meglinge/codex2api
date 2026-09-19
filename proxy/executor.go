@@ -570,6 +570,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		apiKey: apiKey, deviceCfg: deviceCfg, headers: headers,
 	})
 	defer func() { telemetryAttempt.observeResult(upstreamResponse, upstreamErr) }()
+	// 凭据级 turn state 强制注入：模型已由入口映射/规则定稿，传输方式也已定。
+	// 未配置的账号这里是空操作。
+	ctx, requestBody, headers = prepareCodexTurnStateInjection(ctx, account, requestBody, headers, wantWebsocket && WebsocketExecuteFunc != nil)
 	poolRouteKey := ""
 	if wantWebsocket {
 		sessionID = strings.TrimSpace(sessionID)
@@ -712,6 +715,8 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 
 		// ==================== 请求头（伪装 Codex CLI） ====================
 		applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
+		// 凭据级 turn state 注入在账号自定义头之后落定：自定义头不该顶掉它。
+		applyCodexTurnStateInjectionHeader(ctx, req.Header)
 		// Content-Encoding 在通用头装配之后设置：真实客户端也是在编码完成时才补这个头
 		// （codex-rs/http-client/src/request.rs prepare_encoded_json），且账号自定义头
 		// 不该有能力声明一个与实际字节不符的编码。
@@ -1040,6 +1045,8 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	// 与下方 applyCodexRequestHeaders 取同一份下游头，两处推导结果才一致。
 	requestBody = ApplyCodexFingerprintToBody(requestBody, account, headers)
 	requestBody = ApplyCodexTimezoneToBody(requestBody, account, time.Now())
+	// 凭据级 turn state 强制注入：compact 与普通轮共用同一条回合状态。
+	ctx, requestBody, headers = prepareCodexTurnStateInjection(ctx, account, requestBody, headers, false)
 	requestBody, headers = injectStoredCodexTurnState(ctx, account, requestBody, headers)
 	RecordOutboundCodexTurnState(ctx, headers.Get(codexTurnStateHeader))
 
@@ -1064,6 +1071,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	}
 
 	applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
+	applyCodexTurnStateInjectionHeader(ctx, req.Header)
 	// routing hint 由网关按最终出站 body 合成，须在账号自定义头之后设置。
 	ApplyCodexRoutingHint(req.Header, account, requestBody)
 

@@ -1694,6 +1694,9 @@ type accountResponse struct {
 	ClaudeVersionPolicyOverride   string                      `json:"claude_version_policy_override,omitempty"`
 	ClaudeClientVersionOverride   string                      `json:"claude_client_version_override,omitempty"`
 	Timezone                      string                      `json:"timezone,omitempty"`
+	CodexTurnState                string                      `json:"codex_turn_state,omitempty"`
+	CodexTurnStateModels          string                      `json:"codex_turn_state_models,omitempty"`
+	CodexTurnStateSetAt           string                      `json:"codex_turn_state_set_at,omitempty"`
 	CustomHeaders                 map[string]string           `json:"custom_headers,omitempty"`
 	CodexTurnStates               map[string]string           `json:"codex_turn_states,omitempty"`
 	CodexTurnStateInfo            codexTurnStateInfoMap       `json:"codex_turn_state_info,omitempty"`
@@ -2154,6 +2157,8 @@ type updateAccountSchedulerReq struct {
 	ClaudeVersionPolicy     json.RawMessage `json:"claude_version_policy"`
 	ClaudeClientVersion     json.RawMessage `json:"claude_client_version"`
 	Timezone                json.RawMessage `json:"timezone"`
+	CodexTurnState          json.RawMessage `json:"codex_turn_state"`
+	CodexTurnStateModels    json.RawMessage `json:"codex_turn_state_models"`
 }
 
 type accountSchedulerUpdate struct {
@@ -2178,6 +2183,8 @@ type accountSchedulerUpdate struct {
 	ClaudeVersionPolicy     database.OptionalString
 	ClaudeClientVersion     database.OptionalString
 	Timezone                database.OptionalString
+	CodexTurnState          database.OptionalString
+	CodexTurnStateModels    database.OptionalString
 	CredentialUpdates       map[string]interface{}
 }
 
@@ -2284,6 +2291,17 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	if err != nil {
 		return accountSchedulerUpdate{}, err
 	}
+	codexTurnStateField, err := parseOptionalStringField(req.CodexTurnState, "codex_turn_state", auth.ValidateCodexTurnState)
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
+	codexTurnStateModelsField, err := parseOptionalStringField(req.CodexTurnStateModels, "codex_turn_state_models", auth.ValidateCodexTurnStateModels)
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
+	if codexTurnStateModelsField.Set {
+		codexTurnStateModelsField.Value = auth.NormalizeCodexTurnStateModels(codexTurnStateModelsField.Value)
+	}
 	if codexFingerprintMode.Set {
 		codexFingerprintMode.Value = auth.NormalizeCodexFingerprintMode(codexFingerprintMode.Value)
 	}
@@ -2315,6 +2333,19 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	}
 	if timezoneField.Set {
 		credentialUpdates[auth.AccountTimezoneCredentialKey] = strings.TrimSpace(timezoneField.Value)
+	}
+	if codexTurnStateField.Set {
+		credentialUpdates[auth.CodexTurnStateCredentialKey] = codexTurnStateField.Value
+		// 时效起点默认随值一起刷新（批量接口拿不到逐账号旧值，只能按"换了新值"处理）；
+		// 单账号接口在值未变且已有起点时保留旧起点，见 refineCodexTurnStateSetAt。
+		setAt := ""
+		if codexTurnStateField.Value != "" {
+			setAt = time.Now().UTC().Format(time.RFC3339)
+		}
+		credentialUpdates[auth.CodexTurnStateSetAtCredentialKey] = setAt
+	}
+	if codexTurnStateModelsField.Set {
+		credentialUpdates[auth.CodexTurnStateModelsCredentialKey] = codexTurnStateModelsField.Value
 	}
 	if autoPause5hThreshold.Set {
 		credentialUpdates["auto_pause_5h_threshold"] = autoPause5hThreshold.Value
@@ -2375,6 +2406,8 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 		ClaudeVersionPolicy:     claudeVersionPolicy,
 		ClaudeClientVersion:     claudeClientVersion,
 		Timezone:                timezoneField,
+		CodexTurnState:          codexTurnStateField,
+		CodexTurnStateModels:    codexTurnStateModelsField,
 		CredentialUpdates:       credentialUpdates,
 	}, nil
 }
@@ -2434,8 +2467,24 @@ func validateCodexFingerprintMode(value string) error {
 	return errors.New("必须是 off、device、session 或 full")
 }
 
+// refineCodexTurnStateSetAt 让时效起点只在注入值真正换掉时重置：原样重提同一个值不
+// 重置（它还是上游那时候签发的那一个 state）；存量行没有起点时补一次，让倒计时能从
+// 这一刻开始走，而不是逼用户先清空再粘贴一遍。
+func refineCodexTurnStateSetAt(row *database.AccountRow, update accountSchedulerUpdate) {
+	if row == nil || !update.CodexTurnState.Set || update.CodexTurnState.Value == "" {
+		return
+	}
+	current := strings.TrimSpace(row.GetCredential(auth.CodexTurnStateCredentialKey))
+	currentSetAt := strings.TrimSpace(row.GetCredential(auth.CodexTurnStateSetAtCredentialKey))
+	if current == update.CodexTurnState.Value && currentSetAt != "" {
+		delete(update.CredentialUpdates, auth.CodexTurnStateSetAtCredentialKey)
+	}
+}
+
 func (u accountSchedulerUpdate) hasChanges() bool {
 	return u.ScoreBiasOverride.Set ||
+		u.CodexTurnState.Set ||
+		u.CodexTurnStateModels.Set ||
 		u.BaseConcurrencyOverride.Set ||
 		u.SkipWarmTier.Set ||
 		u.AllowedAPIKeyIDs.Set ||
@@ -2538,6 +2587,18 @@ func (h *Handler) UpdateAccountScheduler(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
+	if update.CodexTurnState.Set && update.CodexTurnState.Value != "" {
+		row, err := h.db.GetAccountByID(ctx, id)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(c, http.StatusNotFound, "账号不存在")
+				return
+			}
+			writeError(c, http.StatusInternalServerError, "读取账号失败: "+err.Error())
+			return
+		}
+		refineCodexTurnStateSetAt(row, update)
+	}
 	if update.AllowedAPIKeyIDs.Set {
 		missingAPIKeyIDs, err := h.findMissingAPIKeyIDs(ctx, update.AllowedAPIKeyIDs.Values)
 		if err != nil {
@@ -2729,6 +2790,21 @@ func (h *Handler) applyAccountSchedulerRuntimeUpdate(id int64, update accountSch
 	}
 	if value, ok := update.CredentialUpdates[auth.UpstreamRequestIDHeaderCredentialKey].(string); ok {
 		h.store.ApplyAccountUpstreamRequestIDHeader(id, value)
+	}
+	if update.CodexTurnState.Set || update.CodexTurnStateModels.Set {
+		if account := h.store.FindByID(id); account != nil {
+			value, models, setAt := account.CodexTurnStateConfig()
+			if update.CodexTurnState.Set {
+				value = update.CodexTurnState.Value
+			}
+			if update.CodexTurnStateModels.Set {
+				models = update.CodexTurnStateModels.Value
+			}
+			if raw, ok := update.CredentialUpdates[auth.CodexTurnStateSetAtCredentialKey].(string); ok {
+				setAt = auth.ParseCodexTurnStateSetAt(raw)
+			}
+			h.store.ApplyAccountCodexTurnState(id, value, models, setAt)
+		}
 	}
 	if update.CustomHeaders.Set {
 		h.store.ApplyAccountCustomHeaders(id, update.CustomHeaders.Values)

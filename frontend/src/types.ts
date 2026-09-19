@@ -462,6 +462,12 @@ export interface AccountRow {
   codex_turn_states?: Record<string, string> | null
   /** 与 codex_turn_states 同键：每个模型保存值的降智校验与 TTL 状态。 */
   codex_turn_state_info?: Record<string, CodexTurnStateInfo> | null
+  /** Forced X-Codex-Turn-State injected on every outbound Codex request; empty = off. */
+  codex_turn_state?: string
+  /** Comma-separated model scope for the injection; empty = all models. */
+  codex_turn_state_models?: string
+  /** RFC3339 timestamp of the last time the injected value changed; absent = unknown. */
+  codex_turn_state_set_at?: string
   health_tier?: string
   scheduler_score?: number
   dispatch_score?: number
@@ -1583,6 +1589,8 @@ export interface UpdateAccountSchedulerRequest {
   claude_version_policy?: 'passthrough' | 'fixed' | 'minimum' | null
   claude_client_version?: string | null
   timezone?: string | null
+  codex_turn_state?: string | null
+  codex_turn_state_models?: string | null
 }
 
 export interface BatchUpdateAccountsRequest extends UpdateAccountSchedulerRequest {
@@ -3543,6 +3551,10 @@ export interface UsageLog {
   upstream_request_id?: string
   upstream_proxy_id?: number
   upstream_proxy_name?: string
+  /** X-Codex-Turn-State value the gateway injected on this attempt ("" = none). */
+  injected_turn_state?: string
+  /** X-Codex-Turn-State value observed from the upstream response ("" = none). */
+  upstream_turn_state?: string
   id: number
   account_id: number
   // 上游渠道(codex/grok),写入时固化;历史行回填,可能为空

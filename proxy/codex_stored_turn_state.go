@@ -36,6 +36,12 @@ func injectStoredCodexTurnState(ctx context.Context, account *auth.Account, body
 	if skipStoredCodexTurnState(ctx) || account == nil {
 		return body, headers
 	}
+	// 运维在账号上显式配置的凭据级注入值（prepareCodexTurnStateInjection）优先：它已写好
+	// 出站头与 WS 帧体，并会在头装配末尾再落定一次。这里再写自动缓存值只会让头、帧体
+	// 与审计记录三者不一致。未配置手动值时本函数行为不变。
+	if CodexTurnStateInjectionFromContext(ctx) != "" {
+		return body, headers
+	}
 	model := strings.TrimSpace(gjson.GetBytes(body, "model").String())
 	stored := account.GetCodexTurnState(model)
 	if stored == "" {

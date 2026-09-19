@@ -602,6 +602,8 @@ export default function OperationsErrors() {
                   <DetailRow label={t('usage.tableDuration')} value={formatDuration(selectedLog.duration_ms)} mono />
                   <DetailRow label={t('usage.tableFirstToken')} value={selectedLog.first_token_ms > 0 ? formatDuration(selectedLog.first_token_ms) : '-'} mono />
                   <DetailRow label="Tokens" value={`${selectedLog.input_tokens} / ${selectedLog.output_tokens} / ${selectedLog.reasoning_tokens}`} mono />
+                  <DetailRow label={t('usage.injectedTurnState')} value={selectedLog.injected_turn_state || '-'} mono />
+                  <DetailRow label={t('usage.upstreamTurnState')} value={selectedLog.upstream_turn_state || '-'} mono />
                 </DetailPanel>
               </div>
 

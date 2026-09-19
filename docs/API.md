@@ -753,6 +753,8 @@ Codex 的流式 remote compact v2（`POST /v1/responses`，`stream:true`，`inpu
 | base_concurrency_override | integer/null   | 否   | 基础并发覆盖值，`≥1` 无上限，`null` 表示恢复全局默认                                                      |
 | skip_warm_tier            | boolean/null   | 否   | 是否跳过 warm 层级；`null` 等同 `false`，字段省略时保持原值                                                |
 | allowed_api_key_ids       | integer[]/null | 否   | 允许调用该账号的 API Key ID 列表，去重升序保存；字段省略时保持原值，传 `null` 或 `[]` 表示恢复为全部可调用 |
+| codex_turn_state          | string/null    | 否   | 凭据级强制注入的 `X-Codex-Turn-State`：非空时该账号每个出站 Codex 请求（HTTP 头与 WebSocket 帧体 `client_metadata` 都覆盖）都强制携带该值，优先于客户端回带值与自定义请求头；只接受单行 ASCII 可见字符，最长 4096 字节；`null` 或空串表示关闭。换成新值时会重置 `codex_turn_state_set_at`（时效起点，实测约 1 小时失效），原样重提同一个值不重置，存量值没有起点时补一次 |
+| codex_turn_state_models   | string/null    | 否   | 把上述注入限定在指定模型：逗号分隔，大小写不敏感，结尾 `*` 做前缀匹配，客户端模型与上游模型任一命中即注入；空表示不限模型；识别不出模型名的请求照常注入 |
 
 **响应:**
 
@@ -1676,6 +1678,8 @@ HTTP `/v1/*` 响应的 `X-Codex2API-Request-ID` 对应下方可检索的 `reques
       "upstream_request_id": "req_example",
       "upstream_proxy_id": 1,
       "upstream_proxy_name": "local-egress",
+      "injected_turn_state": "",
+      "upstream_turn_state": "gAAAAABo...",
       "account_email": "user@example.com",
       "api_key_id": 3,
       "api_key_name": "Team A",
@@ -1694,6 +1698,10 @@ HTTP `/v1/*` 响应的 `X-Codex2API-Request-ID` 对应下方可检索的 `reques
   "total": 1000
 }
 ```
+
+`injected_turn_state` / `upstream_turn_state` 是本次尝试实际注入到出站请求上的、以及上游响应
+回带的 `X-Codex-Turn-State`（HTTP 取响应头，WebSocket 取流内 metadata 帧），空串表示没有；
+注入配置见 `PATCH /api/admin/accounts/:id/scheduler` 的 `codex_turn_state`。
 
 #### GET /api/admin/usage/chart-data
 

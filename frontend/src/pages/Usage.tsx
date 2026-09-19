@@ -1024,7 +1024,12 @@ function UserAgentCell({ log, mobile = false }: { log: UsageLog; mobile?: boolea
       ? t('usage.userAgentOverridden')
       : t('usage.userAgentPreserved')
 
-  if (!hasAudit && !log.request_id && !log.upstream_request_id) {
+  // Turn State 注入/回带观测:有任一值就要把 trace 单元格渲染出来,否则运维看不到注入证据。
+  const injectedTurnState = (log.injected_turn_state ?? '').trim()
+  const upstreamTurnState = (log.upstream_turn_state ?? '').trim()
+  const hasTurnState = Boolean(injectedTurnState || upstreamTurnState)
+
+  if (!hasAudit && !log.request_id && !log.upstream_request_id && !hasTurnState) {
     return (
       <div className="font-mono text-[11px] text-muted-foreground" title={t('usage.userAgentNotRecorded')}>
         UA: -
@@ -1047,9 +1052,44 @@ function UserAgentCell({ log, mobile = false }: { log: UsageLog; mobile?: boolea
   // 客户端与上游 UA 完全一致且未改写:合成一行(C=U),两行会重复同一串字符串白占行高。
   const sameUA = !log.user_agent_overridden && Boolean(clientUserAgent) && clientUserAgent === upstreamUserAgent
 
+  // 单元格里只放一个 TS 小标记,完整值进 tooltip,避免撑宽列。
+  const turnStateChip = hasTurnState ? (
+    <span
+      className="ml-1.5 inline-flex shrink-0 items-center rounded bg-muted px-1 font-sans text-[9px] font-semibold uppercase tracking-wide text-muted-foreground/80"
+      title={[
+        injectedTurnState ? `${t('usage.injectedTurnState')}: ${injectedTurnState}` : '',
+        upstreamTurnState ? `${t('usage.upstreamTurnState')}: ${upstreamTurnState}` : '',
+      ].filter(Boolean).join('\n')}
+    >
+      TS
+    </span>
+  ) : null
+  const idLine = log.request_id || hasTurnState ? (
+    <div className="flex min-w-0 items-center text-muted-foreground" title={log.request_id ? `Request ID: ${log.request_id}` : undefined}>
+      {log.request_id ? <span className="min-w-0 truncate">ID: {log.request_id}</span> : null}
+      {turnStateChip}
+    </div>
+  ) : null
+  const turnStateRows = hasTurnState ? (
+    <>
+      {injectedTurnState ? (
+        <div className="flex items-start gap-2">
+          <div className="min-w-0 flex-1 break-all font-mono">{t('usage.injectedTurnState')}: {injectedTurnState}</div>
+          <button type="button" onClick={() => void navigator.clipboard?.writeText(injectedTurnState)} className="shrink-0 text-xs font-medium text-primary hover:underline">{t('common.copy')}</button>
+        </div>
+      ) : null}
+      {upstreamTurnState ? (
+        <div className="flex items-start gap-2">
+          <div className="min-w-0 flex-1 break-all font-mono">{t('usage.upstreamTurnState')}: {upstreamTurnState}</div>
+          <button type="button" onClick={() => void navigator.clipboard?.writeText(upstreamTurnState)} className="shrink-0 text-xs font-medium text-primary hover:underline">{t('common.copy')}</button>
+        </div>
+      ) : null}
+    </>
+  ) : null
+
   const content = sameUA ? (
     <div className={`${mobile ? 'w-full' : 'w-[260px] max-w-[28vw]'} font-mono text-[11px] leading-relaxed`}>
-      {log.request_id ? <div className="truncate text-muted-foreground" title={`Request ID: ${log.request_id}`}>ID: {log.request_id}</div> : null}
+      {idLine}
       <div className="flex min-w-0 items-center gap-1.5" title={`${t('usage.clientUserAgent')} = ${t('usage.upstreamUserAgent')}`}>
         <span className="shrink-0 font-sans font-semibold text-muted-foreground">C=U</span>
         <span className="min-w-0 truncate text-foreground/80">{clientUserAgent}</span>
@@ -1058,7 +1098,7 @@ function UserAgentCell({ log, mobile = false }: { log: UsageLog; mobile?: boolea
     </div>
   ) : (
     <div className={`${mobile ? 'w-full' : 'w-[260px] max-w-[28vw]'} space-y-1 font-mono text-[11px] leading-relaxed`}>
-      {log.request_id ? <div className="truncate text-muted-foreground" title={`Request ID: ${log.request_id}`}>ID: {log.request_id}</div> : null}
+      {idLine}
       <div className="flex min-w-0 items-center gap-1.5" title={t('usage.clientUserAgent')}>
         <span className="w-4 shrink-0 font-sans font-semibold text-muted-foreground">C</span>
         <span className="min-w-0 truncate text-foreground/80">{clientUserAgent || '-'}</span>
@@ -1095,6 +1135,7 @@ function UserAgentCell({ log, mobile = false }: { log: UsageLog; mobile?: boolea
           {log.request_id ? <div className="break-all font-mono">Request ID: {log.request_id}</div> : null}
           {log.upstream_request_id ? <div className="break-all font-mono">Upstream ID: {log.upstream_request_id}</div> : null}
           {log.upstream_proxy_name ? <div className="break-all">Proxy: {log.upstream_proxy_name}{log.upstream_proxy_id ? ` (#${log.upstream_proxy_id})` : ''}</div> : null}
+          {turnStateRows}
           <div className="font-semibold">{statusLabel}</div>
           {log.via_websocket ? (
             <div className="leading-relaxed text-background/70">{t('usage.userAgentWebSocketHint')}</div>
