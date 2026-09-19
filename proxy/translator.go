@@ -189,8 +189,8 @@ type openAIErrorResponse struct {
 
 const requestCacheSize = 256
 
-// maxTools 上游 Codex API 允许的最大工具数量
-const maxTools = 128
+// 上游 Codex API 对工具数量没有硬性上限，历史上这里曾按 128 静默截断，会误伤
+// 排在后面的客户端工具（如终端/shell），已移除。
 
 const (
 	codexImageGenerationBridgeMarker = "<codex2api-codex-image-generation>"
@@ -422,12 +422,6 @@ func ensureResponsesImageGenerationTool(body map[string]any) bool {
 		if strings.TrimSpace(firstNonEmptyAnyString(toolMap["type"])) == "image_generation" {
 			return false
 		}
-	}
-	if len(tools) >= maxTools {
-		truncated := append([]any(nil), tools[:maxTools]...)
-		truncated[maxTools-1] = defaultTool
-		body["tools"] = truncated
-		return true
 	}
 	body["tools"] = append(tools, defaultTool)
 	return true
@@ -1651,29 +1645,6 @@ func compactionSummaryText(raw any) string {
 	return ""
 }
 
-func truncateToolsPreservingImageGeneration(tools []any) []any {
-	if len(tools) <= maxTools {
-		return tools
-	}
-	imageIndex := -1
-	for i, rawTool := range tools {
-		toolMap, ok := rawTool.(map[string]any)
-		if !ok {
-			continue
-		}
-		if strings.TrimSpace(firstNonEmptyAnyString(toolMap["type"])) == "image_generation" {
-			imageIndex = i
-			break
-		}
-	}
-	if imageIndex < 0 || imageIndex < maxTools {
-		return tools[:maxTools]
-	}
-	truncated := append([]any(nil), tools[:maxTools]...)
-	truncated[maxTools-1] = tools[imageIndex]
-	return truncated
-}
-
 func (c *requestCache) get(key [32]byte) (openAIRequest, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -2447,12 +2418,8 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 	normalizeResponsesToolChoice(body)
 	normalizeResponsesWebSearchTools(body)
 
-	// 5. 工具描述补充 + schema 清理 + 上游数量限制
+	// 5. 工具描述补充 + schema 清理
 	if tools, ok := body["tools"].([]any); ok {
-		if len(tools) > maxTools {
-			tools = truncateToolsPreservingImageGeneration(tools)
-			body["tools"] = tools
-		}
 		toolDescDefaults := map[string]string{
 			"tool_search": "Search through available tools to find the most relevant one for the task.",
 		}
@@ -2935,14 +2902,8 @@ func firstNonSpace(raw json.RawMessage) byte {
 // convertToolsToCodexFormat 将 OpenAI 工具格式转为 Codex 格式（纯内存操作）
 // OpenAI: {type:"function", function:{name, description, parameters}}
 // Codex:  {type:"function", name, description, parameters}
-// 上游限制最多 128 个工具，超出部分静默截断
 func convertToolsToCodexFormat(rawTools []json.RawMessage) []any {
-	cap := len(rawTools)
-	if cap > maxTools {
-		cap = maxTools
-		rawTools = rawTools[:maxTools]
-	}
-	tools := make([]any, 0, cap)
+	tools := make([]any, 0, len(rawTools))
 	for _, raw := range rawTools {
 		var parsed openAIToolParsed
 		if json.Unmarshal(raw, &parsed) != nil {

@@ -967,9 +967,6 @@ func convertAnthropicTools(tools []anthropicTool) []any {
 		}
 		result = append(result, item)
 	}
-	if len(result) > maxTools {
-		result = result[:maxTools]
-	}
 	return result
 }
 

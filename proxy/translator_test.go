@@ -2042,8 +2042,11 @@ func TestPrepareResponsesBody_PromptCompatAndTopLevelImageOptions(t *testing.T) 
 	}
 }
 
-func TestPrepareResponsesBody_InjectsImageToolWithinToolLimit(t *testing.T) {
-	tools := make([]any, maxTools)
+// 上游对工具数量没有硬性上限：即便客户端已带很多工具，注入的生图工具也应作为
+// 新条目追加，而不是截断/替换已有工具（回归：曾按 128 静默截断，会丢终端工具）。
+func TestPrepareResponsesBody_InjectsImageToolWithoutTruncating(t *testing.T) {
+	const inputToolCount = 200
+	tools := make([]any, inputToolCount)
 	for i := range tools {
 		tools[i] = map[string]any{
 			"type":        "function",
@@ -2067,8 +2070,8 @@ func TestPrepareResponsesBody_InjectsImageToolWithinToolLimit(t *testing.T) {
 	got, _ := PrepareResponsesBody(raw)
 
 	outTools := gjson.GetBytes(got, "tools").Array()
-	if len(outTools) != maxTools {
-		t.Fatalf("tools count = %d, want %d; body=%s", len(outTools), maxTools, got)
+	if len(outTools) != inputToolCount+1 {
+		t.Fatalf("tools count = %d, want %d; body=%s", len(outTools), inputToolCount+1, got)
 	}
 	last := outTools[len(outTools)-1]
 	if last.Get("type").String() != "image_generation" {
@@ -2076,6 +2079,10 @@ func TestPrepareResponsesBody_InjectsImageToolWithinToolLimit(t *testing.T) {
 	}
 	if last.Get("model").String() != defaultImagesToolModel {
 		t.Fatalf("image tool model = %q, want %q; body=%s", last.Get("model").String(), defaultImagesToolModel, got)
+	}
+	// 首个客户端工具必须原样保留，证明没有发生截断。
+	if first := outTools[0].Get("name").String(); first != "tool_0" {
+		t.Fatalf("first tool name = %q, want tool_0; body=%s", first, got)
 	}
 }
 
