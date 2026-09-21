@@ -28,6 +28,7 @@ import AccountHealthBar from "./AccountHealthBar";
 import ChannelLogo from "./ChannelLogo";
 import ModelLogo from "./ModelLogo";
 import StatusBadge from "./StatusBadge";
+import { ModelMismatchList } from "./ModelMismatchBadge";
 import RequestCountPills from "./RequestCountPills";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -210,6 +211,7 @@ export interface AccountDetailSheetProps {
   }) => void;
   onClearModelCooldown: (model: string) => void;
   onClearAllModelCooldowns: () => void;
+  onModelMismatchesCleared?: () => void;
   onResetCredits: () => void;
   onDelete: () => void;
 }
@@ -240,6 +242,7 @@ export default function AccountDetailSheet({
   onSaveModelCooldownPolicy,
   onClearModelCooldown,
   onClearAllModelCooldowns,
+  onModelMismatchesCleared,
   onResetCredits,
   onDelete,
 }: AccountDetailSheetProps) {
@@ -520,6 +523,11 @@ export default function AccountDetailSheet({
                       : ""}
                   </div>
                 ) : null}
+
+                <ModelMismatchList
+                  account={account}
+                  onCleared={onModelMismatchesCleared}
+                />
               </div>
             </Section>
 

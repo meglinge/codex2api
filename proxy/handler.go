@@ -81,6 +81,8 @@ type Handler struct {
 	// without changing process-wide limits or TMPDIR.
 	// continuousRetryReplayFactory 在测试中注入有界回放失败，不修改进程级限制或 TMPDIR。
 	continuousRetryReplayFactory func() *continuousRetryReplay
+	// 上游回显模型与请求模型不一致的落库节流状态（见 upstream_model_mismatch.go）。
+	upstreamModelMismatches upstreamModelMismatchTracker
 }
 
 const (
@@ -1032,6 +1034,8 @@ func forwardGrokNativeResponseTo(readCtx context.Context, c *gin.Context, resp *
 func forwardGrokNativeResponseObserved(readCtx context.Context, c *gin.Context, resp *http.Response, protocol GrokProtocol, streaming bool, startedAt time.Time, firstVisible func(), output io.Writer, outputFlusher http.Flusher, observe func([]byte)) (*UsageInfo, streamOutcome, bool, int) {
 	privateAttempt := output != nil && output != c.Writer
 	resp.Header.Del(grokNativeRouteHeader)
+	// 每个 attempt 重新观测上游回显的 model，避免上一次换号前的值串到本次日志。
+	c.Set(contextGrokNativeUpstreamModel, "")
 	if !streaming {
 		body, err := readAllLimitedWithContinuousRetryKeepalive(readCtx, resp.Body, grokMaxDecodedBody)
 		if err != nil {
@@ -1045,6 +1049,7 @@ func forwardGrokNativeResponseObserved(readCtx context.Context, c *gin.Context, 
 		}
 		copyGrokNativeResponseHeaders(c, resp.Header)
 		usage := grokNativeUsage(protocol, body)
+		c.Set(contextGrokNativeUpstreamModel, upstreamModelFromPayload(body))
 		contentType := resp.Header.Get("Content-Type")
 		if contentType == "" {
 			contentType = "application/json"
@@ -1090,12 +1095,18 @@ func forwardGrokNativeResponseObserved(readCtx context.Context, c *gin.Context, 
 	}
 	var failure streamOutcome
 	var pending bytes.Buffer
+	var upstreamModel string
+	defer func() { c.Set(contextGrokNativeUpstreamModel, upstreamModel) }()
 	writeErr := error(nil)
 	frameErr := error(nil)
 	readErr := readRawGrokSSEFramesWithContinuousRetryKeepalive(readCtx, resp.Body, func(frame rawGrokSSEFrame) bool {
 		if frame.HasData && !frame.Done {
 			if observe != nil {
 				observe(frame.Data)
+			}
+			// chat chunk 每帧都带 model；Responses / Messages 只在个别事件里带，取到一次即可。
+			if upstreamModel == "" {
+				upstreamModel = upstreamModelFromPayload(frame.Data)
 			}
 			usage = mergeGrokNativeUsage(usage, grokNativeUsage(protocol, frame.Data))
 			if auth.NormalizeGrokProtocol(string(protocol)) == GrokProtocolResponses &&
@@ -1457,6 +1468,7 @@ func (h *Handler) logUsage(input *database.UsageLogInput) {
 	// Non-Grok and unresolved accounts deliberately remain legacy/unscoped (0).
 	input = database.SnapshotUsageLogBilling(input)
 	h.populateUsageCredentialGeneration(input)
+	h.noteUpstreamModelMismatch(input)
 	// scope 维度预算（issue #439）在日志落库前先吃到这笔消耗，抵掉窗口聚合缓存的滞后。
 	h.recordAPIKeyScopeUsage(input)
 	// 渠道在写入时按调度账号固化（内存索引查询），供仪表盘分渠道聚合；
@@ -4489,6 +4501,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					DurationMs: totalDuration, FirstTokenMs: firstTokenMs, ReasoningEffort: reasoningEffort,
 					InboundEndpoint: "/v1/responses", UpstreamEndpoint: upstreamEndpoint,
 					Stream: isStream, ViaWebsocket: false, AttemptIndex: attempt + 1,
+					UpstreamModel: grokNativeUpstreamModel(c),
 				}
 				if usage != nil {
 					logInput.PromptTokens, logInput.CompletionTokens, logInput.TotalTokens = usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens
@@ -4527,6 +4540,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			var firstTokenMs int
 			var usage *UsageInfo
 			var actualServiceTier string
+			var upstreamModel string
 			ttftRecorded := false
 			// contentTokenSeen is deliberately strict and independent from the
 			// operator's TTFT mode. In loose mode, preflight metadata records TTFT
@@ -4611,6 +4625,7 @@ func (h *Handler) Responses(c *gin.Context) {
 						if tier := parsed.Get("response.service_tier").String(); tier != "" {
 							actualServiceTier = tier
 						}
+						upstreamModel = keepUpstreamModel(upstreamModel, parsed)
 						gotTerminal = true
 						preContentErrorCandidate = nil
 					}
@@ -4700,6 +4715,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					nonStreamResponseBody = append([]byte(nil), respBody...)
 					usage = extractUsageFromResult(gjson.GetBytes(respBody, "usage"))
 					actualServiceTier = gjson.GetBytes(respBody, "service_tier").String()
+					upstreamModel = upstreamModelFromPayload(respBody)
 					imageLogInfo = imageUsageLogInfoFromResponseJSON(respBody)
 					gotTerminal = true
 					if contentType := resp.Header.Get("Content-Type"); contentType != "" {
@@ -4882,6 +4898,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				Endpoint:               "/v1/responses",
 				Model:                  logModel,
 				EffectiveModel:         attemptLogEffectiveModel,
+				UpstreamModel:          upstreamModel,
 				StatusCode:             outcome.logStatusCode,
 				DurationMs:             totalDuration,
 				FirstTokenMs:           firstTokenMs,
@@ -5177,6 +5194,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		var firstTokenMs int
 		var usage *UsageInfo
 		var actualServiceTier string
+		var upstreamModel string
 		ttftRecorded := false
 		gotTerminal := false // 是否收到 response.completed 或 response.failed
 		deltaCharCount := 0  // 累计 delta 字符数（用于断流时估算 token）
@@ -5299,6 +5317,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					if tier := parsed.Get("response.service_tier").String(); tier != "" {
 						actualServiceTier = tier
 					}
+					upstreamModel = keepUpstreamModel(upstreamModel, parsed)
 					if eventType == "response.completed" {
 						// Cache only after the private replay reaches the downstream.
 						// Otherwise a local filter/write failure would publish an ID that
@@ -5538,6 +5557,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					if tier := parsed.Get("response.service_tier").String(); tier != "" {
 						actualServiceTier = tier
 					}
+					upstreamModel = keepUpstreamModel(upstreamModel, parsed)
 					if eventType == "response.completed" {
 						completedResponseData = append(completedResponseData[:0], data...)
 						completedResponseOutputItems = append(completedResponseOutputItems[:0], outputCollector.Items()...)
@@ -5772,6 +5792,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			Endpoint:               "/v1/responses",
 			Model:                  logModel,
 			EffectiveModel:         logEffectiveModel,
+			UpstreamModel:          upstreamModel,
 			StatusCode:             logStatusCode,
 			DurationMs:             totalDuration,
 			FirstTokenMs:           firstTokenMs,
@@ -6272,6 +6293,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				Endpoint:             "/v1/responses/compact",
 				Model:                logModel,
 				EffectiveModel:       attemptLogEffectiveModel,
+				UpstreamModel:        upstreamModelFromPayload(respBody),
 				StatusCode:           http.StatusOK,
 				DurationMs:           durationMs,
 				PromptTokens:         promptTokens,
@@ -6647,6 +6669,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			Endpoint:             "/v1/responses/compact",
 			Model:                logModel,
 			EffectiveModel:       logEffectiveModel,
+			UpstreamModel:        upstreamModelFromPayload(respBody),
 			StatusCode:           http.StatusOK,
 			DurationMs:           totalDuration,
 			PromptTokens:         promptTokens,
@@ -7200,6 +7223,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				DurationMs: totalDuration, FirstTokenMs: firstTokenMs, ReasoningEffort: reasoningEffort,
 				InboundEndpoint: "/v1/chat/completions", UpstreamEndpoint: upstreamEndpoint,
 				Stream: isStream, ViaWebsocket: false, AttemptIndex: attempt + 1,
+				UpstreamModel: grokNativeUpstreamModel(c),
 			}
 			if usage != nil {
 				logInput.PromptTokens, logInput.CompletionTokens, logInput.TotalTokens = usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens
@@ -7237,6 +7261,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		var firstTokenMs int
 		var usage *UsageInfo
 		var actualServiceTier string
+		var upstreamModel string
 		ttftRecorded := false
 		// TTFT may use loose structural progress, but retry safety is based on
 		// actual content. Chat translation drops many structural events, so
@@ -7328,6 +7353,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 					if tier := parsed.Get("response.service_tier").String(); tier != "" {
 						actualServiceTier = tier
 					}
+					upstreamModel = keepUpstreamModel(upstreamModel, parsed)
 					gotTerminal = true
 					preContentErrorCandidate = nil
 				}
@@ -7479,6 +7505,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 					if tier := parsed.Get("response.service_tier").String(); tier != "" {
 						actualServiceTier = tier
 					}
+					upstreamModel = keepUpstreamModel(upstreamModel, parsed)
 					finishReasonOverride = responsesIncompleteFinishReason(eventType,
 						parsed.Get("response.incomplete_details.reason").String())
 					// 从 response.output 提取 function_call 项。普通 function 的
@@ -7676,6 +7703,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			Endpoint:               "/v1/chat/completions",
 			Model:                  logModel,
 			EffectiveModel:         attemptLogEffectiveModel,
+			UpstreamModel:          upstreamModel,
 			StatusCode:             logStatusCode,
 			DurationMs:             totalDuration,
 			FirstTokenMs:           firstTokenMs,

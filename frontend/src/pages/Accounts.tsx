@@ -42,6 +42,7 @@ import { CompactStat } from "../components/CompactStat";
 import Pagination from "../components/Pagination";
 import StateShell from "../components/StateShell";
 import StatusBadge from "../components/StatusBadge";
+import { ModelMismatchBadge } from "../components/ModelMismatchBadge";
 import { useDataLoader, type LoadOptions } from "../hooks/useDataLoader";
 import {
   useConfirmDialog,
@@ -1476,6 +1477,7 @@ const AccountTableRow = memo(function AccountTableRow({
                                         errorMessage={account.error_message}
                                       />
                                       <UsingCreditsBadge account={account} />
+                                      <ModelMismatchBadge account={account} />
                                       {account.status !== "overload_paused" && (
                                         <AccountStatusCountdown account={account} />
                                       )}
@@ -9062,6 +9064,7 @@ export default function Accounts() {
               if (!detailAccount) return;
               void handleClearAllModelCooldowns(detailAccount);
             }}
+            onModelMismatchesCleared={() => void reloadSilently()}
             onResetCredits={() => {
               if (!detailAccount) return;
               void handleResetCredits(detailAccount);
@@ -13757,6 +13760,7 @@ function AccountMobileCard({
               {showColumn("status") && (
                 <>
                   <UsingCreditsBadge account={account} />
+                  <ModelMismatchBadge account={account} />
                   {account.status !== "overload_paused" && (
                     <AccountStatusCountdown account={account} />
                   )}
