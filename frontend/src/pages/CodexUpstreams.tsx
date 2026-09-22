@@ -1,11 +1,10 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link2, Plus, Star, Trash2 } from "lucide-react";
 
 import { api } from "../api";
 import PageHeader from "../components/PageHeader";
 import StateShell from "../components/StateShell";
-import { useDataLoader } from "../hooks/useDataLoader";
 import { useToast } from "../hooks/useToast";
 import type { CodexUpstream, CodexUpstreamsSettings } from "../types";
 import { getErrorMessage } from "../utils/error";
@@ -36,22 +35,34 @@ export default function CodexUpstreams() {
   const { t } = useTranslation();
   const { showToast } = useToast();
   const [saving, setSaving] = useState(false);
-  const [draft, setDraft] = useState<CodexUpstreamsSettings | null>(null);
-
-  const { data, loading, error, reload } = useDataLoader<CodexUpstreamsSettings>({
-    initialData: { default_id: "", upstreams: [], official_url: "", official_name: "" },
-    load: async () => {
-      const next = await api.getCodexUpstreams();
-      setDraft(next);
-      return next;
-    },
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [form, setForm] = useState<CodexUpstreamsSettings>({
+    default_id: "",
+    upstreams: [],
+    official_url: "",
+    official_name: "",
   });
 
-  const form = draft ?? data;
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setForm(await api.getCodexUpstreams());
+    } catch (err) {
+      setError(getErrorMessage(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   const update = useCallback((patch: Partial<CodexUpstreamsSettings>) => {
-    setDraft((current) => ({ ...(current ?? data), ...patch }));
-  }, [data]);
+    setForm((current) => ({ ...current, ...patch }));
+  }, []);
 
   const updateRow = (id: string, patch: Partial<CodexUpstream>) => {
     update({
@@ -80,7 +91,7 @@ export default function CodexUpstreams() {
           base_url: row.base_url.trim().replace(/\/+$/, ""),
         })),
       });
-      setDraft(saved);
+      setForm(saved);
       showToast(t("codexUpstreams.saved"));
     } catch (err) {
       showToast(getErrorMessage(err), "error");
@@ -94,12 +105,12 @@ export default function CodexUpstreams() {
       variant="page"
       loading={loading && form.upstreams.length === 0 && !form.official_url}
       error={error}
-      onRetry={() => void reload()}
+      onRetry={() => void load()}
     >
       <PageHeader
         title={t("codexUpstreams.title")}
         description={t("codexUpstreams.description")}
-        onRefresh={() => void reload()}
+        onRefresh={() => void load()}
         actions={
           <Button onClick={() => void save()} disabled={saving}>
             {saving ? t("common.loading") : t("common.save")}
