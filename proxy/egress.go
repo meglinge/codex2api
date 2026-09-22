@@ -54,7 +54,15 @@ type CodexEgress struct {
 // ResolveCodexEgress 为一次携带账号身份的 Codex HTTP 出站决定链路。
 // proxyURL 是第 2 层已经解析好的代理(可为空);Resin 启用时被整层覆盖。
 // account 为 nil 时不可能走 Resin(Resin 按账号粘性,无身份无从粘),退回代理/直连。
+// 自定义 Codex 上游直连：代理只服务官方 chatgpt.com，中转地址不再套代理或 Resin。
 func ResolveCodexEgress(account *auth.Account, targetURL, proxyURL string) CodexEgress {
+	if !codexTargetIsOfficial(targetURL) {
+		return CodexEgress{
+			Kind:    CodexEgressDirect,
+			URL:     targetURL,
+			account: account,
+		}
+	}
 	proxyURL = strings.TrimSpace(proxyURL)
 	if resinCarriesEgress(account) {
 		return CodexEgress{
@@ -116,6 +124,13 @@ func (e CodexEgress) ApplyHeaders(h http.Header) {
 // 拨号用代理。Resin 模式下 WS 地址改写为 Resin 的 ws:// 反代路径、拨号不走代理;
 // 账号身份头由调用方用 ApplyHeaders 注入。
 func ResolveCodexWebsocketEgress(account *auth.Account, wsURL, proxyURL string) CodexEgress {
+	if !codexTargetIsOfficial(wsURL) {
+		return CodexEgress{
+			Kind:    CodexEgressDirect,
+			URL:     wsURL,
+			account: account,
+		}
+	}
 	proxyURL = strings.TrimSpace(proxyURL)
 	if resinCarriesEgress(account) {
 		return CodexEgress{
@@ -138,6 +153,20 @@ func ResolveCodexWebsocketEgress(account *auth.Account, wsURL, proxyURL string) 
 	}
 }
 
+// codexTargetIsOfficial 判断目标是不是官方 chatgpt.com Codex 后端。
+// 自定义上游（含其 WebSocket 地址）不走代理，也不经 Resin。
+func codexTargetIsOfficial(targetURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(targetURL))
+	if err != nil || parsed.Host == "" {
+		return true
+	}
+	official, err := url.Parse(CodexBaseURL)
+	if err != nil {
+		return true
+	}
+	return strings.EqualFold(parsed.Host, official.Host)
+}
+
 // CodexDialProxyURL 返回拨号实际使用的代理:Resin 承担出站时恒为空(地址已是反代
 // 路径,再套代理只会把 Resin 本身推到代理后面)。供只需要"拨号走不走代理"、
 // 手里 URL 已经改写过的调用方(WS 连接建立)使用,避免对改写后的地址二次改写。
@@ -146,6 +175,15 @@ func CodexDialProxyURL(account *auth.Account, proxyURL string) string {
 		return ""
 	}
 	return strings.TrimSpace(proxyURL)
+}
+
+// CodexDialProxyURLForTarget 与 CodexDialProxyURL 相同，但自定义上游恒为空。
+// WS 连接建立手里同时有最终地址和代理时用这个，避免中转再套一层代理。
+func CodexDialProxyURLForTarget(account *auth.Account, targetURL, proxyURL string) string {
+	if !codexTargetIsOfficial(targetURL) {
+		return ""
+	}
+	return CodexDialProxyURL(account, proxyURL)
 }
 
 // CodexEgressSummary 是给设置接口/日志用的全局出口摘要:只回答"Codex 渠道现在
