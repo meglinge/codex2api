@@ -970,8 +970,8 @@ func mergeGrokNativeUsage(current, next *UsageInfo) *UsageInfo {
 	current.CacheWrite1hTokens = max(current.CacheWrite1hTokens, next.CacheWrite1hTokens)
 	current.TotalTokens = max(current.TotalTokens, next.TotalTokens)
 	current.TotalTokens = max(current.TotalTokens, current.InputTokens+current.OutputTokens)
-	if current.CachedTokens > 0 {
-		details := &TokenDetails{CachedTokens: current.CachedTokens}
+	if current.CachedTokens > 0 || current.CacheWriteTokens > 0 {
+		details := &TokenDetails{CachedTokens: current.CachedTokens, CacheWriteTokens: current.CacheWriteTokens}
 		current.PromptTokensDetails = details
 		current.InputTokensDetails = details
 	}
@@ -1543,7 +1543,29 @@ func populateInternalUsageMetaFromContext(c *gin.Context, input *database.UsageL
 	}
 }
 
+// markCustomCodexUpstream 给打到自定义上游的请求日志加标记。
+// 日志的上游端点字段只有 100 个字符，完整地址放不下，所以记上游名字。
+// 官方 chatgpt.com 不加标记。
+func markCustomCodexUpstream(c *gin.Context, input *database.UsageLogInput) {
+	if c == nil || input == nil || input.Channel != "" && input.Channel != database.UpstreamChannelCodex {
+		return
+	}
+	if strings.Contains(input.UpstreamEndpoint, "://") {
+		return
+	}
+	ctx := attachCodexUpstreamRoutes(c.Request.Context())
+	label := codexUpstreamLogLabel(ctx, input.Model)
+	if label == "" {
+		label = codexUpstreamLogLabel(ctx, input.EffectiveModel)
+	}
+	if label == "" {
+		return
+	}
+	input.UpstreamEndpoint = "custom:" + label
+}
+
 func (h *Handler) logUsageForRequest(c *gin.Context, input *database.UsageLogInput) {
+	markCustomCodexUpstream(c, input)
 	populateAPIKeyMetaFromContext(c, input)
 	populateInternalUsageMetaFromContext(c, input)
 	populateClientIPFromRequest(c, input)
@@ -4926,6 +4948,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				logInput.OutputTokens = usage.OutputTokens
 				logInput.ReasoningTokens = usage.ReasoningTokens
 				logInput.CachedTokens = usage.CachedTokens
+				logInput.CacheWrite5mTokens = usage.CacheWriteTokens
 				logInput.ImageInputTokens, logInput.ImageOutputTokens, logInput.CachedImageInputTokens = usage.ImageInputTokens, usage.ImageOutputTokens, usage.CachedImageInputTokens
 			}
 			applyImageUsageLogInfo(logInput, imageLogInfo)
@@ -5820,6 +5843,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			logInput.OutputTokens = usage.OutputTokens
 			logInput.ReasoningTokens = usage.ReasoningTokens
 			logInput.CachedTokens = usage.CachedTokens
+			logInput.CacheWrite5mTokens = usage.CacheWriteTokens
 			logInput.ImageInputTokens, logInput.ImageOutputTokens, logInput.CachedImageInputTokens = usage.ImageInputTokens, usage.ImageOutputTokens, usage.CachedImageInputTokens
 		}
 		applyImageUsageLogInfo(logInput, imageLogInfo)
@@ -6278,6 +6302,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			totalTokens := int(gjson.GetBytes(respBody, "usage.total_tokens").Int())
 			reasoningTokens := int(gjson.GetBytes(respBody, "usage.output_tokens_details.reasoning_tokens").Int())
 			cachedTokens := int(gjson.GetBytes(respBody, "usage.input_tokens_details.cached_tokens").Int())
+			cacheWriteTokens := int(gjson.GetBytes(respBody, "usage.input_tokens_details.cache_write_tokens").Int())
 
 			actualServiceTier := gjson.GetBytes(respBody, "service_tier").String()
 			usageTiers := resolveUsageServiceTiers(actualServiceTier, serviceTier)
@@ -6303,6 +6328,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				OutputTokens:         completionTokens,
 				ReasoningTokens:      reasoningTokens,
 				CachedTokens:         cachedTokens,
+				CacheWrite5mTokens:   cacheWriteTokens,
 				ReasoningEffort:      reasoningEffort,
 				InboundEndpoint:      "/v1/responses/compact",
 				UpstreamEndpoint:     upstreamEndpoint,
@@ -6659,6 +6685,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		totalTokens := int(gjson.GetBytes(respBody, "usage.total_tokens").Int())
 		reasoningTokens := int(gjson.GetBytes(respBody, "usage.output_tokens_details.reasoning_tokens").Int())
 		cachedTokens := int(gjson.GetBytes(respBody, "usage.input_tokens_details.cached_tokens").Int())
+		cacheWriteTokens := int(gjson.GetBytes(respBody, "usage.input_tokens_details.cache_write_tokens").Int())
 
 		actualServiceTier := gjson.GetBytes(respBody, "service_tier").String()
 		usageTiers := resolveUsageServiceTiers(actualServiceTier, serviceTier)
@@ -6679,6 +6706,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			OutputTokens:         completionTokens,
 			ReasoningTokens:      reasoningTokens,
 			CachedTokens:         cachedTokens,
+			CacheWrite5mTokens:   cacheWriteTokens,
 			ReasoningEffort:      reasoningEffort,
 			InboundEndpoint:      "/v1/responses/compact",
 			UpstreamEndpoint:     upstreamEndpointLabel,
@@ -7731,6 +7759,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			logInput.OutputTokens = usage.OutputTokens
 			logInput.ReasoningTokens = usage.ReasoningTokens
 			logInput.CachedTokens = usage.CachedTokens
+			logInput.CacheWrite5mTokens = usage.CacheWriteTokens
 			logInput.ImageInputTokens, logInput.ImageOutputTokens, logInput.CachedImageInputTokens = usage.ImageInputTokens, usage.ImageOutputTokens, usage.CachedImageInputTokens
 		}
 		h.logUsageForRequest(c, logInput)

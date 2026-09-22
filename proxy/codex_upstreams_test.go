@@ -8,6 +8,7 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
+	"github.com/tidwall/gjson"
 )
 
 func TestResolveCodexUpstreamBaseURL(t *testing.T) {
@@ -97,6 +98,37 @@ func TestCustomCodexUpstreamForcesHTTP(t *testing.T) {
 		t.Fatal("custom upstream still used websocket")
 	}
 	_ = err
+}
+
+func TestExtractUsageKeepsCacheWriteTokens(t *testing.T) {
+	usage := extractUsageFromResult(gjson.Parse(`{"input_tokens":1200,"output_tokens":30,"input_tokens_details":{"cached_tokens":800,"cache_write_tokens":400}}`))
+	if usage == nil || usage.CacheWriteTokens != 400 || usage.CachedTokens != 800 {
+		t.Fatalf("usage = %+v", usage)
+	}
+	if usage.InputTokensDetails == nil || usage.InputTokensDetails.CacheWriteTokens != 400 || usage.PromptTokensDetails == nil || usage.PromptTokensDetails.CacheWriteTokens != 400 {
+		t.Fatalf("details = %+v / %+v", usage.InputTokensDetails, usage.PromptTokensDetails)
+	}
+	official := extractUsageFromResult(gjson.Parse(`{"input_tokens":10,"output_tokens":2,"input_tokens_details":{"cached_tokens":4}}`))
+	if official.CacheWriteTokens != 0 || official.InputTokensDetails == nil || official.InputTokensDetails.CacheWriteTokens != 0 {
+		t.Fatalf("official usage should not invent cache writes: %+v", official)
+	}
+}
+
+func TestCodexUpstreamLogLabel(t *testing.T) {
+	SetCodexUpstreamCatalog(database.CodexUpstreamsConfig{
+		Upstreams: []database.CodexUpstream{
+			{ID: "relay-a", Name: "Relay A", BaseURL: "https://a.example/codex", Enabled: true},
+		},
+	})
+	t.Cleanup(func() { SetCodexUpstreamCatalog(database.CodexUpstreamsConfig{}) })
+
+	ctx := WithCodexUpstreamRoutes(nil, "", []database.CodexUpstreamRoute{{Model: "gpt-5.5", UpstreamID: "relay-a"}})
+	if got := codexUpstreamLogLabel(ctx, "gpt-5.5"); got != "Relay A" {
+		t.Fatalf("label = %q", got)
+	}
+	if got := codexUpstreamLogLabel(ctx, "gpt-5.4"); got != "" {
+		t.Fatalf("official label = %q", got)
+	}
 }
 
 func TestNormalizeCodexUpstreamsDropsInvalid(t *testing.T) {

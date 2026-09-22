@@ -3633,6 +3633,9 @@ func schemaDeclaresObject(schema map[string]interface{}) bool {
 // UsageInfo token 使用统计
 type TokenDetails struct {
 	CachedTokens int `json:"cached_tokens,omitempty"`
+	// CacheWriteTokens 是 Responses 用量里的缓存写入（input_tokens_details.cache_write_tokens）。
+	// 官方 chatgpt.com 通常不返回；自定义上游会返回。0 表示没有，不输出。
+	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
 }
 
 type UsageInfo struct {
@@ -3672,6 +3675,24 @@ func newUsageInfo(inputTokens, outputTokens, reasoningTokens, cachedTokens int) 
 		usage.InputTokensDetails = details
 	}
 	return usage
+}
+
+// applyCacheWriteTokens 把上游的缓存写入记进用量，并补到返回给客户的 details 里。
+// 官方 chatgpt.com 不返回这个字段，这里保持 0，不改变原有响应。
+func applyCacheWriteTokens(usage *UsageInfo, tokens int) {
+	if usage == nil || tokens <= 0 {
+		return
+	}
+	usage.CacheWriteTokens = tokens
+	usage.CacheWrite5mTokens = tokens
+	if usage.InputTokensDetails == nil {
+		usage.InputTokensDetails = &TokenDetails{}
+	}
+	usage.InputTokensDetails.CacheWriteTokens = tokens
+	if usage.PromptTokensDetails == nil {
+		usage.PromptTokensDetails = &TokenDetails{}
+	}
+	usage.PromptTokensDetails.CacheWriteTokens = tokens
 }
 
 // newContentChunk 构建文本内容流式块
@@ -4360,7 +4381,13 @@ func extractUsageFromResult(usage gjson.Result) *UsageInfo {
 	outputTokens := int(usage.Get("output_tokens").Int())
 	reasoningTokens := int(usage.Get("output_tokens_details.reasoning_tokens").Int())
 	cachedTokens := int(usage.Get("input_tokens_details.cached_tokens").Int())
+	cacheWriteTokens := int(usage.Get("input_tokens_details.cache_write_tokens").Int())
+	if cacheWriteTokens == 0 {
+		// 兼容中转按 Anthropic 形状回的缓存写入。
+		cacheWriteTokens = int(usage.Get("cache_creation_input_tokens").Int())
+	}
 	result := newUsageInfo(inputTokens, outputTokens, reasoningTokens, cachedTokens)
+	applyCacheWriteTokens(result, cacheWriteTokens)
 	result.ImageInputTokens = min(max(0, int(usage.Get("input_tokens_details.image_tokens").Int())), max(0, inputTokens))
 	result.ImageOutputTokens = min(max(0, int(usage.Get("output_tokens_details.image_tokens").Int())), max(0, outputTokens))
 	result.CachedImageInputTokens = min(max(0, int(usage.Get("input_tokens_details.cached_tokens_details.image_tokens").Int())), min(result.ImageInputTokens, max(0, cachedTokens)))

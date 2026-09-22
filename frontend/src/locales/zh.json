@@ -2679,6 +2679,7 @@
     "compactionTriggerTooltip": "本次请求被客户端标记为上下文压缩轮次",
     "compactionHistory": "压缩历史",
     "compactionHistoryTooltip": "本次请求携带此前生成的压缩上下文",
+    "customUpstreamHint": "这次请求打的是自定义上游：{{name}}",
     "upstreamModelHint": "上游响应体返回的模型：{{model}}",
     "upstreamModelMismatchHint": "上游响应体返回的模型为 {{model}}，与实际请求的模型不一致",
     "internalRequest": "内部请求",

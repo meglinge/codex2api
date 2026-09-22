@@ -2679,6 +2679,7 @@
     "compactionTriggerTooltip": "The client marked this request as a context-compaction turn",
     "compactionHistory": "Compaction History",
     "compactionHistoryTooltip": "This request carries previously generated compacted context",
+    "customUpstreamHint": "This request used the custom upstream: {{name}}",
     "upstreamModelHint": "Model reported by the upstream response: {{model}}",
     "upstreamModelMismatchHint": "The upstream response reported {{model}}, which differs from the model actually requested",
     "internalRequest": "Internal",

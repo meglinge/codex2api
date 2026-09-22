@@ -264,6 +264,11 @@ function formatUsageAPIKeyLabel(name?: string, maskedKey?: string): string {
 // 表格里可点击进入筛选的单元格(账号/模型):悬停变主色并加下划线提示可点。
 const usageClickableFilterClass = 'cursor-pointer transition-colors hover:text-primary hover:underline underline-offset-2 decoration-dotted'
 
+function customUpstreamName(log: UsageLog): string {
+  const endpoint = (log.upstream_endpoint || '').trim()
+  return endpoint.startsWith('custom:') ? endpoint.slice('custom:'.length).trim() : ''
+}
+
 function formatUsageAccountLabel(log: UsageLog): string {
   // 邮箱优先：身份账号一律显示邮箱，账号名仅作为无邮箱账号（如 relay API-key 账号）的兜底。
   // 避免 AT 导入未命名时的占位名（at-account-N 等）盖过真实邮箱身份。
@@ -2589,6 +2594,15 @@ export default function Usage() {
                               ws
                             </Badge>
                           ) : null}
+                          {customUpstreamName(log) ? (
+                            <Badge
+                              variant="outline"
+                              title={t('usage.customUpstreamHint', { name: customUpstreamName(log) })}
+                              className="border-transparent bg-orange-500/12 text-[11px] font-semibold text-orange-700 dark:bg-orange-500/20 dark:text-orange-300"
+                            >
+                              {customUpstreamName(log)}
+                            </Badge>
+                          ) : null}
                           {visibleColumns.model && (
                             <Badge
                               variant="outline"
@@ -2823,6 +2837,15 @@ export default function Usage() {
                                 className="text-[11px] font-semibold uppercase border-transparent bg-cyan-500/12 text-cyan-600 dark:bg-cyan-500/20 dark:text-cyan-400"
                               >
                                 ws
+                              </Badge>
+                            )}
+                            {customUpstreamName(log) && (
+                              <Badge
+                                variant="outline"
+                                title={t('usage.customUpstreamHint', { name: customUpstreamName(log) })}
+                                className="border-transparent bg-orange-500/12 text-[11px] font-semibold text-orange-700 dark:bg-orange-500/20 dark:text-orange-300"
+                              >
+                                {customUpstreamName(log)}
                               </Badge>
                             )}
                             <Badge

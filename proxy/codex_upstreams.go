@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 
@@ -127,6 +128,35 @@ func apiKeyRowFromContextValue(ctx context.Context) *database.APIKeyRow {
 
 func resolveRequestCodexBaseURL(ctx context.Context, requestBody []byte) string {
 	return ResolveRequestCodexBaseURL(ctx, requestBody)
+}
+
+// codexUpstreamLogLabel 返回请求日志用的上游标记。
+// 官方 chatgpt.com 返回空串；自定义上游返回名字，没有名字时退回 ID。
+func codexUpstreamLogLabel(ctx context.Context, model string) string {
+	if ctx == nil {
+		return ""
+	}
+	body := []byte(`{}`)
+	if model = strings.TrimSpace(model); model != "" {
+		encoded, err := json.Marshal(model)
+		if err != nil {
+			return ""
+		}
+		body = []byte(`{"model":` + string(encoded) + `}`)
+	}
+	base, id := resolveRequestCodexUpstream(ctx, body)
+	if strings.TrimRight(strings.TrimSpace(base), "/") == CodexBaseURL || id == "" {
+		return ""
+	}
+	codexUpstreamCatalog.mu.RLock()
+	item, ok := codexUpstreamCatalog.byID[id]
+	codexUpstreamCatalog.mu.RUnlock()
+	if ok {
+		if name := strings.TrimSpace(item.Name); name != "" {
+			return name
+		}
+	}
+	return id
 }
 
 // RequestUsesOfficialCodexUpstream 判断这次请求是否打官方 chatgpt.com Codex 后端。
