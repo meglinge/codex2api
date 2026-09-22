@@ -19,19 +19,28 @@ func TestApplyCodexRouteCookiesFollowsTheModel(t *testing.T) {
 		"__oailb=other; Path=/backend-api; Secure",
 	}, time.Now())
 
+	mint := http.Header{}
+	ApplyCodexRouteCookies(context.Background(), mint, account, "https://chatgpt.com/backend-api/codex/responses", "gpt-5.6-sol")
+	if got := mint.Get("Cookie"); got != "" {
+		t.Fatalf("mint without a ticket sent cookie %q", got)
+	}
+
 	sameModel := http.Header{}
+	sameModel.Set("X-Codex-Turn-State", "ticket")
 	ApplyCodexRouteCookies(context.Background(), sameModel, account, "https://chatgpt.com/backend-api/codex/guardian", "gpt-5.6-sol")
 	if got := sameModel.Get("Cookie"); got != "__cflb=west; __oailb=route" {
 		t.Fatalf("same model cookie = %q", got)
 	}
 
 	otherModel := http.Header{}
+	otherModel.Set("X-Codex-Turn-State", "ticket")
 	ApplyCodexRouteCookies(context.Background(), otherModel, account, "https://chatgpt.com/backend-api/codex/responses", "gpt-5.5")
 	if got := otherModel.Get("Cookie"); got != "__oailb=other" {
 		t.Fatalf("other model cookie = %q", got)
 	}
 
 	ping := http.Header{}
+	ping.Set("X-Codex-Turn-State", "ticket")
 	ApplyCodexRouteCookies(WithSkipStoredCodexTurnState(context.Background()), ping, account, "https://chatgpt.com/backend-api/codex/responses", "gpt-5.6-sol")
 	if got := ping.Get("Cookie"); got != "" {
 		t.Fatalf("ping cookie = %q", got)
@@ -45,6 +54,25 @@ func TestApplyCodexRouteCookiesFollowsTheModel(t *testing.T) {
 	}
 }
 
+func TestBindMintedRouteCookiesReplacesThePreviousPair(t *testing.T) {
+	account := &auth.Account{}
+	account.ObserveCodexRouteSetCookies("gpt-5.6-sol", "https://chatgpt.com/backend-api/codex/responses", []string{
+		"__cflb=old; Path=/backend-api; Secure",
+		"__oailb=old; Path=/backend-api; Secure",
+	}, time.Now())
+	capture := &mintCookieCapture{
+		scope: "https://chatgpt.com/backend-api/codex/responses",
+		lines: []string{"__cflb=new; Path=/backend-api; Secure", "__oailb=new; Path=/backend-api; Secure"},
+	}
+	bindMintedRouteCookies(account, "gpt-5.6-sol", capture)
+	headers := http.Header{}
+	headers.Set("X-Codex-Turn-State", "new-ticket")
+	ApplyCodexRouteCookies(context.Background(), headers, account, "https://chatgpt.com/backend-api/codex/responses", "gpt-5.6-sol")
+	if got := headers.Get("Cookie"); got != "__cflb=new; __oailb=new" {
+		t.Fatalf("cookie after ticket rotation = %q", got)
+	}
+}
+
 func TestRouteCookiesFollowResinBackToChatGPT(t *testing.T) {
 	account := &auth.Account{}
 	resin := "http://127.0.0.1:2260/token/codex2api/https/chatgpt.com/backend-api/codex/responses"
@@ -55,14 +83,16 @@ func TestRouteCookiesFollowResinBackToChatGPT(t *testing.T) {
 	ObserveCodexRouteResponseCookies(ctx, account, resin, header)
 
 	out := http.Header{}
+	out.Set("X-Codex-Turn-State", "ticket")
 	ApplyCodexRouteCookies(context.Background(), out, account, resin, "gpt-5.6-sol")
 	if got := out.Get("Cookie"); got != "__oailb=from-handshake" {
 		t.Fatalf("resin replay = %q", got)
 	}
 	other := http.Header{}
+	other.Set("X-Codex-Turn-State", "ticket")
 	ApplyCodexRouteCookies(context.Background(), other, account, resin, "gpt-5.5")
 	if got := other.Get("Cookie"); got != "" {
-		t.Fatalf("other model replay = %q", got)
+		t.Fatalf("other model must not reuse this ticket's cookie, got %q", got)
 	}
 }
 
@@ -74,6 +104,7 @@ func TestObserveCodexRouteResponseCookiesIgnoresOtherHosts(t *testing.T) {
 	ObserveCodexRouteResponseCookies(ctx, account, "https://api.openai.com/v1/responses", header)
 
 	out := http.Header{}
+	out.Set("X-Codex-Turn-State", "ticket")
 	ApplyCodexRouteCookies(context.Background(), out, account, "https://chatgpt.com/backend-api/codex/responses", "gpt-5.6-sol")
 	if got := out.Get("Cookie"); got != "" {
 		t.Fatalf("cookie leaked from api.openai.com = %q", got)

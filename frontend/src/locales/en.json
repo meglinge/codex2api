@@ -2173,7 +2173,7 @@
   },
   "intelligence": {
     "title": "Intelligence",
-    "desc": "X-Codex-Turn-State degradation per account and model. The verdict follows the plan: personal plans expect a 160-byte ciphertext (292 base64 chars), Team / K12 / Edu / self-serve business expect 192 bytes (332 chars); any other length counts as degraded. Never use a fixed character length as the threshold.",
+    "desc": "X-Codex-Turn-State degradation per account and model. The local non-degraded length is the whole ticket: 292 characters for personal plans, 332 for Team / K12 / Edu / self-serve business. Those counts include the version, timestamp, IV and HMAC; the ciphertext inside is 160 and 192 bytes. The check compares ciphertext length only, not the whole-ticket character count.",
     "loadingTitle": "Loading intelligence status",
     "errorTitle": "Failed to load intelligence",
     "stat": {
@@ -2226,6 +2226,9 @@
     "action": {
       "refresh": "Force refresh (bypass TTL)",
       "invalidate": "Drop cached value",
+      "resetAccount": "Reset cache",
+      "resetConfirm": "Clear every model's X-Codex-Turn-State and routing cookies for account #{{id}}? The next request will mint them again.",
+      "resetOk": "Cleared tickets and cookies for account #{{id}}",
       "refreshOk": "Refreshed, ciphertext {{len}} bytes",
       "refreshFailed": "Refresh failed: {{reason}}",
       "invalidated": "Cached value dropped; the next request will ping again"

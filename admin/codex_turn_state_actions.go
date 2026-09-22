@@ -106,6 +106,17 @@ func (h *Handler) RefreshCodexTurnStateCell(c *gin.Context) {
 	})
 }
 
+// ResetCodexAccountRouteCache 清掉一个账号全部模型的票据和路由 cookie。
+// POST /api/admin/codex-turn-states/reset-account
+func (h *Handler) ResetCodexAccountRouteCache(c *gin.Context) {
+	account, ok := h.bindCodexTurnStateAccount(c)
+	if !ok {
+		return
+	}
+	proxy.ResetCodexAccountRouteCache(account)
+	c.JSON(http.StatusOK, gin.H{"reset": true})
+}
+
 // InvalidateCodexTurnStateCell 丢掉一格已缓存的 blob，下一次请求会重新 ping。
 // POST /api/admin/codex-turn-states/invalidate
 func (h *Handler) InvalidateCodexTurnStateCell(c *gin.Context) {
@@ -117,9 +128,9 @@ func (h *Handler) InvalidateCodexTurnStateCell(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"invalidated": true})
 }
 
-// bindCodexTurnStateCell 解析并校验 {account_id, model}，顺带把账号取出来。
+// bindCodexTurnStateRequest 解析请求体并取出 Codex 账号。requireModel 为真时 model 不能空。
 // 校验失败时已经写好响应，调用方直接 return。
-func (h *Handler) bindCodexTurnStateCell(c *gin.Context) (*auth.Account, string, bool) {
+func (h *Handler) bindCodexTurnStateRequest(c *gin.Context, requireModel bool) (*auth.Account, string, bool) {
 	if h == nil || h.store == nil {
 		writeError(c, http.StatusServiceUnavailable, "账号池不可用")
 		return nil, "", false
@@ -130,7 +141,7 @@ func (h *Handler) bindCodexTurnStateCell(c *gin.Context) (*auth.Account, string,
 		return nil, "", false
 	}
 	model := strings.TrimSpace(req.Model)
-	if req.AccountID <= 0 || model == "" {
+	if req.AccountID <= 0 || (requireModel && model == "") {
 		writeError(c, http.StatusBadRequest, "缺少 account_id 或 model")
 		return nil, "", false
 	}
@@ -144,4 +155,13 @@ func (h *Handler) bindCodexTurnStateCell(c *gin.Context) (*auth.Account, string,
 		return nil, "", false
 	}
 	return account, model, true
+}
+
+func (h *Handler) bindCodexTurnStateAccount(c *gin.Context) (*auth.Account, bool) {
+	account, _, ok := h.bindCodexTurnStateRequest(c, false)
+	return account, ok
+}
+
+func (h *Handler) bindCodexTurnStateCell(c *gin.Context) (*auth.Account, string, bool) {
+	return h.bindCodexTurnStateRequest(c, true)
 }

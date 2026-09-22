@@ -104,6 +104,34 @@ func (a *Account) ObserveCodexRouteSetCookies(model, scopeURL string, lines []st
 	return routeCookieIdentity(cookies) != before
 }
 
+// ClearAllCodexRouteCookies 丢掉该账号全部模型的路由 cookie。
+func (a *Account) ClearAllCodexRouteCookies() bool {
+	if a == nil {
+		return false
+	}
+	jar := a.routeCookieJar()
+	jar.mu.Lock()
+	defer jar.mu.Unlock()
+	if len(jar.byModel) == 0 {
+		return false
+	}
+	jar.byModel = map[string][]CodexRouteCookie{}
+	return true
+}
+
+// ReplaceCodexRouteCookies 用这一轮打票响应里的 Set-Cookie 换掉该模型原来的 cookie。
+// 没有新 cookie 时旧的也清掉，避免新票还绑着上一张票的路由。
+func (a *Account) ReplaceCodexRouteCookies(model, scopeURL string, lines []string, now time.Time) bool {
+	if a == nil {
+		return false
+	}
+	cleared := a.ClearCodexRouteCookies(model)
+	if len(lines) == 0 || strings.TrimSpace(scopeURL) == "" {
+		return cleared
+	}
+	return a.ObserveCodexRouteSetCookies(model, scopeURL, lines, now) || cleared
+}
+
 // ClearCodexRouteCookies 丢掉该模型的路由 cookie。票据作废时一起清，下一轮重新配对。
 func (a *Account) ClearCodexRouteCookies(model string) bool {
 	model = strings.TrimSpace(model)
@@ -120,7 +148,7 @@ func (a *Account) ClearCodexRouteCookies(model string) bool {
 	return true
 }
 
-// CodexRouteCookieHeader 返回该模型在这个作用域上应回放的 Cookie 头。
+// CodexRouteCookieHeader 返回该模型自己的 Cookie。cookie 和这张票绑在一起，不用别的模型的。
 func (a *Account) CodexRouteCookieHeader(model, scopeURL string, now time.Time) string {
 	model = strings.TrimSpace(model)
 	u, ok := parseCodexRouteCookieScope(scopeURL)
@@ -138,8 +166,12 @@ func (a *Account) CodexRouteCookieHeader(model, scopeURL string, now time.Time) 
 	if path == "" {
 		path = "/"
 	}
-	matched := make([]CodexRouteCookie, 0, 2)
-	for _, cookie := range jar.byModel[model] {
+	return formatRouteCookieHeader(jar.byModel[model], host, path, now)
+}
+
+func formatRouteCookieHeader(cookies []CodexRouteCookie, host, path string, now time.Time) string {
+	matched := make([]CodexRouteCookie, 0, len(cookies))
+	for _, cookie := range cookies {
 		if routeCookieExpired(cookie, now) || !cookie.Secure || !isCodexRouteCookieName(cookie.Name) {
 			continue
 		}

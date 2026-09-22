@@ -1059,6 +1059,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(cell),
     }),
+  resetCodexAccountRouteCache: (accountId: number) =>
+    request<{ reset: boolean }>('/codex-turn-states/reset-account', {
+      method: 'POST',
+      body: JSON.stringify({ account_id: accountId }),
+    }),
   getInviteGuideSettings: () => request<{ enabled: boolean }>('/settings/invite-guide'),
   updateInviteGuideSettings: (enabled: boolean) =>
     request<{ enabled: boolean }>('/settings/invite-guide', {

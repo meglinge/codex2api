@@ -55,6 +55,9 @@
 ### 7. NewAPI 审计与生产验收
 - [NewAPI 身份与执行适配器](newapi-audit-integration.md)
 
+### 8. Codex 路由 Cookie
+- [按模型的票据与 `__oailb` / `__cflb`](codex-route-cookies.md)
+
 ## 快速开始
 
 1. **新用户**: 先阅读主 README.md，然后参考 [DEPLOYMENT.md](DEPLOYMENT.md) 进行部署

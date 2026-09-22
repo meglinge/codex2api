@@ -14,14 +14,40 @@ import (
 type codexRouteCookieScopeKey struct{}
 type codexRouteCookieModelKey struct{}
 
+// mintCookieCapture 先攒着这一轮打票响应的 Set-Cookie。票还没被接受时不写进账号，
+// 避免失败的尝试把还在用的那一对 cookie 冲掉。
+type mintCookieCapture struct {
+	scope string
+	lines []string
+}
+
+type mintCookieCaptureKey struct{}
+
+func withMintCookieCapture(ctx context.Context) (context.Context, *mintCookieCapture) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	capture := &mintCookieCapture{}
+	return context.WithValue(ctx, mintCookieCaptureKey{}, capture), capture
+}
+
+func mintCookieCaptureFrom(ctx context.Context) *mintCookieCapture {
+	if ctx == nil {
+		return nil
+	}
+	capture, _ := ctx.Value(mintCookieCaptureKey{}).(*mintCookieCapture)
+	return capture
+}
+
 // ApplyCodexRouteCookies 把该模型保存的 __oailb / __cflb 补到这次 Codex 出站上。
-// 一个模型一张票据、一组 cookie；同一模型的后续会话回放这一对。铸造新票据的 ping
-// 不带旧 cookie。调用方已经写了 Cookie 时保持原样。
+// 只有请求里已经有 X-Codex-Turn-State 才带 cookie。没有票据的请求是在打票，
+// 带上 cookie 上游不会给出能用满 240 秒的票。铸造 ping 同样不带。
+// 调用方已经写了 Cookie 时保持原样。
 func ApplyCodexRouteCookies(ctx context.Context, headers http.Header, account *auth.Account, rawURL, model string) {
 	if headers == nil || account == nil || skipStoredCodexTurnState(ctx) {
 		return
 	}
-	if strings.TrimSpace(headers.Get("Cookie")) != "" {
+	if strings.TrimSpace(headers.Get(codexTurnStateHeader)) == "" || strings.TrimSpace(headers.Get("Cookie")) != "" {
 		return
 	}
 	model = strings.TrimSpace(model)
@@ -78,7 +104,23 @@ func ObserveCodexRouteResponseCookies(ctx context.Context, account *auth.Account
 			return
 		}
 	}
+	if capture := mintCookieCaptureFrom(ctx); capture != nil {
+		capture.scope = scope
+		capture.lines = append(capture.lines, lines...)
+		return
+	}
 	if !account.ObserveCodexRouteSetCookies(model, scope, lines, time.Now()) {
+		return
+	}
+	persistCodexRouteCookies(account)
+}
+
+// bindMintedRouteCookies 在新票被接受时，用这一轮响应的 cookie 换掉该模型原来的一对。
+func bindMintedRouteCookies(account *auth.Account, model string, capture *mintCookieCapture) {
+	if account == nil || strings.TrimSpace(model) == "" || capture == nil {
+		return
+	}
+	if !account.ReplaceCodexRouteCookies(model, capture.scope, capture.lines, time.Now()) {
 		return
 	}
 	persistCodexRouteCookies(account)

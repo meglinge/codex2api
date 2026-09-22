@@ -97,6 +97,17 @@ func (a *Account) SetCodexTurnState(model, value string, capturedAt time.Time) {
 	a.CodexTurnStateCapturedAtMap[model] = capturedAt
 }
 
+// ClearAllCodexTurnStates 丢掉该账号全部模型的票据缓存。
+func (a *Account) ClearAllCodexTurnStates() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.CodexTurnStates = map[string]string{}
+	a.CodexTurnStateCapturedAtMap = map[string]time.Time{}
+}
+
 // ClearCodexTurnState 丢掉该模型的缓存，下次请求会重新 ping。
 func (a *Account) ClearCodexTurnState(model string) {
 	model = strings.TrimSpace(model)

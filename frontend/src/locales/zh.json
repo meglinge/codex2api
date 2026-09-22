@@ -2173,7 +2173,7 @@
   },
   "intelligence": {
     "title": "智力管理",
-    "desc": "按账号 × 模型看 X-Codex-Turn-State 的降智状态。判定按套餐走：个人套餐健康密文 160 字节（base64 292 字符），Team / K12 / 教育 / 企业自助 192 字节（332 字符）；其它长度视为降智。不要用固定字符长度当阈值。",
+    "desc": "按账号 × 模型看 X-Codex-Turn-State 的降智状态。本地看到的不降智长度是整张票：个人 292 字符，Team / K12 / 教育 / 企业自助 332 字符。292 和 332 把版本、时间戳、IV、HMAC 都算进去了，里面的密文分别是 160 和 192 字节。判定只比密文长度，不拿整票字符数当阈值。",
     "loadingTitle": "正在加载智力状态",
     "errorTitle": "智力管理页加载失败",
     "stat": {
@@ -2226,6 +2226,9 @@
     "action": {
       "refresh": "强制刷新（绕过 TTL）",
       "invalidate": "清除缓存值",
+      "resetAccount": "重置缓存",
+      "resetConfirm": "清除账号 #{{id}} 全部模型的 X-Codex-Turn-State 和路由 cookie？下次请求会重新铸造。",
+      "resetOk": "账号 #{{id}} 的票据和 cookie 已清除",
       "refreshOk": "刷新成功，密文 {{len}} 字节",
       "refreshFailed": "刷新失败：{{reason}}",
       "invalidated": "缓存值已清除，下次请求会重新 ping"

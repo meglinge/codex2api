@@ -87,6 +87,7 @@ export default function Intelligence() {
   const { showToast } = useToast()
   const [filters, setFilters] = useState<Filters>(DEFAULT_FILTERS)
   const [pending, setPending] = useState<PendingAction | null>(null)
+  const [resettingAccount, setResettingAccount] = useState<number | null>(null)
   const [events, setEvents] = useState<CodexTurnStateRefreshEvent[]>([])
   const [matrixPage, setMatrixPage] = useState(1)
   const [matrixPageSize, setMatrixPageSize] = useState(20)
@@ -209,6 +210,23 @@ export default function Intelligence() {
     },
     [loadEvents, reloadSilently, showToast, t])
 
+  const resetAccount = useCallback(
+    async (accountId: number) => {
+      if (!window.confirm(t('intelligence.action.resetConfirm', { id: accountId }))) return
+      setResettingAccount(accountId)
+      try {
+        await api.resetCodexAccountRouteCache(accountId)
+        showToast(t('intelligence.action.resetOk', { id: accountId }), 'success')
+        await reloadSilently()
+        await loadEvents()
+      } catch (err) {
+        showToast(getErrorMessage(err), 'error')
+      } finally {
+        setResettingAccount(null)
+      }
+    },
+    [loadEvents, reloadSilently, showToast, t])
+
   const summary = data?.summary
   const statusOptions = useMemo(
     () => [
@@ -294,6 +312,8 @@ export default function Intelligence() {
         <Matrix
           accounts={matrixSlice}
           models={matrixModels}
+          resettingAccount={resettingAccount}
+          onResetAccount={(accountId) => void resetAccount(accountId)}
           totalAccounts={matrixAccounts.length}
           page={Math.min(matrixPage, matrixTotalPages)}
           totalPages={matrixTotalPages}
@@ -442,6 +462,8 @@ export default function Intelligence() {
 function Matrix({
   accounts,
   models,
+  resettingAccount,
+  onResetAccount,
   totalAccounts,
   page,
   totalPages,
@@ -451,6 +473,8 @@ function Matrix({
 }: {
   accounts: CodexTurnStateAccountRow[]
   models: string[]
+  resettingAccount: number | null
+  onResetAccount: (accountId: number) => void
   totalAccounts: number
   page: number
   totalPages: number
@@ -486,6 +510,7 @@ function Matrix({
                 <thead className="sticky top-0 bg-card text-muted-foreground">
                   <tr>
                     <th className="px-4 py-2 font-medium">{t('intelligence.col.account')}</th>
+                    <th className="px-2 py-2 text-right font-medium">{t('intelligence.col.actions')}</th>
                     {models.map((model) => (
                       <th key={model} className="px-2 py-2 text-center font-mono font-medium">
                         {model.replace(/^gpt-/, '')}
@@ -504,6 +529,17 @@ function Matrix({
                           {account.plan_type ? (
                             <span className="ml-2 text-muted-foreground">{account.plan_type}</span>
                           ) : null}
+                        </td>
+                        <td className="px-2 py-1.5 text-right">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2 text-xs"
+                            disabled={resettingAccount === account.account_id}
+                            onClick={() => onResetAccount(account.account_id)}
+                          >
+                            {t('intelligence.action.resetAccount')}
+                          </Button>
                         </td>
                         {models.map((model) => {
                           const cell = byModel.get(model)

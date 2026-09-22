@@ -71,6 +71,42 @@ func TestCodexTurnStateCellActionsValidateInput(t *testing.T) {
 	}
 }
 
+func TestResetCodexAccountRouteCacheEndpoint(t *testing.T) {
+	handler, account := newTurnStateActionHandler(t)
+	proxy.ApplyCodexTurnStateCacheConfig(database.CodexTurnStateCacheConfig{
+		Models:     []string{"gpt-6-astra", "gpt-5.5"},
+		TTLMinutes: 43,
+	})
+	t.Cleanup(func() {
+		proxy.ApplyCodexTurnStateCacheConfig(database.CodexTurnStateCacheConfig{})
+		auth.ResetCodexRouteCookiesForTest(account.ID())
+	})
+	now := time.Now()
+	account.SetCodexTurnState("gpt-6-astra", overviewFernet(160), now)
+	account.SetCodexTurnState("gpt-5.5", overviewFernet(160), now)
+	account.ObserveCodexRouteSetCookies("gpt-6-astra", "https://chatgpt.com/backend-api/codex/responses", []string{
+		"__cflb=west; Path=/backend-api; Secure",
+	}, now)
+	account.ObserveCodexRouteSetCookies("gpt-5.5", "https://chatgpt.com/backend-api/codex/responses", []string{
+		"__oailb=east; Path=/backend-api; Secure",
+	}, now)
+
+	recorder := postTurnStateAction(t, handler.ResetCodexAccountRouteCache,
+		fmt.Sprintf(`{"account_id":%d}`, account.ID()))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if account.GetCodexTurnState("gpt-6-astra") != "" || account.GetCodexTurnState("gpt-5.5") != "" {
+		t.Fatal("turn-state cache was not cleared")
+	}
+	if got := account.CodexRouteCookieHeader("gpt-6-astra", "https://chatgpt.com/backend-api/codex/responses", now); got != "" {
+		t.Fatalf("cookie for gpt-6-astra = %q", got)
+	}
+	if got := account.CodexRouteCookieHeader("gpt-5.5", "https://chatgpt.com/backend-api/codex/responses", now); got != "" {
+		t.Fatalf("cookie for gpt-5.5 = %q", got)
+	}
+}
+
 func TestInvalidateCodexTurnStateCellEndpoint(t *testing.T) {
 	handler, account := newTurnStateActionHandler(t)
 	proxy.ApplyCodexTurnStateCacheConfig(database.CodexTurnStateCacheConfig{

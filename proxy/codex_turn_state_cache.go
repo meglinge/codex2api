@@ -27,6 +27,14 @@ const (
 	codexTurnStateFernetVersion        = 0x80
 	codexTurnStateHealthyCipherLen     = 160
 	codexTurnStateTeamHealthyCipherLen = 192
+	// codexTurnStatePremintAge 到点就在后台打下一张票，请求仍回放旧票。
+	// 实测同一张 292 票在 Oracle 上从 3 秒用到 191.7 秒，267 秒被重铸成 312。
+	// 200 秒开始打，是为了在断掉之前把下一张备好。
+	codexTurnStatePremintAge = 200 * time.Second
+	// codexTurnStateMintLifetime 内不接受上游换上来的更长票。过了这个时间旧票不再回放。
+	// 健康票的整票长度是个人 292 字符、企业 332 字符（含版本、时间戳、IV、HMAC）。
+	// 判定只用里面的密文：160 或 192 字节。
+	codexTurnStateMintLifetime = 240 * time.Second
 )
 
 // codexTurnStateRoundRetryDelay 是一轮 ping（遍历一遍国家列表）全灭之后、下一轮开始
@@ -225,8 +233,15 @@ func ensureCodexTurnStateReady(ctx context.Context, account *auth.Account, body 
 	if model == "" || !cache.covers(model) {
 		return ctx, nil
 	}
-	stored, fresh := account.CodexTurnStateFresh(model, cache.config().TTL(), time.Now())
-	if fresh {
+	stored := account.GetCodexTurnState(model)
+	age, aged := codexTurnStateAge(stored, account.CodexTurnStateCapturedAt(model), time.Now())
+	premint, hard := cache.ticketWindows()
+	switch {
+	case stored != "" && aged && age < premint:
+		return withExpectedCodexTurnState(ctx, account, model, stored), nil
+	case stored != "" && aged && age < hard:
+		// 旧票还没到硬过期。后台打下一张，这次请求继续用旧票，不等 ping。
+		cache.refreshDetached(account, model)
 		return withExpectedCodexTurnState(ctx, account, model, stored), nil
 	}
 	if cache.config().AsyncRefresh() {
@@ -273,6 +288,46 @@ func RefreshCodexTurnStateNow(ctx context.Context, account *auth.Account, model 
 func InvalidateCodexTurnState(account *auth.Account, model string) {
 	if cache := currentCodexTurnStateCache(); cache != nil {
 		cache.invalidate(account, model)
+	}
+}
+
+// ResetCodexAccountRouteCache 清掉一个账号全部模型的票据和路由 cookie。
+// 正在跑的刷新循环会被停掉，避免这一轮 ping 的结果把刚清掉的值写回去。
+func ResetCodexAccountRouteCache(account *auth.Account) {
+	if account == nil {
+		return
+	}
+	cache := currentCodexTurnStateCache()
+	if cache != nil {
+		cache.stopAccountRefresh(account.ID())
+		cache.forgetRefreshStats(account.ID())
+	}
+	account.ClearAllCodexTurnStates()
+	account.ClearAllCodexRouteCookies()
+	if cache == nil {
+		return
+	}
+	if err := persistAccountCodexTurnStates(context.Background(), cache.db, account); err != nil {
+		log.Printf("清除账号 X-Codex-Turn-State 失败 account=%d: %v", account.ID(), err)
+	}
+	persistCodexRouteCookies(account)
+}
+
+func (c *codexTurnStateCache) stopAccountRefresh(accountID int64) {
+	if c == nil || accountID <= 0 {
+		return
+	}
+	prefix := fmt.Sprintf("%d%s", accountID, codexTurnStateCacheWaiterKey)
+	c.mu.Lock()
+	stopped := make([]*codexTurnStateRefreshWaiter, 0, 4)
+	for key, waiter := range c.waiters {
+		if strings.HasPrefix(key, prefix) {
+			stopped = append(stopped, waiter)
+		}
+	}
+	c.mu.Unlock()
+	for _, waiter := range stopped {
+		waiter.cancel()
 	}
 }
 
@@ -387,6 +442,9 @@ func observeCodexTurnStateInbound(ctx context.Context, inbound string) {
 	if expect == nil || expect.account == nil || expect.stored == "" || inbound == expect.stored {
 		return
 	}
+	if codexTurnStateWithinMintLifetime(expect.stored) {
+		return
+	}
 	if cache := currentCodexTurnStateCache(); cache != nil && cache.covers(expect.model) {
 		cache.invalidate(expect.account, expect.model)
 		go func() {
@@ -425,8 +483,11 @@ func (c *codexTurnStateCache) refresh(ctx context.Context, account *auth.Account
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if stored, fresh := account.CodexTurnStateFresh(model, c.config().TTL(), time.Now()); fresh {
-		return stored, nil
+	storedNow := account.GetCodexTurnState(model)
+	ageNow, agedNow := codexTurnStateAge(storedNow, account.CodexTurnStateCapturedAt(model), time.Now())
+	premintNow, _ := c.ticketWindows()
+	if storedNow != "" && agedNow && ageNow < premintNow {
+		return storedNow, nil
 	}
 
 	key := codexTurnStateWaiterKey(account, model)
@@ -497,9 +558,11 @@ func (c *codexTurnStateCache) runRefresh(account *auth.Account, model, key strin
 	start := time.Now()
 	attempts := 0
 	for round := 1; ; round++ {
-		// 别人（另一格的成功、管理页手工写入、持久化失败后内存里已有值）已经把
-		// 这一格补上时直接交卷。
-		if stored, fresh := account.CodexTurnStateFresh(model, c.config().TTL(), time.Now()); fresh {
+		// 票还没到提前打票的年龄就停。到了 200 秒必须继续 ping，不能被 43 分钟 TTL 当成新鲜。
+		stored := account.GetCodexTurnState(model)
+		age, aged := codexTurnStateAge(stored, account.CodexTurnStateCapturedAt(model), time.Now())
+		premint, _ := c.ticketWindows()
+		if stored != "" && aged && age < premint {
 			waiter.finishRound(stored, nil, false)
 			return
 		}
@@ -519,14 +582,21 @@ func (c *codexTurnStateCache) runRefresh(account *auth.Account, model, key strin
 			attempts++
 			ctx, cancel := context.WithTimeout(context.Background(), codexTurnStatePingTimeout)
 			ctx = WithFreshCodexConnection(WithSkipStoredCodexTurnState(ctx))
+			ctx, mintedCookies := withMintCookieCapture(ctx)
 			value, err := c.ping(ctx, account, model, proxyURL)
 			cancel()
+			if reason := c.refreshStopReason(account, model, waiter); reason != "" {
+				log.Printf("X-Codex-Turn-State 刷新循环退出 account=%d model=%s: %s", account.ID(), model, reason)
+				waiter.finishRound("", fmt.Errorf("刷新 X-Codex-Turn-State 已停止: %s", reason), false)
+				return
+			}
 			value = strings.TrimSpace(value)
 			if err == nil && value == "" {
 				err = fmt.Errorf("上游未返回 X-Codex-Turn-State")
 			}
 			if err == nil {
 				account.SetCodexTurnState(model, value, time.Now())
+				bindMintedRouteCookies(account, model, mintedCookies)
 				if persistErr := persistAccountCodexTurnStates(context.Background(), c.db, account); persistErr != nil {
 					err = fmt.Errorf("保存 X-Codex-Turn-State 失败: %w", persistErr)
 				}
@@ -624,6 +694,58 @@ func verifyCodexTurnStatePingIntelligence(value, planType string) error {
 		return &CodexTurnStateDegradedError{Health: *health}
 	}
 	return nil
+}
+
+// ticketWindows 返回提前打票年龄和硬过期。配置的 TTL 更短时以 TTL 为准。
+func (c *codexTurnStateCache) ticketWindows() (premint, hard time.Duration) {
+	premint = codexTurnStatePremintAge
+	hard = codexTurnStateMintLifetime
+	if c == nil {
+		return premint, hard
+	}
+	if ttl := c.config().TTL(); ttl > 0 {
+		if ttl < premint {
+			premint = ttl
+		}
+		if ttl < hard {
+			hard = ttl
+		}
+	}
+	return premint, hard
+}
+
+// codexTurnStateAge 优先用 Fernet 里的铸造时间，没有时退回本地写入时间。
+func codexTurnStateAge(stored string, capturedAt, now time.Time) (time.Duration, bool) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if info, err := inspectCodexTurnStateToken(stored); err == nil && info.Timestamp > 0 {
+		age := now.Sub(time.Unix(info.Timestamp, 0))
+		if age >= 0 {
+			return age, true
+		}
+	}
+	if !capturedAt.IsZero() {
+		age := now.Sub(capturedAt)
+		if age >= 0 {
+			return age, true
+		}
+	}
+	return 0, false
+}
+
+// codexTurnStateWithinMintLifetime 判断这张已保存的健康票是否还没到硬过期。
+// 时间戳取 Fernet 里的铸造时间。解析不了、或密文不是 160/192 的健康长度，不保护。
+func codexTurnStateWithinMintLifetime(stored string) bool {
+	info, err := inspectCodexTurnStateToken(stored)
+	if err != nil || info.Timestamp <= 0 {
+		return false
+	}
+	if info.CipherLen != codexTurnStateHealthyCipherLen && info.CipherLen != codexTurnStateTeamHealthyCipherLen {
+		return false
+	}
+	age := time.Since(time.Unix(info.Timestamp, 0))
+	return age >= 0 && age < codexTurnStateMintLifetime
 }
 
 func codexTurnStateHealthyCipherLenForPlan(planType string) int {
