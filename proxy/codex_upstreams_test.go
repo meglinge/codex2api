@@ -1,8 +1,12 @@
 package proxy
 
 import (
+	"context"
+	"errors"
+	"net/http"
 	"testing"
 
+	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 )
 
@@ -65,6 +69,34 @@ func TestRequestUsesOfficialCodexUpstream(t *testing.T) {
 	if !RequestUsesOfficialCodexUpstream(nil, []byte(`{"model":"gpt-5.4"}`)) {
 		t.Fatal("no custom upstream means the official backend")
 	}
+}
+
+func TestCustomCodexUpstreamForcesHTTP(t *testing.T) {
+	SetCodexUpstreamCatalog(database.CodexUpstreamsConfig{
+		Upstreams: []database.CodexUpstream{
+			{ID: "relay-a", Name: "A", BaseURL: "https://a.example/codex", Enabled: true},
+		},
+	})
+	t.Cleanup(func() { SetCodexUpstreamCatalog(database.CodexUpstreamsConfig{}) })
+
+	ctx := WithCodexUpstreamRoutes(nil, "", []database.CodexUpstreamRoute{{Model: "gpt-5.5", UpstreamID: "relay-a"}})
+	called := false
+	old := WebsocketExecuteFunc
+	WebsocketExecuteFunc = func(context.Context, *auth.Account, []byte, string, string, string, *DeviceProfileConfig, http.Header, string) (*http.Response, error) {
+		called = true
+		return nil, errors.New("websocket should not be used")
+	}
+	t.Cleanup(func() { WebsocketExecuteFunc = old })
+
+	account := &auth.Account{AccessToken: "token"}
+	resp, err := ExecuteRequest(ctx, account, []byte(`{"model":"gpt-5.5","input":"hi"}`), "", "", "key", nil, http.Header{}, true)
+	if resp != nil {
+		resp.Body.Close()
+	}
+	if called {
+		t.Fatal("custom upstream still used websocket")
+	}
+	_ = err
 }
 
 func TestNormalizeCodexUpstreamsDropsInvalid(t *testing.T) {

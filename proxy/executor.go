@@ -569,6 +569,11 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	if account.IsCodexAgentIdentity() {
 		wantWebsocket = false
 	}
+	// 自定义上游只走 HTTP。WS 握手打的是官方 chatgpt.com，模型一旦路由到中转，
+	// 全局 WS 开关不能再把它送回去。
+	if !officialUpstream {
+		wantWebsocket = false
+	}
 	telemetryHeaders := headers
 	if !officialUpstream {
 		// 模拟官方遥测只打 chatgpt.com。自定义上游不发，避免把官方特征打到中转。
