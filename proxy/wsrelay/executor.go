@@ -131,7 +131,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	headerSessionID := resolveHandshakeSessionID(sessionID, poolRouteKey, wsBody)
 
 	// 构建 WebSocket URL
-	httpURL := proxy.CodexBaseURL + CodexWsEndpoint
+	httpURL := proxy.ResolveRequestCodexBaseURL(ctx, wsBody) + CodexWsEndpoint
 	wsURL, err := buildWebsocketURL(httpURL)
 	if err != nil {
 		return nil, fmt.Errorf("构建 WebSocket URL 失败: %w", err)
@@ -144,12 +144,13 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 
 	// 准备请求头
 	headers := e.prepareWebsocketHeaders(accessToken, account, accountIDStr, headerSessionID, apiKey, deviceCfg, ginHeaders, wsBody)
-	// 凭据级 turn state 注入在账号自定义头之后落定（帧体已由 proxy.ExecuteRequest 写入）。
-	proxy.ApplyCodexTurnStateInjectionHeader(ctx, headers)
-	// 握手带上该模型的 __oailb / __cflb。作用域用改写前的 chatgpt 地址。
-	wsModel := strings.TrimSpace(gjson.GetBytes(wsBody, "model").String())
-	proxy.ApplyCodexRouteCookies(ctx, headers, account, httpURL, wsModel)
-	ctx = proxy.WithCodexRouteCookieScope(ctx, httpURL, wsModel)
+	// 防降智头和路由 cookie 只打官方 chatgpt.com。自定义上游不带。
+	if proxy.RequestUsesOfficialCodexUpstream(ctx, wsBody) {
+		proxy.ApplyCodexTurnStateInjectionHeader(ctx, headers)
+		wsModel := strings.TrimSpace(gjson.GetBytes(wsBody, "model").String())
+		proxy.ApplyCodexRouteCookies(ctx, headers, account, httpURL, wsModel)
+		ctx = proxy.WithCodexRouteCookieScope(ctx, httpURL, wsModel)
+	}
 	// Record the attempted handshake UA immediately so failed handshakes are
 	// still auditable. A reused connection replaces this below with the UA that
 	// was actually sent when that connection was established.

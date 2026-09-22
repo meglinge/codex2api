@@ -1,7 +1,7 @@
 import { type CSSProperties, type PropsWithChildren, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { NavLink, useLocation } from 'react-router-dom'
-import { LayoutDashboard, Users, Activity, Settings, Server, Languages, Globe, BookOpen, KeyRound, Image as ImageIcon, ShieldAlert, ExternalLink, ChevronLeft, Palette, Sun, Moon, LogOut, Download, Loader2, RefreshCw, Menu, X, CircleDollarSign, Braces, FlaskConical } from 'lucide-react'
+import { LayoutDashboard, Users, Activity, Settings, Server, Languages, Globe, BookOpen, KeyRound, Image as ImageIcon, ShieldAlert, ExternalLink, ChevronLeft, Palette, Sun, Moon, LogOut, Download, Loader2, RefreshCw, Menu, X, CircleDollarSign, Braces, FlaskConical, Waypoints } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { api, resetAdminAuthState } from '../api'
 import { DEFAULT_SITE_LOGO, isBrandingVideo, useBranding } from '../branding'
@@ -26,6 +26,7 @@ const navDefs: NavDef[] = [
   { to: '/', labelKey: 'nav.dashboard', icon: <LayoutDashboard className="size-[18px]" />, end: true },
   { to: '/accounts', labelKey: 'nav.accounts', icon: <Users className="size-[18px]" /> },
   { to: '/api-keys', labelKey: 'nav.apiKeys', icon: <KeyRound className="size-[18px]" /> },
+  { to: '/codex-upstreams', labelKey: 'nav.codexUpstreams', icon: <Waypoints className="size-[18px]" /> },
   { to: '/proxies', labelKey: 'nav.proxies', icon: <Globe className="size-[18px]" /> },
   { to: '/images/studio', labelKey: 'nav.images', icon: <ImageIcon className="size-[18px]" />, activePrefix: '/images' },
   { to: '/quality-test', labelKey: 'nav.qualityTest', icon: <FlaskConical className="size-[18px]" /> },

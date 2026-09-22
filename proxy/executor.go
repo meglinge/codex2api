@@ -526,15 +526,19 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx = attachCodexUpstreamRoutes(ctx)
 	resetUpstreamUserAgentAudit(ctx)
 	resetWsAcquireAudit(ctx)
 	var encryptedAttempt *encryptedContentAttempt
 	requestBody, encryptedAttempt = prepareEncryptedContentAttempt(ctx, account, requestBody, sessionID, headers)
 	defer func() { encryptedAttempt.observeResponse(upstreamResponse, requestBody) }()
+	officialUpstream := requestUsesOfficialCodexUpstream(ctx, requestBody)
 	var readyErr error
-	ctx, readyErr = ensureCodexTurnStateReady(ctx, account, requestBody)
-	if readyErr != nil {
-		return nil, readyErr
+	if officialUpstream {
+		ctx, readyErr = ensureCodexTurnStateReady(ctx, account, requestBody)
+		if readyErr != nil {
+			return nil, readyErr
+		}
 	}
 
 	// Payload 规则改写：在 WS/HTTP 分叉前统一应用，两条上游路径共享改写结果。
@@ -565,14 +569,21 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	if account.IsCodexAgentIdentity() {
 		wantWebsocket = false
 	}
+	telemetryHeaders := headers
+	if !officialUpstream {
+		// 模拟官方遥测只打 chatgpt.com。自定义上游不发，避免把官方特征打到中转。
+		telemetryHeaders = nil
+	}
 	telemetryAttempt := beginCodexTelemetry(codexTelemetryRequest{
 		account: account, body: requestBody, sessionID: sessionID, proxyOverride: proxyOverride,
-		apiKey: apiKey, deviceCfg: deviceCfg, headers: headers,
+		apiKey: apiKey, deviceCfg: deviceCfg, headers: telemetryHeaders,
 	})
 	defer func() { telemetryAttempt.observeResult(upstreamResponse, upstreamErr) }()
 	// 凭据级 turn state 强制注入：模型已由入口映射/规则定稿，传输方式也已定。
-	// 未配置的账号这里是空操作。
-	ctx, requestBody, headers = prepareCodexTurnStateInjection(ctx, account, requestBody, headers, wantWebsocket && WebsocketExecuteFunc != nil)
+	// 未配置的账号这里是空操作。自定义上游不注入：防降智只服务官方 Codex 后端。
+	if officialUpstream {
+		ctx, requestBody, headers = prepareCodexTurnStateInjection(ctx, account, requestBody, headers, wantWebsocket && WebsocketExecuteFunc != nil)
+	}
 	poolRouteKey := ""
 	if wantWebsocket {
 		sessionID = strings.TrimSpace(sessionID)
@@ -604,8 +615,11 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	}
 	// 用账号为该模型保存的未降智 blob 覆盖出站 turn-state（请求头 / client_metadata）。
 	// Ping 用 WithSkipStoredCodexTurnState 跳过。HTTP/SSE 与 WebSocket 共用这一步。
-	requestBody, headers = injectStoredCodexTurnState(ctx, account, requestBody, headers)
-	RecordOutboundCodexTurnState(ctx, headers.Get(codexTurnStateHeader))
+	// 自定义上游不回放：那些 blob 只对官方 chatgpt.com 后端有效。
+	if officialUpstream {
+		requestBody, headers = injectStoredCodexTurnState(ctx, account, requestBody, headers)
+		RecordOutboundCodexTurnState(ctx, headers.Get(codexTurnStateHeader))
+	}
 	if wantWebsocket && WebsocketExecuteFunc != nil {
 		requestBody, headers = prepareCodexResponsesLiteTransport(requestBody, headers, true, responsesLite)
 		if responsesLite {
@@ -689,7 +703,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		requestBody, _ = sjson.SetBytes(requestBody, "prompt_cache_key", cacheKey)
 	}
 
-	logicalEndpoint := CodexBaseURL + "/responses"
+	logicalEndpoint := resolveRequestCodexBaseURL(ctx, requestBody) + "/responses"
 
 	// 出站字节在选客户端之前定稿：send() 会因 Agent Identity 401 重注册而重放，
 	// 两次重放必须发同一份字节。routing hint 等需要读字段的改写点继续用明文
@@ -716,11 +730,14 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		// ==================== 请求头（伪装 Codex CLI） ====================
 		applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
 		// 凭据级 turn state 注入在账号自定义头之后落定：自定义头不该顶掉它。
-		applyCodexTurnStateInjectionHeader(ctx, req.Header)
-		// 路由 cookie 跟这次请求的模型走，和该模型保存的票据是一对。
-		model := strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())
-		ApplyCodexRouteCookies(ctx, req.Header, account, logicalEndpoint, model)
-		req = req.WithContext(WithCodexRouteCookieScope(req.Context(), logicalEndpoint, model))
+		if officialUpstream {
+			applyCodexTurnStateInjectionHeader(ctx, req.Header)
+			// 路由 cookie 跟这次请求的模型走，和该模型保存的票据是一对。
+			// 自定义上游没有这套 __oailb / __cflb，带上去只会暴露官方特征。
+			model := strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())
+			ApplyCodexRouteCookies(ctx, req.Header, account, logicalEndpoint, model)
+			req = req.WithContext(WithCodexRouteCookieScope(req.Context(), logicalEndpoint, model))
+		}
 		// Content-Encoding 在通用头装配之后设置：真实客户端也是在编码完成时才补这个头
 		// （codex-rs/http-client/src/request.rs prepare_encoded_json），且账号自定义头
 		// 不该有能力声明一个与实际字节不符的编码。
@@ -999,15 +1016,19 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx = attachCodexUpstreamRoutes(ctx)
 	resetUpstreamUserAgentAudit(ctx)
 	resetWsAcquireAudit(ctx)
 	var encryptedAttempt *encryptedContentAttempt
 	requestBody, encryptedAttempt = prepareEncryptedContentAttempt(ctx, account, requestBody, sessionID, headers)
 	defer func() { encryptedAttempt.observeResponse(upstreamResponse, requestBody) }()
+	officialUpstream := requestUsesOfficialCodexUpstream(ctx, requestBody)
 	var readyErr error
-	ctx, readyErr = ensureCodexTurnStateReady(ctx, account, requestBody)
-	if readyErr != nil {
-		return nil, readyErr
+	if officialUpstream {
+		ctx, readyErr = ensureCodexTurnStateReady(ctx, account, requestBody)
+		if readyErr != nil {
+			return nil, readyErr
+		}
 	}
 	responsesLite := gateResponsesLiteForAccount(codexResponsesLiteRequested(requestBody, headers), requestBody, account)
 
@@ -1050,9 +1071,12 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	requestBody = ApplyCodexFingerprintToBody(requestBody, account, headers)
 	requestBody = ApplyCodexTimezoneToBody(requestBody, account, time.Now())
 	// 凭据级 turn state 强制注入：compact 与普通轮共用同一条回合状态。
-	ctx, requestBody, headers = prepareCodexTurnStateInjection(ctx, account, requestBody, headers, false)
-	requestBody, headers = injectStoredCodexTurnState(ctx, account, requestBody, headers)
-	RecordOutboundCodexTurnState(ctx, headers.Get(codexTurnStateHeader))
+	// 自定义上游不回放防降智 blob，也不带官方路由 cookie。
+	if officialUpstream {
+		ctx, requestBody, headers = prepareCodexTurnStateInjection(ctx, account, requestBody, headers, false)
+		requestBody, headers = injectStoredCodexTurnState(ctx, account, requestBody, headers)
+		RecordOutboundCodexTurnState(ctx, headers.Get(codexTurnStateHeader))
+	}
 
 	existingCacheKey := strings.TrimSpace(gjson.GetBytes(requestBody, "prompt_cache_key").String())
 	cacheKey := existingCacheKey
@@ -1062,7 +1086,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	}
 
 	// compact 端点
-	logicalEndpoint := CodexBaseURL + "/responses/compact"
+	logicalEndpoint := resolveRequestCodexBaseURL(ctx, requestBody) + "/responses/compact"
 
 	// 出口链路统一由 ResolveCodexEgress 决定(Resin > 代理 > 直连,见 egress.go)。
 	egress := ResolveCodexEgress(account, logicalEndpoint, proxyURL)
@@ -1075,10 +1099,12 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	}
 
 	applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
-	applyCodexTurnStateInjectionHeader(ctx, req.Header)
-	compactModel := strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())
-	ApplyCodexRouteCookies(ctx, req.Header, account, logicalEndpoint, compactModel)
-	req = req.WithContext(WithCodexRouteCookieScope(req.Context(), logicalEndpoint, compactModel))
+	if officialUpstream {
+		applyCodexTurnStateInjectionHeader(ctx, req.Header)
+		compactModel := strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())
+		ApplyCodexRouteCookies(ctx, req.Header, account, logicalEndpoint, compactModel)
+		req = req.WithContext(WithCodexRouteCookieScope(req.Context(), logicalEndpoint, compactModel))
+	}
 	// routing hint 由网关按最终出站 body 合成，须在账号自定义头之后设置。
 	ApplyCodexRoutingHint(req.Header, account, requestBody)
 

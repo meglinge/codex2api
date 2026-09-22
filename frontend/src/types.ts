@@ -3849,6 +3849,25 @@ export interface APIKeyModelRequestUsage {
   timezone: string
 }
 
+export interface CodexUpstream {
+  id: string
+  name: string
+  base_url: string
+  enabled: boolean
+}
+
+export interface CodexUpstreamRoute {
+  model: string
+  upstream_id: string
+}
+
+export interface CodexUpstreamsSettings {
+  default_id: string
+  upstreams: CodexUpstream[]
+  official_url: string
+  official_name: string
+}
+
 export interface APIKeyLimits {
   model_allow?: string[]
   model_deny?: string[]
@@ -3872,6 +3891,10 @@ export interface APIKeyLimits {
   upstream_channel?: UpstreamChannel
   /** 允许该 Key 使用 ChatGPT Live（/v1/live）。默认关闭。 */
   allow_live?: boolean
+  /** 该 Key 未命中模型路由时使用的 Codex 上游 ID。空 = 全局默认。 */
+  codex_upstream_default_id?: string
+  /** 按模型把该 Key 的 Codex 流量指到指定上游。 */
+  codex_upstream_routes?: CodexUpstreamRoute[]
   /** 分组 / 账号维度的用量预算（issue #439）。 */
   scope_limits?: APIKeyScopeLimit[]
   /** Fixed weekly request budgets shared by models matching each rule. */

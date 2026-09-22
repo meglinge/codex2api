@@ -1274,6 +1274,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/settings/invite-guide", h.GetInviteGuideSettings)
 	api.PUT("/settings/invite-guide", h.UpdateInviteGuideSettings)
 	api.GET("/settings/visible-channels", h.GetVisibleChannelsSettings)
+	api.GET("/settings/codex-upstreams", h.GetCodexUpstreams)
+	api.PUT("/settings/codex-upstreams", h.UpdateCodexUpstreams)
 	api.PUT("/settings/visible-channels", h.UpdateVisibleChannelsSettings)
 	api.GET("/settings/channel-tests", h.GetChannelTestSettings)
 	api.PUT("/settings/channel-tests", h.UpdateChannelTestSettings)
@@ -8918,6 +8920,8 @@ func sanitizeAPIKeyLimits(in database.APIKeyLimits) database.APIKeyLimits {
 		AutoCompactOnOverflow:  in.AutoCompactOnOverflow,
 		AllowLive:              in.AllowLive,
 		UpstreamChannel:        in.ResolveUpstreamChannel(),
+		CodexUpstreamDefaultID: strings.TrimSpace(in.CodexUpstreamDefaultID),
+		CodexUpstreamRoutes:    cleanCodexUpstreamRoutes(in.CodexUpstreamRoutes),
 		ScopeLimits:            database.NormalizeAPIKeyScopeLimits(in.ScopeLimits),
 		ModelRequestLimits:     in.ModelRequestLimits,
 	}
@@ -8980,6 +8984,31 @@ func (h *Handler) validateAPIKeyScopeLimits(ctx context.Context, scopes []databa
 		}
 	}
 	return nil
+}
+
+func cleanCodexUpstreamRoutes(routes []database.CodexUpstreamRoute) []database.CodexUpstreamRoute {
+	if len(routes) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(routes))
+	out := make([]database.CodexUpstreamRoute, 0, len(routes))
+	for _, route := range routes {
+		model := strings.TrimSpace(route.Model)
+		upstreamID := strings.TrimSpace(route.UpstreamID)
+		if model == "" || upstreamID == "" {
+			continue
+		}
+		key := strings.ToLower(model)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, database.CodexUpstreamRoute{Model: model, UpstreamID: upstreamID})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func joinInt64s(values []int64) string {

@@ -153,6 +153,8 @@ import type {
   UpdateAccountGroupRequest,
   UpstreamChannel,
   ClaudeGlobalConfig,
+  CodexUpstream,
+  CodexUpstreamsSettings,
   VisibleChannelsSettings,
   ChannelTestSettings,
   ChannelTestSettingsResponse,
@@ -1021,6 +1023,12 @@ export const api = {
     request<{ queued: number; skipped: number }>('/accounts/invite/plan/probe', {
       method: 'POST',
       body: JSON.stringify({ ids }),
+    }),
+  getCodexUpstreams: () => request<CodexUpstreamsSettings>('/settings/codex-upstreams'),
+  updateCodexUpstreams: (data: { default_id: string; upstreams: CodexUpstream[] }) =>
+    request<CodexUpstreamsSettings>('/settings/codex-upstreams', {
+      method: 'PUT',
+      body: JSON.stringify(data),
     }),
   getVisibleChannels: () => request<VisibleChannelsSettings>('/settings/visible-channels'),
   updateVisibleChannels: (channels: readonly UpstreamChannel[]) =>

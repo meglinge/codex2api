@@ -1388,6 +1388,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS antigravity_oauth_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS invite_guide_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS visible_channels_config TEXT DEFAULT '{}';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_upstreams_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS channel_test_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_turn_state_cache_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS antigravity_config TEXT DEFAULT '{}';
@@ -1829,6 +1830,12 @@ type APIKeyLimits struct {
 	// AllowLive 为 true 时，该 Key 可以使用 ChatGPT Live（/v1/live 与
 	// /backend-api/codex/realtime/calls）。默认关闭。
 	AllowLive bool `json:"allow_live,omitempty"`
+	// CodexUpstreamDefaultID 是该 Key 未命中模型路由时使用的 Codex 上游 ID。
+	// 空表示用全局默认上游；全局也未设时回落官方 chatgpt.com Codex 后端。
+	CodexUpstreamDefaultID string `json:"codex_upstream_default_id,omitempty"`
+	// CodexUpstreamRoutes 按请求模型把该 Key 的 Codex 流量指到指定上游。
+	// 未命中的模型走 CodexUpstreamDefaultID，再走全局默认。
+	CodexUpstreamRoutes []CodexUpstreamRoute `json:"codex_upstream_routes,omitempty"`
 	// UpstreamChannel 限定该 Key 的请求只调度到指定上游渠道的账号：
 	//   - ""/auto: 不限（默认，按模型路由）
 	//   - codex:   仅 Codex OAuth / OpenAI Responses 中转账号
@@ -1921,7 +1928,9 @@ func (l APIKeyLimits) IsZero() bool {
 		!l.AutoCompactOnOverflow &&
 		!l.AllowLive &&
 		l.ResolveImageGenerationPolicy() == ImageGenerationPolicyAllow &&
-		l.ResolveUpstreamChannel() == UpstreamChannelAuto
+		l.ResolveUpstreamChannel() == UpstreamChannelAuto &&
+		strings.TrimSpace(l.CodexUpstreamDefaultID) == "" &&
+		len(l.CodexUpstreamRoutes) == 0
 }
 
 type APIKeyInput struct {

@@ -34,6 +34,7 @@ import type {
   APIKeyScopeSummaryItem,
   APIKeyRow,
   APIKeyWindowUsage,
+  CodexUpstream,
   PromptFilterNewAPIBinding,
   SystemSettings,
 } from "../types";
@@ -140,8 +141,15 @@ interface LimitsFormState {
   imageGenerationPolicy: ImageGenerationPolicy;
   allowLive: boolean;
   upstreamChannel: UpstreamChannel;
+  codexUpstreamDefaultId: string;
+  codexUpstreamRoutes: CodexUpstreamRouteForm[];
   scopeLimits: ScopeLimitFormState[];
   modelRequestLimits: ModelRequestLimitFormState[];
+}
+
+interface CodexUpstreamRouteForm {
+  model: string;
+  upstreamId: string;
 }
 
 type ImageGenerationPolicy = "allow" | "strip" | "block";
@@ -259,6 +267,8 @@ const emptyLimitsForm: LimitsFormState = {
   imageGenerationPolicy: "allow",
   allowLive: false,
   upstreamChannel: "auto",
+  codexUpstreamDefaultId: "",
+  codexUpstreamRoutes: [],
   scopeLimits: [],
   modelRequestLimits: [],
 };
@@ -2272,6 +2282,13 @@ export default function APIKeys() {
                 onChange={updateCreateUpstreamChannel}
               />
             </FormField>
+            {createForm.limits.upstreamChannel === "codex" || createForm.limits.upstreamChannel === "auto" ? (
+              <CodexUpstreamFields
+                limits={createForm.limits}
+                modelOptions={modelOptions}
+                onChange={(limits) => updateCreateForm({ limits })}
+              />
+            ) : null}
             {createForm.limits.upstreamChannel === "codex" ? (
               <AllowLiveField
                 checked={createForm.limits.allowLive}
@@ -2463,6 +2480,13 @@ export default function APIKeys() {
                       onChange={updateEditUpstreamChannel}
                     />
                   </FormField>
+                  {editForm.limits.upstreamChannel === "codex" || editForm.limits.upstreamChannel === "auto" ? (
+                    <CodexUpstreamFields
+                      limits={editForm.limits}
+                      modelOptions={modelOptions}
+                      onChange={(limits) => updateEditForm({ limits })}
+                    />
+                  ) : null}
                   {editForm.limits.upstreamChannel === "codex" ? (
                     <AllowLiveField
                       checked={editForm.limits.allowLive}
@@ -2744,6 +2768,11 @@ function limitsFromAPIKey(limits: APIKeyLimits | undefined): LimitsFormState {
       || limits.upstream_channel === "claude"
         ? limits.upstream_channel
         : "auto",
+    codexUpstreamDefaultId: limits.codex_upstream_default_id ?? "",
+    codexUpstreamRoutes: (limits.codex_upstream_routes ?? []).map((route) => ({
+      model: route.model,
+      upstreamId: route.upstream_id,
+    })),
     scopeLimits: scopeLimitsFromAPIKey(limits.scope_limits),
     modelRequestLimits: modelRequestLimitsFromAPIKey(limits.model_request_limits),
   };
@@ -2878,6 +2907,111 @@ function applyUpstreamChannel(
   };
 }
 
+function CodexUpstreamFields({
+  limits,
+  modelOptions,
+  onChange,
+}: {
+  limits: LimitsFormState;
+  modelOptions: string[];
+  onChange: (next: LimitsFormState) => void;
+}) {
+  const { t } = useTranslation();
+  const [upstreams, setUpstreams] = useState<CodexUpstream[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .getCodexUpstreams()
+      .then((res) => {
+        if (!cancelled) setUpstreams((res.upstreams ?? []).filter((item) => item.enabled));
+      })
+      .catch(() => {
+        if (!cancelled) setUpstreams([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const options = [
+    { label: t("apiKeys.limits.codexUpstreamFollowGlobal"), value: "" },
+    ...upstreams.map((item) => ({ label: item.name || item.id, value: item.id })),
+  ];
+  const modelChoices = modelOptions.map((model) => ({ label: model, value: model }));
+  const updateRoute = (index: number, patch: Partial<CodexUpstreamRouteForm>) => {
+    onChange({
+      ...limits,
+      codexUpstreamRoutes: limits.codexUpstreamRoutes.map((route, i) =>
+        i === index ? { ...route, ...patch } : route,
+      ),
+    });
+  };
+  return (
+    <div className="space-y-3 rounded-lg border border-border/70 p-3">
+      <FormField label={t("apiKeys.limits.codexUpstream")} as="div">
+        <Select
+          value={limits.codexUpstreamDefaultId}
+          onValueChange={(codexUpstreamDefaultId) => onChange({ ...limits, codexUpstreamDefaultId })}
+          options={options}
+          compact
+        />
+        <p className="mt-1 text-[11px] text-muted-foreground">{t("apiKeys.limits.codexUpstreamHint")}</p>
+      </FormField>
+      <div className="space-y-2">
+        <div className="text-xs font-medium">{t("apiKeys.limits.codexUpstreamRoutes")}</div>
+        {limits.codexUpstreamRoutes.map((route, index) => (
+          <div key={`${route.model}-${index}`} className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
+            <Select
+              value={route.model}
+              onValueChange={(model) => updateRoute(index, { model })}
+              options={modelChoices.length > 0 ? modelChoices : [{ label: route.model || t("apiKeys.limits.codexUpstreamModel"), value: route.model }]}
+              placeholder={t("apiKeys.limits.codexUpstreamModel")}
+              compact
+            />
+            <Select
+              value={route.upstreamId}
+              onValueChange={(upstreamId) => updateRoute(index, { upstreamId })}
+              options={upstreams.map((item) => ({ label: item.name || item.id, value: item.id }))}
+              placeholder={t("apiKeys.limits.codexUpstreamTarget")}
+              compact
+            />
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              onClick={() =>
+                onChange({
+                  ...limits,
+                  codexUpstreamRoutes: limits.codexUpstreamRoutes.filter((_, i) => i !== index),
+                })
+              }
+            >
+              <Trash2 className="size-4" />
+            </Button>
+          </div>
+        ))}
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={upstreams.length === 0}
+          onClick={() =>
+            onChange({
+              ...limits,
+              codexUpstreamRoutes: [
+                ...limits.codexUpstreamRoutes,
+                { model: modelOptions[0] ?? "", upstreamId: upstreams[0]?.id ?? "" },
+              ],
+            })
+          }
+        >
+          <Plus className="size-4" />
+          {t("apiKeys.limits.codexUpstreamAddRoute")}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function AllowLiveField({
   checked,
   onCheckedChange,
@@ -2985,6 +3119,13 @@ function limitsFormToPayload(form: LimitsFormState, t: Translator): APIKeyLimits
     allow_live: form.upstreamChannel === "codex" && form.allowLive,
     upstream_channel:
       form.upstreamChannel === "auto" ? undefined : form.upstreamChannel,
+    codex_upstream_default_id: form.codexUpstreamDefaultId.trim() || undefined,
+    codex_upstream_routes: form.codexUpstreamRoutes
+      .map((route) => ({
+        model: route.model.trim(),
+        upstream_id: route.upstreamId.trim(),
+      }))
+      .filter((route) => route.model && route.upstream_id),
     model_request_limits: modelRequestLimitsToPayload(form.modelRequestLimits, t),
     scope_limits: form.scopeLimits
       .filter((row) => Number(row.scopeId.trim()) > 0)
