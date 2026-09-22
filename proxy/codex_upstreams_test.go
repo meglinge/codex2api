@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
+	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
 
@@ -111,6 +113,39 @@ func TestExtractUsageKeepsCacheWriteTokens(t *testing.T) {
 	official := extractUsageFromResult(gjson.Parse(`{"input_tokens":10,"output_tokens":2,"input_tokens_details":{"cached_tokens":4}}`))
 	if official.CacheWriteTokens != 0 || official.InputTokensDetails == nil || official.InputTokensDetails.CacheWriteTokens != 0 {
 		t.Fatalf("official usage should not invent cache writes: %+v", official)
+	}
+}
+
+func TestCodexUpstreamRoutesComeFromGinAPIKey(t *testing.T) {
+	SetCodexUpstreamCatalog(database.CodexUpstreamsConfig{
+		Upstreams: []database.CodexUpstream{
+			{ID: "relay-a", Name: "专线", BaseURL: "http://172.17.0.1:8001/nokeyv1", Enabled: true},
+		},
+	})
+	t.Cleanup(func() { SetCodexUpstreamCatalog(database.CodexUpstreamsConfig{}) })
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Set(contextAPIKeyRow, &database.APIKeyRow{
+		Limits: database.APIKeyLimits{
+			CodexUpstreamRoutes: []database.CodexUpstreamRoute{{Model: "gpt-6-astra", UpstreamID: "relay-a"}},
+		},
+	})
+
+	// Key 只在 gin.Context 上。只读 request context 时路由会丢，请求仍打官方。
+	ctx := codexUpstreamRequestContext(c)
+	if RequestUsesOfficialCodexUpstream(ctx, []byte(`{"model":"gpt-6-astra"}`)) {
+		t.Fatal("gin API key route was not copied into the outbound context")
+	}
+	if got := codexUpstreamLogLabel(ctx, "gpt-6-astra"); got != "专线" {
+		t.Fatalf("label = %q", got)
+	}
+	input := &database.UsageLogInput{Model: "gpt-6-astra", UpstreamEndpoint: "/v1/responses"}
+	markCustomCodexUpstream(c, input)
+	if input.UpstreamEndpoint != "custom:专线" {
+		t.Fatalf("log endpoint = %q", input.UpstreamEndpoint)
 	}
 }
 

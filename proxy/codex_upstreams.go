@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/codex2api/database"
+	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
 
@@ -93,32 +94,42 @@ func ResolveRequestCodexBaseURL(ctx context.Context, requestBody []byte) string 
 	return base
 }
 
-// attachCodexUpstreamRoutes 在出站前补上 API Key 的上游路由。
-// 调用方已经写过路由时不覆盖，避免续想轮丢失首轮选定的 Key。
+// codexUpstreamRequestContext 把 API Key 的上游路由写进出站 context。
+// 鉴权把 Key 放在 gin.Context 上，不在 request context 里；出站前不写进去，
+// 模型路由和自定义上游标记都会落空，请求仍打官方 chatgpt.com。
+func codexUpstreamRequestContext(c *gin.Context) context.Context {
+	if c == nil || c.Request == nil {
+		return context.Background()
+	}
+	return attachCodexUpstreamRoutesFromGin(c.Request.Context(), c)
+}
+
+// attachCodexUpstreamRoutes 在已有 context 上补路由。
+// 路由已经写过时不覆盖，避免续想轮丢失首轮选定的 Key。
+// 没有 gin 上下文时只能读 context 里已有的路由，读不到就保持官方。
 func attachCodexUpstreamRoutes(ctx context.Context) context.Context {
+	return attachCodexUpstreamRoutesFromGin(ctx, nil)
+}
+
+func attachCodexUpstreamRoutesFromGin(ctx context.Context, c *gin.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if _, ok := ctx.Value(codexUpstreamRouteKey{}).(codexUpstreamRouteScope); ok {
 		return ctx
 	}
-	row := apiKeyRowFromContextValue(ctx)
+	row := apiKeyRowFromGin(c)
 	if row == nil {
 		return ctx
 	}
 	return WithCodexUpstreamRoutes(ctx, row.Limits.CodexUpstreamDefaultID, row.Limits.CodexUpstreamRoutes)
 }
 
-type ginContextAPIKeyLookup interface {
-	Get(string) (any, bool)
-}
-
-func apiKeyRowFromContextValue(ctx context.Context) *database.APIKeyRow {
-	lookup, ok := ctx.(ginContextAPIKeyLookup)
-	if !ok || lookup == nil {
+func apiKeyRowFromGin(c *gin.Context) *database.APIKeyRow {
+	if c == nil {
 		return nil
 	}
-	value, exists := lookup.Get(contextAPIKeyRow)
+	value, exists := c.Get(contextAPIKeyRow)
 	if !exists || value == nil {
 		return nil
 	}

@@ -1553,7 +1553,7 @@ func markCustomCodexUpstream(c *gin.Context, input *database.UsageLogInput) {
 	if strings.Contains(input.UpstreamEndpoint, "://") {
 		return
 	}
-	ctx := attachCodexUpstreamRoutes(c.Request.Context())
+	ctx := attachCodexUpstreamRoutesFromGin(c.Request.Context(), c)
 	label := codexUpstreamLogLabel(ctx, input.Model)
 	if label == "" {
 		label = codexUpstreamLogLabel(ctx, input.EffectiveModel)
@@ -4197,7 +4197,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			if lastUpstreamCancel != nil {
 				lastUpstreamCancel()
 			}
-			upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
+			upstreamCtx, upstreamCancel := newDrainableUpstreamContext(codexUpstreamRequestContext(c), upstreamDrainTimeout)
 			readCtx := upstreamResponseReadContext(c.Request.Context(), upstreamCtx, continuousRetryPolicy)
 			upstreamCtx = WithCodexClientModel(upstreamCtx, model)
 			lastUpstreamCancel = upstreamCancel
@@ -4980,7 +4980,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		if lastUpstreamCancel != nil {
 			lastUpstreamCancel()
 		}
-		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
+		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(codexUpstreamRequestContext(c), upstreamDrainTimeout)
 		readCtx := upstreamResponseReadContext(c.Request.Context(), upstreamCtx, continuousRetryPolicy)
 		upstreamCtx = context.WithValue(upstreamCtx, encryptedContentSessionKey{}, sessionIdentity.affinityID)
 		upstreamCtx = WithCodexClientModel(upstreamCtx, model)
@@ -5485,7 +5485,7 @@ func (h *Handler) Responses(c *gin.Context) {
 						if lastUpstreamCancel != nil {
 							lastUpstreamCancel()
 						}
-						rctx, rcancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
+						rctx, rcancel := newDrainableUpstreamContext(codexUpstreamRequestContext(c), upstreamDrainTimeout)
 						// A hidden round gets exactly one request on this account. Failures
 						// stay inside the fold and become a synthetic response.incomplete;
 						// encrypted reasoning must never participate in account rotation.
@@ -6970,7 +6970,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		if lastUpstreamCancel != nil {
 			lastUpstreamCancel()
 		}
-		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
+		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(codexUpstreamRequestContext(c), upstreamDrainTimeout)
 		readCtx := upstreamResponseReadContext(c.Request.Context(), upstreamCtx, continuousRetryPolicy)
 		upstreamCtx = context.WithValue(upstreamCtx, encryptedContentSessionKey{}, sessionIdentity.affinityID)
 		upstreamCtx = WithCodexClientModel(upstreamCtx, model)
