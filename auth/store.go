@@ -177,6 +177,10 @@ type Account struct {
 	CodexTurnStates map[string]string
 	// CodexTurnStateCapturedAtMap 每个模型最近一次写入 turn-state 的时间，用于 TTL。
 	CodexTurnStateCapturedAtMap map[string]time.Time
+	// codexRouteCookies 是凭据里按模型载入的 __oailb / __cflb。一个模型一张票据配一组 cookie。
+	// 进程内以 routeCookieJars 为准，账号对象被快照替换后仍按模型回放。
+	codexRouteCookies map[string][]CodexRouteCookie
+	localRouteCookies *routeCookieJar
 	// Timezone 是账号绑定的 IANA 时区（credentials.timezone）。Codex 官方出站路径据此
 	// 改写请求体 environment_context 里的时区与日期（见 proxy/codex_environment_context.go）；
 	// 空 = 不绑定、透传下游值。Claude 账号沿用同一凭据键做身份标签。
@@ -5521,6 +5525,11 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		ClaudeClientVersionOverride:  claudeClientVersionOverride,
 		claudeSessionWindow:          claudeSessionWindowForRow(upstreamType, s.ClaudeSessionWindowLimit()),
 	}
+	var rawRouteCookies any
+	if row.Credentials != nil {
+		rawRouteCookies = row.Credentials[CodexRouteCookiesCredentialKey]
+	}
+	account.adoptStoredRouteCookies(RouteCookiesFromCredential(rawRouteCookies))
 	if strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamClaude) {
 		if observedRaw := strings.TrimSpace(row.GetCredential(ClaudeUsageProbeAtCredentialKey)); observedRaw != "" {
 			if observedAt, parseErr := time.Parse(time.RFC3339, observedRaw); parseErr == nil {

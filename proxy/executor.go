@@ -689,7 +689,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		requestBody, _ = sjson.SetBytes(requestBody, "prompt_cache_key", cacheKey)
 	}
 
-	endpoint := CodexBaseURL + "/responses"
+	logicalEndpoint := CodexBaseURL + "/responses"
 
 	// 出站字节在选客户端之前定稿：send() 会因 Agent Identity 401 重注册而重放，
 	// 两次重放必须发同一份字节。routing hint 等需要读字段的改写点继续用明文
@@ -697,8 +697,8 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	outboundBody, contentEncoding := CompressCodexRequestBody(requestBody)
 
 	// 出口链路统一由 ResolveCodexEgress 决定(Resin > 代理 > 直连,见 egress.go)。
-	egress := ResolveCodexEgress(account, endpoint, proxyURL)
-	endpoint = egress.URL
+	egress := ResolveCodexEgress(account, logicalEndpoint, proxyURL)
+	endpoint := egress.URL
 	client := egress.Client()
 	// 要求全新连接的调用（turn-state ping）绕开共享连接池：换连接才换出口 IP。
 	// Resin 按账号粘连，出口由它决定，这里换不了也不该换。
@@ -717,6 +717,10 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
 		// 凭据级 turn state 注入在账号自定义头之后落定：自定义头不该顶掉它。
 		applyCodexTurnStateInjectionHeader(ctx, req.Header)
+		// 路由 cookie 跟这次请求的模型走，和该模型保存的票据是一对。
+		model := strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())
+		ApplyCodexRouteCookies(ctx, req.Header, account, logicalEndpoint, model)
+		req = req.WithContext(WithCodexRouteCookieScope(req.Context(), logicalEndpoint, model))
 		// Content-Encoding 在通用头装配之后设置：真实客户端也是在编码完成时才补这个头
 		// （codex-rs/http-client/src/request.rs prepare_encoded_json），且账号自定义头
 		// 不该有能力声明一个与实际字节不符的编码。
@@ -1058,11 +1062,11 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	}
 
 	// compact 端点
-	endpoint := CodexBaseURL + "/responses/compact"
+	logicalEndpoint := CodexBaseURL + "/responses/compact"
 
 	// 出口链路统一由 ResolveCodexEgress 决定(Resin > 代理 > 直连,见 egress.go)。
-	egress := ResolveCodexEgress(account, endpoint, proxyURL)
-	endpoint = egress.URL
+	egress := ResolveCodexEgress(account, logicalEndpoint, proxyURL)
+	endpoint := egress.URL
 	client := egress.Client()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(requestBody))
@@ -1072,6 +1076,9 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 
 	applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
 	applyCodexTurnStateInjectionHeader(ctx, req.Header)
+	compactModel := strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())
+	ApplyCodexRouteCookies(ctx, req.Header, account, logicalEndpoint, compactModel)
+	req = req.WithContext(WithCodexRouteCookieScope(req.Context(), logicalEndpoint, compactModel))
 	// routing hint 由网关按最终出站 body 合成，须在账号自定义头之后设置。
 	ApplyCodexRoutingHint(req.Header, account, requestBody)
 

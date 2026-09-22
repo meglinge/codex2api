@@ -404,6 +404,9 @@ func (c *codexTurnStateCache) invalidate(account *auth.Account, model string) {
 		return
 	}
 	account.ClearCodexTurnState(model)
+	if account.ClearCodexRouteCookies(model) {
+		persistCodexRouteCookies(account)
+	}
 	if err := persistAccountCodexTurnStates(context.Background(), c.db, account); err != nil {
 		log.Printf("清除过期 X-Codex-Turn-State 失败 account=%d model=%s: %v", account.ID(), model, err)
 	}
