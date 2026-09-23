@@ -212,11 +212,12 @@ func (h *Handler) testConnection(c *gin.Context, quality *qualityTestRequest) {
 	} else if isOpenAIResponsesAccount {
 		resp, reqErr = proxy.ExecuteRelayStyleRequest(c.Request.Context(), account, payload, proxyURL, extraHeaders)
 	} else {
-		execCtx := c.Request.Context()
+		execCtx := proxy.WithCodexTurnStateAdminProbe(c.Request.Context())
 		if extraHeaders == nil {
-			// Ping 不带头，也不能把账号里已保存的 turn-state 悄悄填回去。
+			// Ping 不带头，也不能把账号里已保存的 turn-state（含模板缓存）悄悄填回去。
 			execCtx = proxy.WithSkipStoredCodexTurnState(execCtx)
 		}
+		c.Request = c.Request.WithContext(execCtx)
 		resp, reqErr = proxy.ExecuteRequest(execCtx, account, payload, "", proxyURL, "", nil, extraHeaders)
 	}
 	if reqErr != nil {
@@ -1073,6 +1074,20 @@ func (h *Handler) connectionTestModelForAccount(ctx context.Context, account *au
 		return antigravityConnectionTestModel(account, requested, defaults...)
 	}
 	if account == nil || !account.IsRelayStyle() {
+		if account != nil {
+			_, scope, _ := account.CodexTurnStateConfig()
+			if strings.TrimSpace(scope) != "" {
+				if requested != "" && !proxy.CodexTurnStateModelAllowed(account, requested) {
+					return "", fmt.Errorf("测试模型不在账号限定模型范围内: %s", requested)
+				}
+				if requested == "" {
+					for _, candidate := range h.codexTurnStateRefreshModels(ctx, account) {
+						return candidate, nil
+					}
+					return "", fmt.Errorf("账号限定范围内没有可用的测试模型")
+				}
+			}
+		}
 		if requested == "" {
 			return h.connectionTestModel(ctx), nil
 		}
@@ -1688,6 +1703,7 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 	} else if acc.IsRelayStyle() {
 		resp, err = proxy.ExecuteRelayStyleRequest(testCtx, acc, payload, h.store.ResolveProxyForAccount(acc), nil)
 	} else {
+		testCtx = proxy.WithCodexTurnStateAdminProbe(testCtx)
 		resp, err = proxy.ExecuteRequest(testCtx, acc, payload, "", h.store.ResolveProxyForAccount(acc), "", nil, nil)
 	}
 	if err != nil {
@@ -1832,6 +1848,7 @@ func (h *Handler) runRecycleBinSingleTest(ctx context.Context, acc *auth.Account
 	} else if acc.IsRelayStyle() {
 		resp, err = proxy.ExecuteRelayStyleRequest(testCtx, acc, payload, h.store.ResolveProxyForAccount(acc), nil)
 	} else {
+		testCtx = proxy.WithCodexTurnStateAdminProbe(testCtx)
 		resp, err = proxy.ExecuteRequest(testCtx, acc, payload, "", h.store.ResolveProxyForAccount(acc), "", nil, nil)
 	}
 	if err != nil {

@@ -7,6 +7,7 @@ import type { ProxyRow } from "../api";
 import { ProxyField } from "../components/ProxyField";
 import AccountProxyBadge from "../components/AccountProxyBadge";
 import AccountProxyQuickEditor from "../components/AccountProxyQuickEditor";
+import CodexTurnStateBadge, { isCodexTurnStateAccount } from "../components/CodexTurnStateBadge";
 import SubscriptionBadge from "../components/SubscriptionBadge";
 import {
   buildProxyBindingContext,
@@ -61,6 +62,7 @@ import type {
   AddOpenAIResponsesAccountRequest,
   CodexClientMetadataMode,
   CodexPassthroughMode,
+  ResponsesUpstreamTransport,
   CodexFingerprintMode,
   UpdateOpenAIResponsesAccountRequest,
   APIKeyRow,
@@ -682,6 +684,7 @@ function codexFingerprintModeOptions(
     { value: "off", label: t("accounts.codexFingerprintModeOff") },
     { value: "device", label: t("accounts.codexFingerprintModeDevice") },
     { value: "session", label: t("accounts.codexFingerprintModeSession") },
+    { value: "single_machine_multi_window", label: t("accounts.codexFingerprintModeSessionIdentity") },
     { value: "full", label: t("accounts.codexFingerprintModeFull") },
   ];
 }
@@ -693,6 +696,8 @@ function codexFingerprintModeDetail(
   switch (mode) {
     case "device":
       return t("accounts.codexFingerprintModeDeviceDetail");
+    case "single_machine_multi_window":
+      return t("accounts.codexFingerprintModeSessionIdentityDetail");
     case "session":
       return t("accounts.codexFingerprintModeSessionDetail");
     case "full":
@@ -1281,7 +1286,7 @@ const AccountTableRow = memo(function AccountTableRow({
                                       t={t}
                                     />
                                   )}
-                                  {(account.at_only ||
+                                  {(isCodexTurnStateAccount(account) || account.at_only ||
                                     account.openai_responses_api ||
                                     account.grok_api ||
                                     account.agent_identity ||
@@ -1338,6 +1343,7 @@ const AccountTableRow = memo(function AccountTableRow({
                                           {account.rate_limit_reset_credits ?? 0}
                                         </button>
                                       )}
+                                      <CodexTurnStateBadge account={account} />
                                       {getCreditBalanceDisplay(account) !==
                                         null && (
                                         <button
@@ -1906,6 +1912,8 @@ export default function Accounts() {
   const [editTimezone, setEditTimezone] = useState("");
   const [editTimezoneCustom, setEditTimezoneCustom] = useState(false);
   // Turn State 强制注入:注入值 + 限定模型(逗号分隔)。仅 Codex 官方账号下发。
+  const [editCodexTurnStateProxyUrl, setEditCodexTurnStateProxyUrl] = useState("");
+  const [editCodexTurnStateDisabled, setEditCodexTurnStateDisabled] = useState(false);
   const [editCodexTurnState, setEditCodexTurnState] = useState("");
   const [editCodexTurnStateModels, setEditCodexTurnStateModels] = useState("");
   // 时效倒计时的时钟源:编辑弹窗打开期间每秒推进一次,关闭即停。
@@ -1937,6 +1945,7 @@ export default function Accounts() {
       models: [],
       codex_client_metadata_mode: "auto",
       codex_passthrough_mode: "off",
+      responses_upstream_transport: "http",
       proxy_url: "",
     });
   const [openAIModelDraft, setOpenAIModelDraft] = useState("");
@@ -2036,6 +2045,7 @@ export default function Accounts() {
       models: [],
       codex_client_metadata_mode: "auto",
       codex_passthrough_mode: "off",
+      responses_upstream_transport: "http",
       proxy_url: "",
     });
   const [openAIModelMappingText, setOpenAIModelMappingText] = useState("");
@@ -3710,6 +3720,7 @@ export default function Accounts() {
         models: [],
         codex_client_metadata_mode: "auto",
         codex_passthrough_mode: "off",
+        responses_upstream_transport: "http",
         proxy_url: "",
       });
       setOpenAIModelDraft("");
@@ -5641,6 +5652,8 @@ export default function Accounts() {
       Boolean(account.timezone && !findClaudeTimezoneOption(account.timezone)),
     );
     setEditCodexTurnState(account.codex_turn_state ?? "");
+    setEditCodexTurnStateProxyUrl(account.codex_turn_state_proxy_url ?? "");
+    setEditCodexTurnStateDisabled(account.codex_turn_state_disabled ?? false);
     setEditCodexTurnStateModels(account.codex_turn_state_models ?? "");
     setEditTags(account.tags ?? []);
     setEditGroupIds(account.group_ids ?? []);
@@ -5654,6 +5667,8 @@ export default function Accounts() {
         account.codex_client_metadata_mode ?? "auto",
       codex_passthrough_mode:
         account.codex_passthrough_mode ?? "off",
+      responses_upstream_transport:
+        account.responses_upstream_transport ?? "http",
       proxy_url: account.proxy_url ?? "",
     });
     setEditOpenAIModelDraft("");
@@ -5713,6 +5728,7 @@ export default function Accounts() {
       models: [],
       codex_client_metadata_mode: "auto",
       codex_passthrough_mode: "off",
+      responses_upstream_transport: "http",
       proxy_url: "",
     });
     setEditOpenAIModelDraft("");
@@ -5864,6 +5880,8 @@ export default function Accounts() {
           ? {
               codex_fingerprint_mode: editCodexFingerprintMode,
               timezone: editTimezone.trim(),
+              codex_turn_state_proxy_url: editCodexTurnStateProxyUrl.trim() || null,
+              codex_turn_state_disabled: editCodexTurnStateDisabled,
               codex_turn_state: editCodexTurnState.trim(),
               codex_turn_state_models: editCodexTurnStateModels.trim(),
             }
@@ -8172,6 +8190,34 @@ export default function Accounts() {
                   </p>
                 </div>
                 <div>
+                  <label className="block mb-2 text-sm font-semibold text-muted-foreground">
+                    {t("accounts.responsesUpstreamTransport")}
+                  </label>
+                  <Select
+                    value={openAIForm.responses_upstream_transport ?? "http"}
+                    onValueChange={(value) =>
+                      setOpenAIForm((form) => ({
+                        ...form,
+                        responses_upstream_transport:
+                          value as ResponsesUpstreamTransport,
+                      }))
+                    }
+                    options={[
+                      {
+                        value: "http",
+                        label: t("accounts.responsesUpstreamHTTP"),
+                      },
+                      {
+                        value: "websocket",
+                        label: t("accounts.responsesUpstreamWebsocket"),
+                      },
+                    ]}
+                  />
+                  <p className="mt-1.5 text-xs text-muted-foreground">
+                    {t("accounts.responsesUpstreamTransportHint")}
+                  </p>
+                </div>
+                <div>
                   <div className="mb-2 flex items-center justify-between gap-2">
                     <label className="text-sm font-semibold text-muted-foreground">
                       {t("accounts.openaiModels")} *
@@ -9335,6 +9381,34 @@ export default function Accounts() {
                         {t("accounts.codexPassthroughHint")}
                       </p>
                     </div>
+                    <div>
+                      <label className="block mb-2 text-xs font-semibold text-muted-foreground">
+                        {t("accounts.responsesUpstreamTransport")}
+                      </label>
+                      <Select
+                        value={editOpenAIForm.responses_upstream_transport ?? "http"}
+                        onValueChange={(value) =>
+                          setEditOpenAIForm((form) => ({
+                            ...form,
+                            responses_upstream_transport:
+                              value as ResponsesUpstreamTransport,
+                          }))
+                        }
+                        options={[
+                          {
+                            value: "http",
+                            label: t("accounts.responsesUpstreamHTTP"),
+                          },
+                          {
+                            value: "websocket",
+                            label: t("accounts.responsesUpstreamWebsocket"),
+                          },
+                        ]}
+                      />
+                      <p className="mt-1.5 text-xs text-muted-foreground">
+                        {t("accounts.responsesUpstreamTransportHint")}
+                      </p>
+                    </div>
 
                     <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs space-y-4">
                       <div>
@@ -9955,6 +10029,36 @@ export default function Accounts() {
                             <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
                               {t("accounts.codexTurnStateHint")}
                             </p>
+                            <div className="mt-3">
+                              <label className="block text-sm font-semibold text-muted-foreground mb-2">
+                                {t("accounts.codexTurnStateSwitchLabel")}
+                              </label>
+                              <Select
+                                value={editCodexTurnStateDisabled ? "off" : "follow"}
+                                onValueChange={(value) => setEditCodexTurnStateDisabled(value === "off")}
+                                options={[
+                                  { value: "follow", label: t("accounts.codexTurnStateFollowGlobal") },
+                                  { value: "off", label: t("accounts.codexTurnStateOff") },
+                                ]}
+                              />
+                              <p className="mt-1.5 text-xs text-muted-foreground">
+                                {t("accounts.codexTurnStateSwitchHint")}
+                              </p>
+                            </div>
+                            <div className="mt-3">
+                              <ProxyField
+                                value={editCodexTurnStateProxyUrl}
+                                onChange={setEditCodexTurnStateProxyUrl}
+                                proxies={proxyPool}
+                                label={t("accounts.codexTurnStateProxyLabel")}
+                                labelClassName="text-sm"
+                                linkedHint={t("accounts.codexTurnStateProxyPoolHint")}
+                                placeholder={t("accounts.proxyUrlPlaceholder")}
+                              />
+                              <p className="mt-1.5 text-xs text-muted-foreground">
+                                {t("accounts.codexTurnStateProxyHint")}
+                              </p>
+                            </div>
                             <div className="mt-3">
                               <div className="flex items-center justify-between mb-2">
                                 <label className="block text-sm font-semibold text-muted-foreground">
@@ -13737,6 +13841,7 @@ function AccountMobileCard({
               </span>
             )}
             <div className="codex-account-card__flags">
+              <CodexTurnStateBadge account={account} />
               <SubscriptionBadge
                 accountId={account.id}
                 subscription={account.subscription}

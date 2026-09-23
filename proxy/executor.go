@@ -527,6 +527,11 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		ctx = context.Background()
 	}
 	ctx = attachCodexUpstreamRoutes(ctx)
+	ctx = BeginCodexTurnStateTemplateAttempt(ctx)
+	headers = headers.Clone()
+	if headers == nil {
+		headers = make(http.Header)
+	}
 	resetUpstreamUserAgentAudit(ctx)
 	resetWsAcquireAudit(ctx)
 	var encryptedAttempt *encryptedContentAttempt
@@ -553,6 +558,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	}
 	// 指纹收敛在 WS/HTTP 分叉前统一改写请求体，两条上游路径共享结果；请求头侧的
 	// 收敛（ApplyCodexFingerprintHeaders）从同一份「账号 + 下游头」推导，取值一致。
+	headers = PrepareCodexFingerprintHeaders(account, headers, requestBody)
 	requestBody = ApplyCodexFingerprintToBody(requestBody, account, headers)
 	// 账号绑定时区：改写 environment_context 的时区/日期，与指纹收敛一样在分叉前统一处理。
 	requestBody = ApplyCodexTimezoneToBody(requestBody, account, time.Now())
@@ -584,6 +590,10 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		apiKey: apiKey, deviceCfg: deviceCfg, headers: telemetryHeaders,
 	})
 	defer func() { telemetryAttempt.observeResult(upstreamResponse, upstreamErr) }()
+	if dedicated := CodexTurnStateRefreshProxy(ctx, account); dedicated != "" {
+		proxyOverride = dedicated
+	}
+
 	// 凭据级 turn state 强制注入：模型已由入口映射/规则定稿，传输方式也已定。
 	// 未配置的账号这里是空操作。自定义上游不注入：防降智只服务官方 Codex 后端。
 	if officialUpstream {
@@ -713,10 +723,16 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	// 出站字节在选客户端之前定稿：send() 会因 Agent Identity 401 重注册而重放，
 	// 两次重放必须发同一份字节。routing hint 等需要读字段的改写点继续用明文
 	// requestBody——它们解析 JSON，拿到压缩帧只会静默失配。
-	outboundBody, contentEncoding := CompressCodexRequestBody(requestBody)
+	var outboundBody []byte
+	var contentEncoding string
+	if pipelineFromContext(ctx) != nil {
+		outboundBody, contentEncoding = compressPipelineRequestBody(requestBody)
+	} else {
+		outboundBody, contentEncoding = CompressCodexRequestBody(requestBody)
+	}
 
 	// 出口链路统一由 ResolveCodexEgress 决定(Resin > 代理 > 直连,见 egress.go)。
-	egress := ResolveCodexEgress(account, logicalEndpoint, proxyURL)
+	egress := ResolveCodexRequestEgress(ctx, account, logicalEndpoint, proxyURL, false)
 	endpoint := egress.URL
 	client := egress.Client()
 	// 要求全新连接的调用（turn-state ping）绕开共享连接池：换连接才换出口 IP。
@@ -726,20 +742,55 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		client, oneShot = newOneShotCodexClient(egress.DialProxyURL)
 	}
 
+	var pipelineFile *os.File
+	var routingHeaders http.Header
+	requestModel := strings.Clone(gjson.GetBytes(requestBody, "model").String())
+	if pipeline := pipelineFromContext(ctx); pipeline != nil {
+		var err error
+		pipelineFile, err = pipeline.spool(outboundBody)
+		if err != nil {
+			return nil, ErrInternalError("cannot spool upstream image request", err)
+		}
+		defer removePipelineFile(pipelineFile)
+		routingHeaders = make(http.Header)
+		ApplyCodexRoutingHint(routingHeaders, account, requestBody)
+		// Queue-generated image requests contain no encrypted input items. Clear
+		// transformed and compressed payloads before waiting on the HTTP transport.
+		requestBody = nil
+		outboundBody = nil
+	}
 	send := func() (*http.Response, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(outboundBody))
+		var reader io.Reader = bytes.NewReader(outboundBody)
+		var input *os.File
+		if pipelineFile != nil {
+			var err error
+			input, err = os.Open(pipelineFile.Name())
+			if err != nil {
+				return nil, err
+			}
+			defer input.Close()
+			reader = input
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, reader)
 		if err != nil {
 			return nil, ErrInternalError("创建请求失败", err)
 		}
 
 		// ==================== 请求头（伪装 Codex CLI） ====================
-		applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
-		// 凭据级 turn state 注入在账号自定义头之后落定：自定义头不该顶掉它。
+		// Outbound turn-state order: Guard (caller) → auto template Apply →
+		// account custom headers → manual credential inject last (ops override).
+		// 按最终请求体中的精确上游 model 查找模板。
+		model := strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())
+		outboundHeaders := headers.Clone()
+		if officialUpstream {
+			ApplyCodexTurnStateTemplate(ctx, outboundHeaders, account, model)
+		}
+		applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, outboundHeaders)
+		// 凭据级 turn state 注入在账号自定义头之后落定：自定义头与自动模板都不该顶掉它。
 		if officialUpstream {
 			applyCodexTurnStateInjectionHeader(ctx, req.Header)
 			// 路由 cookie 跟这次请求的模型走，和该模型保存的票据是一对。
 			// 自定义上游没有这套 __oailb / __cflb，带上去只会暴露官方特征。
-			model := strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())
 			ApplyCodexRouteCookies(ctx, req.Header, account, logicalEndpoint, model)
 			req = req.WithContext(WithCodexRouteCookieScope(req.Context(), logicalEndpoint, model))
 		}
@@ -750,13 +801,30 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 			req.Header.Set("Content-Encoding", contentEncoding)
 		}
 		// routing hint 由网关按最终出站 body 合成，须在账号自定义头之后设置。
-		ApplyCodexRoutingHint(req.Header, account, requestBody)
+		if pipelineFile != nil {
+			stat, err := input.Stat()
+			if err != nil {
+				return nil, err
+			}
+			req.ContentLength = stat.Size()
+			req.GetBody = func() (io.ReadCloser, error) { return os.Open(pipelineFile.Name()) }
+			deleteHeaderCaseInsensitive(req.Header, codexRoutingHintHeader)
+			for key, values := range routingHeaders {
+				req.Header[key] = append([]string(nil), values...)
+			}
+		} else {
+			ApplyCodexRoutingHint(req.Header, account, requestBody)
+		}
 
 		egress.ApplyHeaders(req.Header)
 		logCodexFingerprintDebug("http", account, egress.DialProxyURL, req.Header)
 
-		if err := ConsumeAPIKeyModelRequestQuota(ctx, gjson.GetBytes(requestBody, "model").String()); err != nil {
+		if err := ConsumeAPIKeyModelRequestQuota(ctx, requestModel); err != nil {
 			return nil, err
+		}
+		if pipeline := pipelineFromContext(ctx); pipeline != nil {
+			pipeline.Release()
+			log.Printf("[image-pipeline] job=%d stage=waiting_upstream request_bytes=%d", pipeline.jobID, req.ContentLength)
 		}
 		resp, err := doTracedUpstreamRequest(client, req, account, proxyURL)
 		if err != nil {
@@ -764,6 +832,10 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 				recyclePooledClient(account, proxyURL)
 			}
 			return nil, ErrUpstream(0, "请求上游失败", err)
+		}
+		if officialUpstream {
+			ConfirmCodexTurnStateTemplate(ctx, req.Header, account, gjson.GetBytes(requestBody, "model").String())
+			CaptureCodexTurnStateTemplate(ctx, account, gjson.GetBytes(requestBody, "model").String(), resp.Header)
 		}
 		return resp, nil
 	}
@@ -839,6 +911,11 @@ func ExecuteOpenAIResponsesRequest(ctx context.Context, account *auth.Account, r
 				requestBody, proxyInjectedMetadata = ensureCodexClientInstallationMetadata(requestBody, account, headers)
 			}
 		}
+	}
+	// 账号自行打开的 Responses WebSocket。生图仍走下面的 HTTP。
+	// 握手失败由执行器返回上游状态或传输错误，这里不改回 HTTP。
+	if openAIResponsesRelayUsesUpstreamWebsocket(account, requestBody) {
+		return executeOpenAIResponsesWebsocket(ctx, account, requestBody, proxyURL, headers, baseURL, apiKey)
 	}
 
 	client := getPooledClient(account, proxyURL)
@@ -1022,6 +1099,11 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 		ctx = context.Background()
 	}
 	ctx = attachCodexUpstreamRoutes(ctx)
+	ctx = BeginCodexTurnStateTemplateAttempt(ctx)
+	headers = headers.Clone()
+	if headers == nil {
+		headers = make(http.Header)
+	}
 	resetUpstreamUserAgentAudit(ctx)
 	resetWsAcquireAudit(ctx)
 	var encryptedAttempt *encryptedContentAttempt
@@ -1073,6 +1155,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	// 真实标识，上游看到「头说设备 A、体说设备 B」这种真实客户端不会有的矛盾。
 	// 必须用 prepareCodexResponsesLiteTransport 之后的 headers（它可能返回克隆），
 	// 与下方 applyCodexRequestHeaders 取同一份下游头，两处推导结果才一致。
+	headers = PrepareCodexFingerprintHeaders(account, headers, requestBody)
 	requestBody = ApplyCodexFingerprintToBody(requestBody, account, headers)
 	requestBody = ApplyCodexTimezoneToBody(requestBody, account, time.Now())
 	// 凭据级 turn state 强制注入：compact 与普通轮共用同一条回合状态。
@@ -1094,7 +1177,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	logicalEndpoint := resolveRequestCodexBaseURL(ctx, requestBody) + "/responses/compact"
 
 	// 出口链路统一由 ResolveCodexEgress 决定(Resin > 代理 > 直连,见 egress.go)。
-	egress := ResolveCodexEgress(account, logicalEndpoint, proxyURL)
+	egress := ResolveCodexRequestEgress(ctx, account, logicalEndpoint, proxyURL, false)
 	endpoint := egress.URL
 	client := egress.Client()
 
@@ -1103,6 +1186,10 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 		return nil, ErrInternalError("创建请求失败", err)
 	}
 
+	// compact: same order — template Apply then manual credential inject last.
+	if officialUpstream {
+		ApplyCodexTurnStateTemplate(ctx, headers, account, strings.TrimSpace(gjson.GetBytes(requestBody, "model").String()))
+	}
 	applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
 	if officialUpstream {
 		applyCodexTurnStateInjectionHeader(ctx, req.Header)
@@ -1127,6 +1214,10 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 		return nil, ErrUpstream(0, "请求上游失败", err)
 	}
 
+	if officialUpstream {
+		ConfirmCodexTurnStateTemplate(ctx, req.Header, account, gjson.GetBytes(requestBody, "model").String())
+		CaptureCodexTurnStateTemplate(ctx, account, gjson.GetBytes(requestBody, "model").String(), resp.Header)
+	}
 	return resp, nil
 }
 

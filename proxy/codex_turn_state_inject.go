@@ -69,11 +69,14 @@ func CodexTurnStateInjectionFromContext(ctx context.Context) string {
 // prepareCodexTurnStateInjection 决定并落定注入：返回携带决策的 ctx、（可能克隆的）
 // 下游头与（WS 时改写了帧体的）请求体。未配置或名单未命中时全部原样返回。
 func prepareCodexTurnStateInjection(ctx context.Context, account *auth.Account, requestBody []byte, headers http.Header, websocket bool) (context.Context, []byte, http.Header) {
-	if account == nil {
-		return ctx, requestBody, headers
+	if !CodexTurnStateInjectionEnabled(account) {
+		return withCodexTurnStateInjection(ctx, ""), requestBody, headers
 	}
 	upstreamModel := strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())
 	injected := account.CodexTurnStateInjection(codexClientModelFromContext(ctx), upstreamModel)
+	if candidate, refresh := turnStateRefreshInjection(ctx, account, upstreamModel); refresh {
+		injected = candidate
+	}
 	if injected == "" {
 		return ctx, requestBody, headers
 	}
@@ -177,8 +180,17 @@ func codexTurnStateFromFrame(payload []byte) string {
 
 // ObserveCodexTurnStateFrame 供 WS 中继在逐帧转发时调用：发现上游回带的 turn state
 // 就记到本次尝试的追踪里（用量日志据此显示"回带 Turn State"）。
-func ObserveCodexTurnStateFrame(ctx context.Context, payload []byte) {
-	if state := codexTurnStateFromFrame(payload); state != "" {
+// 只有上游专用 metadata 事件可作为模板来源；response.created/completed
+// 可能回显客户端 metadata，不能将这种回显当成上游新铸造的模板。
+func ObserveCodexTurnStateFrame(ctx context.Context, payload []byte) string {
+	state := codexTurnStateFromFrame(payload)
+	if state != "" {
 		noteUpstreamTurnState(ctx, state)
+	}
+	switch gjson.GetBytes(payload, "type").String() {
+	case "codex.response.metadata", "response.metadata":
+		return state
+	default:
+		return ""
 	}
 }

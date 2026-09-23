@@ -52,7 +52,10 @@ func TestInjectStoredCodexTurnStateSkipContext(t *testing.T) {
 // 账号同时配了凭据级手动注入值与自动缓存值时，手动值优先：出站头与 WS 帧体必须一致，
 // 不能头是手动值、帧体却被自动缓存值盖掉（上游合并 CodexTurnState 注入后的交互回归）。
 func TestInjectStoredCodexTurnStateYieldsToCredentialInjection(t *testing.T) {
+	// 凭据级注入与模板缓存共用同一开关（上游 v3.0.0 起）。
+	enableTurnStateTemplateCache(t)
 	account := &auth.Account{
+		DBID:            1,
 		CodexTurnStates: map[string]string{"gpt-5.6-sol": "saved-blob"},
 		CodexTurnState:  "manual-blob",
 	}

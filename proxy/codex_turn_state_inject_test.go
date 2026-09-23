@@ -19,6 +19,7 @@ func turnStateTraceContext() (context.Context, *upstreamTraceAudit) {
 // 凭据级注入是强制覆盖：写在客户端回带值与账号自定义头之后，还要挺过 HTTP 最后一跳
 // 的头装配；同时出站头与追踪（用量日志）对"注入了没有"必须给出同一个答案。
 func TestExecuteRequestInjectsCredentialTurnState(t *testing.T) {
+	enableTurnStateTemplateCache(t)
 	const injected = "gAAAAABcredential-turn-state"
 	for _, tc := range []struct {
 		name         string
@@ -81,6 +82,7 @@ func TestExecuteRequestInjectsCredentialTurnState(t *testing.T) {
 
 // WS 路径：握手头逐连接冻结，复用连接只认帧体，所以帧体 client_metadata 必须写。
 func TestPrepareCodexTurnStateInjectionWebsocketBody(t *testing.T) {
+	enableTurnStateTemplateCache(t)
 	account := &auth.Account{DBID: 7, CodexTurnState: "ws-state"}
 	ctx, body, headers := prepareCodexTurnStateInjection(context.Background(), account, []byte(`{"model":"gpt-5.5"}`), nil, true)
 	if got := gjson.GetBytes(body, "client_metadata.x-codex-turn-state").String(); got != "ws-state" {

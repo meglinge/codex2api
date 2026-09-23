@@ -153,9 +153,11 @@ func TestUsageLogCompactionStatesRoundTripAndFilter(t *testing.T) {
 }
 
 func TestUsageLogInsertColumnCountIncludesCompactionHistory(t *testing.T) {
-	// 50 legacy + 2 cache-write + 4 trace + 3 image-token + 2 auto turn-state (outbound/inbound)
-	// + 3 user image-billing + 1 ultra + 2 credential turn-state (injected/upstream) fields.
-	const want = 68
+	// 50 legacy + 2 cache-write + 4 trace + 3 image-token + 3 user image-billing + 1 ultra +
+	// 2 manual inject/observe turn-state + 2 auto template audit turn-state fields +
+	// 2 upstream response model audit fields (upstream_response_model / upstream_model_mismatch) +
+	// 2 per-model auto turn-state (outbound/inbound) + 1 echoed upstream_model.
+	const want = 72
 	if usageLogInsertColumnCount != want {
 		t.Fatalf("usageLogInsertColumnCount = %d, want %d", usageLogInsertColumnCount, want)
 	}
