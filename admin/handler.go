@@ -1171,7 +1171,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.PATCH("/accounts/:id/models", h.UpdateAccountModels)
 	api.POST("/accounts/:id/models/sync-upstream", h.SyncAccountUpstreamModels)
 	api.POST("/accounts/:id/models/probe", h.ProbeAccountModels)
-	api.POST("/accounts/:id/turn-state/refresh", h.RefreshCodexTurnStateTemplates)
+
 	api.GET("/codex-turn-state/renewals", h.ListCodexTurnStateHistory)
 	api.PATCH("/accounts/:id/scheduler", h.UpdateAccountScheduler)
 	api.DELETE("/accounts/:id", h.DeleteAccount)
@@ -1222,6 +1222,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/:id/subscription/refresh", h.RefreshAccountSubscription)
 	api.GET("/accounts/:id/auth-json", h.GetAccountAuthJSON)
 	api.PATCH("/accounts/:id/credit", h.UpdateAccountCredit)
+	api.PATCH("/accounts/:id/use-tickets", h.UpdateAccountUseTickets)
 	api.POST("/accounts/batch-test", h.BatchTest)
 	api.POST("/accounts/batch-refresh", h.BatchRefreshAccounts)
 	api.POST("/accounts/batch-refresh-usage", h.BatchRefreshCodexUsage)
@@ -1261,6 +1262,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/account-groups", h.CreateAccountGroup)
 	api.PATCH("/account-groups/:id", h.UpdateAccountGroup)
 	api.DELETE("/account-groups/:id", h.DeleteAccountGroup)
+	h.registerFreePoolRoutes(api)
 	api.GET("/health", h.GetHealth)
 	api.GET("/runtime-status", h.GetRuntimeStatus)
 	api.GET("/system/update", h.GetSystemUpdate)
@@ -1668,6 +1670,7 @@ type accountResponse struct {
 	// 状态仍是 active（可调度），前端据此在状态徽章旁并列一个「使用积分」徽章。
 	UsingCredits                  bool                        `json:"using_credits,omitempty"`
 	SkipWarmTier                  bool                        `json:"skip_warm_tier"`
+	UseTickets                    bool                        `json:"use_tickets"`
 	AccountType                   string                      `json:"account_type,omitempty"`
 	AccessTokenType               string                      `json:"access_token_type,omitempty"`
 	OpenAIResponsesAPI            bool                        `json:"openai_responses_api,omitempty"`
@@ -6425,10 +6428,11 @@ type batchAccountIDsRequest struct {
 
 type batchUpdateAccountsReq struct {
 	updateAccountSchedulerReq
-	IDs      *[]int64                  `json:"ids"`
-	Selector *accountOperationSelector `json:"selector,omitempty"`
-	Enabled  *bool                     `json:"enabled"`
-	Locked   *bool                     `json:"locked"`
+	IDs        *[]int64                  `json:"ids"`
+	Selector   *accountOperationSelector `json:"selector,omitempty"`
+	Enabled    *bool                     `json:"enabled"`
+	Locked     *bool                     `json:"locked"`
+	UseTickets *bool                     `json:"use_tickets"`
 }
 
 func (h *Handler) accountOperationIdentity(id int64) (string, string) {
@@ -6885,7 +6889,12 @@ func (h *Handler) BatchUpdateAccounts(c *gin.Context) {
 	}
 	enabled := optionalBoolFromPtr(req.Enabled)
 	locked := optionalBoolFromPtr(req.Locked)
-	if !enabled.Set && !locked.Set && !schedulerUpdate.hasChanges() {
+	useTickets := optionalBoolFromPtr(req.UseTickets)
+	if useTickets.Set && !h.db.FreePoolSupported() {
+		writeError(c, http.StatusNotImplemented, "票池需要 SQLite 或 PostgreSQL")
+		return
+	}
+	if !enabled.Set && !locked.Set && !useTickets.Set && !schedulerUpdate.hasChanges() {
 		writeError(c, http.StatusBadRequest, "请提供要更新的字段")
 		return
 	}
@@ -6945,9 +6954,24 @@ func (h *Handler) BatchUpdateAccounts(c *gin.Context) {
 		}
 	}
 
-	updatedIDs, err := h.db.BatchUpdateAccountMetadata(ctx, ids, database.BatchAccountMetadataUpdate{
+	ticketIDs := ids
+	if useTickets.Set && useTickets.Value {
+		ticketIDs = make([]int64, 0, len(ids))
+		for _, id := range ids {
+			account := h.store.FindByID(id)
+			if account != nil && !account.IsCodexAgentIdentity() && strings.TrimSpace(account.UpstreamType) == "" && !account.IsGrokAPI() && !account.IsClaudeAPIKey() && !account.IsAntigravityAPI() {
+				ticketIDs = append(ticketIDs, id)
+			}
+		}
+		if len(ticketIDs) == 0 && !enabled.Set && !locked.Set && !schedulerUpdate.hasChanges() {
+			writeError(c, http.StatusUnprocessableEntity, "所选账号都不支持 Free 票池")
+			return
+		}
+	}
+	metadata := database.BatchAccountMetadataUpdate{
 		Enabled:                 enabled,
 		Locked:                  locked,
+		UseTickets:              useTickets,
 		ScoreBiasOverride:       schedulerUpdate.ScoreBiasOverride,
 		BaseConcurrencyOverride: schedulerUpdate.BaseConcurrencyOverride,
 		SkipWarmTier:            schedulerUpdate.SkipWarmTier,
@@ -6956,10 +6980,20 @@ func (h *Handler) BatchUpdateAccounts(c *gin.Context) {
 		GroupIDs:                schedulerUpdate.GroupIDs,
 		ProxyURL:                schedulerUpdate.ProxyURL,
 		CredentialUpdates:       schedulerUpdate.CredentialUpdates,
-	})
+	}
+	if useTickets.Set && useTickets.Value && len(ticketIDs) != len(ids) {
+		metadata.UseTickets = database.OptionalBool{}
+	}
+	updatedIDs, err := h.db.BatchUpdateAccountMetadata(ctx, ids, metadata)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "批量更新账号失败: "+err.Error())
 		return
+	}
+	if useTickets.Set && !metadata.UseTickets.Set {
+		if _, err := h.db.BatchUpdateAccountMetadata(ctx, ticketIDs, database.BatchAccountMetadataUpdate{UseTickets: useTickets}); err != nil {
+			writeError(c, http.StatusInternalServerError, "批量更新账号失败: "+err.Error())
+			return
+		}
 	}
 
 	if h.store != nil {
@@ -6978,6 +7012,11 @@ func (h *Handler) BatchUpdateAccounts(c *gin.Context) {
 					} else {
 						atomic.StoreInt32(&acc.Locked, 0)
 					}
+				}
+			}
+			if useTickets.Set && containsInt64(ticketIDs, id) {
+				if acc := h.store.FindByID(id); acc != nil {
+					acc.SetUseTickets(useTickets.Value)
 				}
 			}
 			h.applyAccountSchedulerRuntimeUpdate(id, schedulerUpdate)

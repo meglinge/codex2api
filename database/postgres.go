@@ -18,8 +18,9 @@ import (
 
 	"github.com/codex2api/internal/openaiidentity"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	_ "github.com/jackc/pgx/v5/stdlib"
+	pgxstdlib "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
 
@@ -48,6 +49,7 @@ type AccountRow struct {
 	CreditEnabled           bool
 	CreditSkipUsageWindow   bool
 	SkipWarmTier            bool
+	UseTickets              bool
 	ScoreBiasOverride       sql.NullInt64
 	BaseConcurrencyOverride sql.NullInt64
 	Tags                    []string
@@ -93,6 +95,7 @@ type OptionalNullInt64 struct {
 type BatchAccountMetadataUpdate struct {
 	Enabled                 OptionalBool
 	Locked                  OptionalBool
+	UseTickets              OptionalBool
 	ScoreBiasOverride       OptionalNullInt64
 	BaseConcurrencyOverride OptionalNullInt64
 	SkipWarmTier            OptionalBool
@@ -106,6 +109,7 @@ type BatchAccountMetadataUpdate struct {
 func (u BatchAccountMetadataUpdate) HasChanges() bool {
 	return u.Enabled.Set ||
 		u.Locked.Set ||
+		u.UseTickets.Set ||
 		u.ScoreBiasOverride.Set ||
 		u.BaseConcurrencyOverride.Set ||
 		u.SkipWarmTier.Set ||
@@ -230,6 +234,8 @@ type DB struct {
 	logFlushNotify        chan struct{}
 	accountInsertMu       sync.Mutex
 	sqliteWriteSem        chan struct{}
+	freePoolWriteSem      chan struct{}
+	freePoolClaimSweep    atomic.Int64
 	sqliteSingleConn      bool
 
 	// 配了 scope 累计额度的 API Key 集合（issue #439 v2）。落库热路径靠它跳过
@@ -374,6 +380,24 @@ type usageLogEntry struct {
 	PromptPolicyIncidentID string
 }
 
+// openPostgresWithSearchPath applies search_path on every new connection.
+// A startup search_path parameter is visible to SHOW on the test server but
+// does not enter the schema search list, so schema-scoped pools cannot rely
+// on it.
+func openPostgresWithSearchPath(dsn, schema string) (*sql.DB, error) {
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return nil, err
+	}
+	delete(cfg.RuntimeParams, "search_path")
+	delete(cfg.RuntimeParams, "options")
+	connector := pgxstdlib.GetConnector(*cfg, pgxstdlib.OptionAfterConnect(func(ctx context.Context, conn *pgx.Conn) error {
+		_, err := conn.Exec(ctx, "SET search_path TO "+quotePostgresIdent(schema)+", public")
+		return err
+	}))
+	return sql.OpenDB(connector), nil
+}
+
 // New 创建数据库连接并自动建表。
 // schema 仅对 PostgreSQL 生效；为空时保持数据库默认 search_path。
 func New(driver string, dsn string, schema ...string) (*DB, error) {
@@ -394,7 +418,13 @@ func New(driver string, dsn string, schema ...string) (*DB, error) {
 	}
 	sqliteSingleConn := driver == "sqlite" && strings.TrimSpace(dsn) == ":memory:"
 
-	conn, err := sql.Open(driverName, dsn)
+	var conn *sql.DB
+	var err error
+	if driver == "postgres" && pgSchema != "" {
+		conn, err = openPostgresWithSearchPath(dsn, pgSchema)
+	} else {
+		conn, err = sql.Open(driverName, dsn)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("连接数据库失败: %w", err)
 	}
@@ -434,6 +464,9 @@ func New(driver string, dsn string, schema ...string) (*DB, error) {
 	}
 	if db.isSQLite() {
 		db.sqliteWriteSem = make(chan struct{}, 1)
+	}
+	if driver == "postgres" {
+		db.freePoolWriteSem = make(chan struct{}, 1)
 	}
 	db.authCacheScope = apiKeyAuthDatabaseScope(driver, dsn, pgSchema)
 	db.SetUsageLogConfig(defaultUsageLogMode, defaultUsageLogBatchSize, defaultUsageLogFlushIntervalSeconds)
@@ -1150,6 +1183,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS skip_warm_tier BOOLEAN DEFAULT FALSE;
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS note TEXT DEFAULT '';
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS credential_generation BIGINT NOT NULL DEFAULT 1;
+	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS use_tickets BOOLEAN NOT NULL DEFAULT FALSE;
 
 	CREATE TABLE IF NOT EXISTS account_groups (
 		id                        SERIAL PRIMARY KEY,
@@ -1783,6 +1817,9 @@ func (db *DB) migrate(ctx context.Context) error {
 	defer migrateCancel()
 	if _, err = db.conn.ExecContext(migrateCtx, migrateQuery); err != nil {
 		return err
+	}
+	if err := db.ensureFreePoolPostgresSchema(ctx); err != nil {
+		return fmt.Errorf("initialize free pool schema: %w", err)
 	}
 	return db.runDataMigrationsWithTimeout()
 }
@@ -4412,7 +4449,7 @@ func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 		OutboundCodexTurnState: log.OutboundCodexTurnState,
 		InboundCodexTurnState:  log.InboundCodexTurnState,
 		TurnStateOverridden:    log.TurnStateOverridden,
-		TurnStateRewriteNote:   clampUsageLogText(log.TurnStateRewriteNote, usageLogShortTextMaxLen),
+		TurnStateRewriteNote:   clampUsageLogText(log.TurnStateRewriteNote, usageLogTurnStateMaxLen),
 		InternalReason:         clampUsageLogText(log.InternalReason, usageLogShortTextMaxLen),
 		ParentRequestID:        clampUsageLogText(log.ParentRequestID, usageLogRequestIDMaxLen),
 		Endpoint:               clampUsageLogText(log.Endpoint, usageLogTextMaxLen),
@@ -6922,7 +6959,7 @@ func (db *DB) ListActiveByChannel(ctx context.Context, channel string) ([]*Accou
 	where += accountChannelFilterSQL(channel, upstreamTypeExpr)
 
 	query := `
-		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(enabled, true), COALESCE(locked, false), COALESCE(credit_enabled, false), COALESCE(credit_skip_usage_window, false), COALESCE(skip_warm_tier, false), score_bias_override, base_concurrency_override, COALESCE(tags, '[]'), COALESCE(note, ''), created_at, updated_at, COALESCE(credential_generation, 1), COALESCE(credential_family_id, '')
+		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(enabled, true), COALESCE(locked, false), COALESCE(credit_enabled, false), COALESCE(credit_skip_usage_window, false), COALESCE(skip_warm_tier, false), score_bias_override, base_concurrency_override, COALESCE(tags, '[]'), COALESCE(note, ''), created_at, updated_at, COALESCE(credential_generation, 1), COALESCE(credential_family_id, ''), ` + db.accountUseTicketsSQL() + `
 		FROM accounts
 		WHERE ` + where + `
 		ORDER BY id
@@ -6965,6 +7002,7 @@ func (db *DB) ListActiveByChannel(ctx context.Context, channel string) ([]*Accou
 			&updatedAtRaw,
 			&a.CredentialGeneration,
 			&a.CredentialFamilyID,
+			&a.UseTickets,
 		); err != nil {
 			return nil, fmt.Errorf("扫描账号行失败: %w", err)
 		}
@@ -7154,7 +7192,7 @@ func (db *DB) getAccountByID(ctx context.Context, id int64, includeDeleted bool)
 		deletedFilter = ""
 	}
 	query := `
-		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(enabled, true), COALESCE(locked, false), COALESCE(credit_enabled, false), COALESCE(credit_skip_usage_window, false), COALESCE(skip_warm_tier, false), score_bias_override, base_concurrency_override, COALESCE(tags, '[]'), COALESCE(note, ''), created_at, updated_at, COALESCE(credential_generation, 1), COALESCE(credential_family_id, '')
+		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(enabled, true), COALESCE(locked, false), COALESCE(credit_enabled, false), COALESCE(credit_skip_usage_window, false), COALESCE(skip_warm_tier, false), score_bias_override, base_concurrency_override, COALESCE(tags, '[]'), COALESCE(note, ''), created_at, updated_at, COALESCE(credential_generation, 1), COALESCE(credential_family_id, ''), ` + db.accountUseTicketsSQL() + `
 		FROM accounts
 		WHERE id = $1 ` + deletedFilter + `
 		LIMIT 1
@@ -7189,6 +7227,7 @@ func (db *DB) getAccountByID(ctx context.Context, id int64, includeDeleted bool)
 		&updatedAtRaw,
 		&a.CredentialGeneration,
 		&a.CredentialFamilyID,
+		&a.UseTickets,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -7536,6 +7575,9 @@ func (db *DB) batchUpdateAccountColumns(ctx context.Context, tx *sql.Tx, ids []i
 	if update.Locked.Set {
 		add("locked", update.Locked.Value, false)
 	}
+	if update.UseTickets.Set {
+		add("use_tickets", update.UseTickets.Value, true)
+	}
 	if update.ScoreBiasOverride.Set {
 		add("score_bias_override", nullableInt64Value(update.ScoreBiasOverride.Value), true)
 	}
@@ -7654,18 +7696,20 @@ func nullableInt64Value(v sql.NullInt64) interface{} {
 
 // SetAccountEnabled 设置账号是否参与调度选择
 func (db *DB) SetAccountEnabled(ctx context.Context, id int64, enabled bool) error {
-	res, err := db.conn.ExecContext(ctx, `UPDATE accounts SET enabled = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`, enabled, id)
-	if err != nil {
-		return err
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
+	return db.withSQLiteWriteLock(ctx, func() error {
+		res, err := db.conn.ExecContext(ctx, `UPDATE accounts SET enabled = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`, enabled, id)
+		if err != nil {
+			return err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			return sql.ErrNoRows
+		}
+		return nil
+	})
 }
 
 // SetAccountLocked 设置账号的锁定状态
@@ -8125,7 +8169,7 @@ func (db *DB) SoftDeleteAccount(ctx context.Context, id int64) error {
 // ListDeleted 获取回收站中的账号（被软删除、尚未彻底清除的账号）。
 func (db *DB) ListDeleted(ctx context.Context) ([]*AccountRow, error) {
 	query := `
-		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(enabled, true), COALESCE(locked, false), COALESCE(credit_enabled, false), COALESCE(credit_skip_usage_window, false), COALESCE(skip_warm_tier, false), score_bias_override, base_concurrency_override, COALESCE(tags, '[]'), COALESCE(note, ''), created_at, updated_at, deleted_at, COALESCE(credential_generation, 1), COALESCE(credential_family_id, '')
+		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(enabled, true), COALESCE(locked, false), COALESCE(credit_enabled, false), COALESCE(credit_skip_usage_window, false), COALESCE(skip_warm_tier, false), score_bias_override, base_concurrency_override, COALESCE(tags, '[]'), COALESCE(note, ''), created_at, updated_at, deleted_at, COALESCE(credential_generation, 1), COALESCE(credential_family_id, ''), ` + db.accountUseTicketsSQL() + `
 		FROM accounts
 		WHERE status = 'deleted' OR COALESCE(error_message, '') = 'deleted'
 		ORDER BY deleted_at DESC, id DESC
@@ -8170,6 +8214,7 @@ func (db *DB) ListDeleted(ctx context.Context) ([]*AccountRow, error) {
 			&deletedAtRaw,
 			&a.CredentialGeneration,
 			&a.CredentialFamilyID,
+			&a.UseTickets,
 		); err != nil {
 			return nil, fmt.Errorf("扫描回收站账号行失败: %w", err)
 		}

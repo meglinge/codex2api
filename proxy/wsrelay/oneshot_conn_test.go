@@ -79,7 +79,7 @@ func TestEnsureAccountConnectionCapacityEvictsOneShotFirst(t *testing.T) {
 	newPooledConn(t, manager, 1, "stateless-11111111-aaaa-bbbb-cccc-000000000003", oneShotKey, now)
 
 	// count=2, pending=1, limit=3：需腾出 1 个槽位，应先逐出一次性连接。
-	if !manager.ensureAccountConnectionCapacity(1, 3, "", 1) {
+	if !manager.ensureAccountConnectionCapacity(1, 3, "", 1, true) {
 		t.Fatal("expected capacity reservation to succeed after evicting one-shot conn")
 	}
 	if _, ok := manager.connections.Load(oneShotKey); ok {

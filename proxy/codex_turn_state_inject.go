@@ -69,9 +69,27 @@ func CodexTurnStateInjectionFromContext(ctx context.Context) string {
 // prepareCodexTurnStateInjection 决定并落定注入：返回携带决策的 ctx、（可能克隆的）
 // 下游头与（WS 时改写了帧体的）请求体。未配置或名单未命中时全部原样返回。
 func prepareCodexTurnStateInjection(ctx context.Context, account *auth.Account, requestBody []byte, headers http.Header, websocket bool) (context.Context, []byte, http.Header) {
-	if !CodexTurnStateInjectionEnabled(account) {
-		return withCodexTurnStateInjection(ctx, ""), requestBody, headers
+	if use := freePoolUseFromContext(ctx); use != nil {
+		state := use.request.Lease.ConsumerState
+		ctx = withCodexTurnStateInjection(ctx, state)
+		headers = headers.Clone()
+		if headers == nil {
+			headers = make(http.Header)
+		}
+		deleteHeaderCaseInsensitive(headers, codexTurnStateHeader)
+		if state != "" {
+			headers.Set(codexTurnStateHeader, state)
+		}
+		if websocket && state != "" {
+			if updated, err := sjson.SetBytes(requestBody, "client_metadata."+codexTurnStateMetadataKey, state); err == nil {
+				requestBody = updated
+			}
+		} else if updated, err := sjson.DeleteBytes(requestBody, "client_metadata."+codexTurnStateMetadataKey); err == nil {
+			requestBody = updated
+		}
+		return ctx, requestBody, headers
 	}
+	return withCodexTurnStateInjection(ctx, ""), requestBody, headers
 	upstreamModel := strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())
 	injected := account.CodexTurnStateInjection(codexClientModelFromContext(ctx), upstreamModel)
 	if candidate, refresh := turnStateRefreshInjection(ctx, account, upstreamModel); refresh {
@@ -103,7 +121,15 @@ func applyCodexTurnStateInjectionHeader(ctx context.Context, headers http.Header
 	if headers == nil {
 		return
 	}
+	if freePoolUseFromContext(ctx) != nil {
+		deleteHeaderCaseInsensitive(headers, codexTurnStateHeader)
+		if value := CodexTurnStateInjectionFromContext(ctx); value != "" {
+			headers.Set(codexTurnStateHeader, value)
+		}
+		return
+	}
 	if value := CodexTurnStateInjectionFromContext(ctx); value != "" {
+		deleteHeaderCaseInsensitive(headers, codexTurnStateHeader)
 		headers.Set(codexTurnStateHeader, value)
 	}
 }
@@ -186,6 +212,7 @@ func ObserveCodexTurnStateFrame(ctx context.Context, payload []byte) string {
 	state := codexTurnStateFromFrame(payload)
 	if state != "" {
 		noteUpstreamTurnState(ctx, state)
+		noteFreePoolReturnedState(ctx, state)
 	}
 	switch gjson.GetBytes(payload, "type").String() {
 	case "codex.response.metadata", "response.metadata":

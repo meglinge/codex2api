@@ -13,7 +13,12 @@ import (
 // 发出，否则所有账号会共享本机出口 IP 直连，与该账号 /responses 流量的出口不一致
 // （issue #372 的不变量）。metrics 端点虽不带 Bearer，但真实客户端从同一出口发出，
 // 这里保持一致。
-func sendCodexTelemetryJob(job codexTelemetryJob) error {
+func sendCodexTelemetryJob(job codexTelemetryJob) (resultErr error) {
+	defer func() {
+		if resultErr != nil && job.client.account != nil && job.client.account.ID() < 0 {
+			resultErr = errFreePoolTelemetry
+		}
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), codexTelemetryTimeout)
 	defer cancel()
 	finalURL, resinClient, viaResin := resinMaintenanceTarget(job.client.account, job.url)

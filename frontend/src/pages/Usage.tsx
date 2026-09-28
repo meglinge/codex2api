@@ -1222,29 +1222,61 @@ function UserAgentCell({ log, mobile = false }: { log: UsageLog; mobile?: boolea
 
 // New usage rows resolve by immutable incident ID. Only historical rows without
 // an ID fall back to the legacy nearest-timestamp inference endpoint.
+function freePoolSwitchReason(reason: string, t: (key: string, options?: Record<string, unknown>) => string) {
+  const key = `usage.freePoolSwitch.${reason}`
+  const label = t(key)
+  return label === key ? reason : label
+}
+
+function freePoolTicketParts(note: string, t: (key: string, options?: Record<string, unknown>) => string) {
+  const match = note.match(/fp:(new|reuse):(\d+)(?::switch:(\d+)(?::(.+))?)?/)
+  if (!match) return { ticket: '', switches: '', detail: '' }
+  const detail = (match[4] || '').split(',').filter(Boolean).map((item) => {
+    const [id, reason = 'validation'] = item.split('=')
+    return `#${id} ${freePoolSwitchReason(reason, t)}`
+  }).join('\n')
+  return {
+    ticket: match[1] === 'reuse' ? t('usage.freePoolTicketReuse', { id: match[2] }) : t('usage.freePoolTicketNew', { id: match[2] }),
+    switches: match[3] ? t('usage.freePoolTicketSwitch', { count: match[3] }) : '',
+    detail,
+  }
+}
+
 function TurnStateTemplateBadge({ log }: { log: UsageLog }) {
   const { t } = useTranslation()
   const note = log.turn_state_rewrite_note?.trim() || ''
+  const ticket = freePoolTicketParts(note, t)
   const overridden = Boolean(log.turn_state_overridden)
-  if (!note && !overridden) {
+  if (!note && !overridden && !ticket.ticket) {
     return null
   }
-  const label = overridden
-    ? (note || t('usage.turnStateOverridden'))
-    : (note === 'pass' ? t('usage.turnStatePreserved') : (note || t('usage.turnStatePreserved')))
+  const plain = note.replace(/\s*fp:(?:new|reuse):\d+(?::switch:\d+(?::[^\s]+)?)?/, '').trim()
+  const label = plain
+    ? (overridden ? plain : (plain === 'pass' ? t('usage.turnStatePreserved') : plain))
+    : (overridden ? t('usage.turnStateOverridden') : '')
   return (
-    <div className="mt-1 flex min-w-0 items-center gap-1.5 font-mono text-[11px] leading-relaxed" title={t('usage.turnStateLabel')}>
-      <span className="shrink-0 font-sans font-semibold text-muted-foreground">TS</span>
-      <Badge
-        variant="outline"
-        className={`shrink-0 border-transparent px-1.5 py-0 text-[10px] font-semibold ${
-          overridden
-            ? 'bg-amber-500/12 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300'
-            : 'bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300'
-        }`}
-      >
-        {label}
-      </Badge>
+    <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 font-mono text-[11px] leading-relaxed" title={t('usage.turnStateLabel')}>
+      {ticket.ticket ? <Badge variant="outline" className="shrink-0 border-transparent bg-sky-500/12 px-1.5 py-0 text-[10px] font-semibold text-sky-700 dark:bg-sky-500/20 dark:text-sky-300">{ticket.ticket}</Badge> : null}
+      {ticket.switches ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge variant="outline" className="shrink-0 cursor-help border-transparent bg-amber-500/12 px-1.5 py-0 text-[10px] font-semibold text-amber-700 dark:bg-amber-500/20 dark:text-amber-300">{ticket.switches}</Badge>
+          </TooltipTrigger>
+          <TooltipContent side="top" className="max-w-xs whitespace-pre-line text-xs leading-relaxed">{ticket.detail}</TooltipContent>
+        </Tooltip>
+      ) : null}
+      {label ? (
+        <Badge
+          variant="outline"
+          className={`shrink-0 border-transparent px-1.5 py-0 text-[10px] font-semibold ${
+            overridden
+              ? 'bg-amber-500/12 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300'
+              : 'bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300'
+          }`}
+        >
+          {label}
+        </Badge>
+      ) : null}
     </div>
   )
 }

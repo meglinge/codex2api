@@ -222,6 +222,9 @@ func isCodexTurnStateModelUnavailable(err error) bool {
 }
 
 func ensureCodexTurnStateReady(ctx context.Context, account *auth.Account, body []byte) (context.Context, error) {
+	if FreePoolInUse(ctx) || (account != nil && account.UsesTickets()) {
+		return ctx, nil
+	}
 	if skipStoredCodexTurnState(ctx) || account == nil {
 		return ctx, nil
 	}
@@ -272,6 +275,9 @@ func codexTurnStateModelUnavailableError(cause error) error {
 // 供管理页的「强制刷新」按钮使用，返回新的 blob。只等一轮；轮失败时后台循环
 // 照常继续。
 func RefreshCodexTurnStateNow(ctx context.Context, account *auth.Account, model string) (string, error) {
+	if account != nil && account.UsesTickets() {
+		return "", FreePoolRequestError("legacy_refresh_disabled")
+	}
 	cache := currentCodexTurnStateCache()
 	if cache == nil {
 		return "", fmt.Errorf("X-Codex-Turn-State 缓存未初始化")
@@ -434,6 +440,9 @@ func withExpectedCodexTurnState(ctx context.Context, account *auth.Account, mode
 }
 
 func observeCodexTurnStateInbound(ctx context.Context, inbound string) {
+	if freePoolSensitive(ctx) {
+		return
+	}
 	inbound = strings.TrimSpace(inbound)
 	if inbound == "" || ctx == nil {
 		return
@@ -473,6 +482,9 @@ func (c *codexTurnStateCache) invalidate(account *auth.Account, model string) {
 // refresh 确保这一格有刷新循环在跑，并等当前这一轮的结果。ctx 取消只放走调用方，
 // 循环本身不受影响。
 func (c *codexTurnStateCache) refresh(ctx context.Context, account *auth.Account, model string) (string, error) {
+	if account != nil && account.UsesTickets() {
+		return "", FreePoolRequestError("legacy_refresh_disabled")
+	}
 	if c == nil || account == nil {
 		return "", fmt.Errorf("X-Codex-Turn-State 缓存未初始化")
 	}
@@ -514,6 +526,9 @@ func (c *codexTurnStateCache) refresh(ctx context.Context, account *auth.Account
 
 // refreshStopReason 报告刷新循环是否该退出。空串表示继续。
 func (c *codexTurnStateCache) refreshStopReason(account *auth.Account, model string, waiter *codexTurnStateRefreshWaiter) string {
+	if account != nil && account.UsesTickets() {
+		return "账号已切换到 Free 票池"
+	}
 	select {
 	case <-waiter.stop:
 		return "账号已移除"
@@ -619,6 +634,9 @@ func (c *codexTurnStateCache) runRefresh(account *auth.Account, model, key strin
 }
 
 func persistAccountCodexTurnStates(ctx context.Context, db *database.DB, account *auth.Account) error {
+	if account != nil && account.UsesTickets() {
+		return nil
+	}
 	if db == nil || account == nil {
 		return nil
 	}

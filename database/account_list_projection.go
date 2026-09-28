@@ -77,7 +77,7 @@ func (db *DB) ListAccountListProjection(ctx context.Context, channel string) ([]
 	query := `SELECT id, name, type, proxy_url, status, cooldown_reason, cooldown_until,
 		COALESCE(error_message, ''), COALESCE(enabled, true), COALESCE(locked, false),
 		score_bias_override, base_concurrency_override, COALESCE(tags, '[]'), created_at, updated_at,
-		COALESCE(credential_generation, 1), COALESCE(credential_family_id, ''),` + credentialColumns + `
+		COALESCE(credential_generation, 1), COALESCE(credential_family_id, ''), ` + db.accountUseTicketsSQL() + `,` + credentialColumns + `
 		` + fromClause + ` WHERE ` + where + ` ORDER BY id`
 	rows, err := db.conn.QueryContext(ctx, query)
 	if err != nil {
@@ -119,7 +119,7 @@ func scanAccountListProjection(scanner accountProjectionScanner) (*AccountRow, e
 	if err := scanner.Scan(
 		&row.ID, &row.Name, &row.Type, &row.ProxyURL, &row.Status, &row.CooldownReason, &cooldownRaw,
 		&row.ErrorMessage, &row.Enabled, &row.Locked, &row.ScoreBiasOverride, &row.BaseConcurrencyOverride,
-		&tagsRaw, &createdRaw, &updatedRaw, &row.CredentialGeneration, &row.CredentialFamilyID,
+		&tagsRaw, &createdRaw, &updatedRaw, &row.CredentialGeneration, &row.CredentialFamilyID, &row.UseTickets,
 		&upstreamType, &email, &baseURL, &planType, &modelsRaw,
 		&hasAPIKey, &hasRefreshToken, &schedulerPriority,
 		&avatarURL, &verifiedEmail, &projectID,
@@ -246,7 +246,7 @@ func (db *DB) ListActiveByIDs(ctx context.Context, ids []int64) ([]*AccountRow, 
 		COALESCE(credit_enabled, false), COALESCE(credit_skip_usage_window, false),
 		COALESCE(skip_warm_tier, false), score_bias_override, base_concurrency_override,
 		COALESCE(tags, '[]'), COALESCE(note, ''), created_at, updated_at,
-		COALESCE(credential_generation, 1), COALESCE(credential_family_id, '')
+		COALESCE(credential_generation, 1), COALESCE(credential_family_id, ''), ` + db.accountUseTicketsSQL() + `
 		FROM accounts WHERE status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'
 		AND id IN (` + strings.Join(placeholders, ",") + `) ORDER BY id`
 	rows, err := db.conn.QueryContext(ctx, query, args...)
@@ -263,7 +263,7 @@ func (db *DB) ListActiveByIDs(ctx context.Context, ids []int64) ([]*AccountRow, 
 			&row.CooldownReason, &cooldownRaw, &row.ErrorMessage, &row.Enabled, &row.Locked,
 			&row.CreditEnabled, &row.CreditSkipUsageWindow, &row.SkipWarmTier, &row.ScoreBiasOverride,
 			&row.BaseConcurrencyOverride, &tagsRaw, &row.Note, &createdRaw, &updatedRaw,
-			&row.CredentialGeneration, &row.CredentialFamilyID,
+			&row.CredentialGeneration, &row.CredentialFamilyID, &row.UseTickets,
 		); err != nil {
 			return nil, fmt.Errorf("扫描账号行失败: %w", err)
 		}

@@ -44,6 +44,12 @@ func mintCookieCaptureFrom(ctx context.Context) *mintCookieCapture {
 // 带上 cookie 上游不会给出能用满 240 秒的票。铸造 ping 同样不带。
 // 调用方已经写了 Cookie 时保持原样。
 func ApplyCodexRouteCookies(ctx context.Context, headers http.Header, account *auth.Account, rawURL, model string) {
+	if use := freePoolUseFromContext(ctx); use != nil {
+		if headers != nil {
+			applyFreePoolPair(headers, use.request.Lease.Pair)
+		}
+		return
+	}
 	if headers == nil || account == nil || skipStoredCodexTurnState(ctx) {
 		return
 	}
@@ -85,6 +91,9 @@ func WithCodexRouteCookieScope(ctx context.Context, rawURL, model string) contex
 // ObserveCodexRouteResponseCookies 从 Codex 上游响应（含失败的 WS 握手）收下
 // __oailb / __cflb，记到这次请求的模型上。值发生变化时写入凭据。
 func ObserveCodexRouteResponseCookies(ctx context.Context, account *auth.Account, fallbackURL string, header http.Header) {
+	if FreePoolInUse(ctx) || (account != nil && account.UsesTickets()) {
+		return
+	}
 	if account == nil || len(header) == 0 {
 		return
 	}
@@ -117,6 +126,9 @@ func ObserveCodexRouteResponseCookies(ctx context.Context, account *auth.Account
 
 // bindMintedRouteCookies 在新票被接受时，用这一轮响应的 cookie 换掉该模型原来的一对。
 func bindMintedRouteCookies(account *auth.Account, model string, capture *mintCookieCapture) {
+	if account != nil && account.UsesTickets() {
+		return
+	}
 	if account == nil || strings.TrimSpace(model) == "" || capture == nil {
 		return
 	}
@@ -187,6 +199,9 @@ func embeddedCodexRouteURL(raw string) (string, bool) {
 }
 
 func persistCodexRouteCookies(account *auth.Account) {
+	if account != nil && account.UsesTickets() {
+		return
+	}
 	if account == nil || account.ID() <= 0 {
 		return
 	}

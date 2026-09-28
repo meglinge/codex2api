@@ -188,12 +188,12 @@ func (db *DB) installSQLiteSchedulerOutboxTriggers(ctx context.Context) error {
 		CREATE TRIGGER scheduler_outbox_accounts_insert AFTER INSERT ON accounts BEGIN
 			INSERT INTO scheduler_outbox(entity_type,entity_id,event_type) VALUES('account',NEW.id,'created');
 		END;
-		CREATE TRIGGER scheduler_outbox_accounts_update AFTER UPDATE OF credentials,proxy_url,status,error_message,cooldown_reason,cooldown_until,enabled,locked,score_bias_override,base_concurrency_override,skip_warm_tier,tags,credit_enabled,credit_skip_usage_window,deleted_at ON accounts
+		CREATE TRIGGER scheduler_outbox_accounts_update AFTER UPDATE OF credentials,proxy_url,status,error_message,cooldown_reason,cooldown_until,enabled,locked,score_bias_override,base_concurrency_override,skip_warm_tier,use_tickets,tags,credit_enabled,credit_skip_usage_window,deleted_at ON accounts
 		WHEN OLD.proxy_url IS NOT NEW.proxy_url OR OLD.status IS NOT NEW.status OR OLD.error_message IS NOT NEW.error_message
 		  OR OLD.cooldown_reason IS NOT NEW.cooldown_reason OR OLD.cooldown_until IS NOT NEW.cooldown_until
 		  OR OLD.enabled IS NOT NEW.enabled OR OLD.locked IS NOT NEW.locked
 		  OR OLD.score_bias_override IS NOT NEW.score_bias_override OR OLD.base_concurrency_override IS NOT NEW.base_concurrency_override
-		  OR OLD.skip_warm_tier IS NOT NEW.skip_warm_tier OR OLD.tags IS NOT NEW.tags
+		  OR OLD.skip_warm_tier IS NOT NEW.skip_warm_tier OR OLD.use_tickets IS NOT NEW.use_tickets OR OLD.tags IS NOT NEW.tags
 		  OR OLD.credit_enabled IS NOT NEW.credit_enabled OR OLD.credit_skip_usage_window IS NOT NEW.credit_skip_usage_window
 		  OR OLD.deleted_at IS NOT NEW.deleted_at
 		  OR COALESCE(json_extract(OLD.credentials,'$.refresh_token'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.refresh_token'),'')
@@ -335,12 +335,12 @@ func (db *DB) installPostgresSchedulerOutboxTriggers(ctx context.Context) error 
 		DROP TRIGGER IF EXISTS scheduler_outbox_accounts_update ON accounts;
 		DROP TRIGGER IF EXISTS scheduler_outbox_accounts_delete ON accounts;
 		CREATE TRIGGER scheduler_outbox_accounts_insert AFTER INSERT ON accounts FOR EACH ROW EXECUTE FUNCTION codex2api_scheduler_outbox_row('account','id');
-		CREATE TRIGGER scheduler_outbox_accounts_update AFTER UPDATE OF credentials,proxy_url,status,error_message,cooldown_reason,cooldown_until,enabled,locked,score_bias_override,base_concurrency_override,skip_warm_tier,tags,credit_enabled,credit_skip_usage_window,deleted_at ON accounts FOR EACH ROW WHEN (
+		CREATE TRIGGER scheduler_outbox_accounts_update AFTER UPDATE OF credentials,proxy_url,status,error_message,cooldown_reason,cooldown_until,enabled,locked,score_bias_override,base_concurrency_override,skip_warm_tier,use_tickets,tags,credit_enabled,credit_skip_usage_window,deleted_at ON accounts FOR EACH ROW WHEN (
 			OLD.proxy_url IS DISTINCT FROM NEW.proxy_url OR OLD.status IS DISTINCT FROM NEW.status OR OLD.error_message IS DISTINCT FROM NEW.error_message OR
 			OLD.cooldown_reason IS DISTINCT FROM NEW.cooldown_reason OR OLD.cooldown_until IS DISTINCT FROM NEW.cooldown_until OR
 			OLD.enabled IS DISTINCT FROM NEW.enabled OR OLD.locked IS DISTINCT FROM NEW.locked OR
 			OLD.score_bias_override IS DISTINCT FROM NEW.score_bias_override OR OLD.base_concurrency_override IS DISTINCT FROM NEW.base_concurrency_override OR
-			OLD.skip_warm_tier IS DISTINCT FROM NEW.skip_warm_tier OR OLD.tags IS DISTINCT FROM NEW.tags OR
+			OLD.skip_warm_tier IS DISTINCT FROM NEW.skip_warm_tier OR OLD.use_tickets IS DISTINCT FROM NEW.use_tickets OR OLD.tags IS DISTINCT FROM NEW.tags OR
 			OLD.credit_enabled IS DISTINCT FROM NEW.credit_enabled OR OLD.credit_skip_usage_window IS DISTINCT FROM NEW.credit_skip_usage_window OR
 			OLD.deleted_at IS DISTINCT FROM NEW.deleted_at OR
 			COALESCE(OLD.credentials->>'refresh_token','') IS DISTINCT FROM COALESCE(NEW.credentials->>'refresh_token','') OR

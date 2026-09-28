@@ -16,6 +16,8 @@ export interface BuildBatchMetadataUpdateOptions {
   codexFingerprintMode?: CodexFingerprintMode;
   updateTimezone?: boolean;
   timezone?: string;
+  updateUseTickets?: boolean;
+  useTickets?: boolean;
 }
 
 export function buildBatchMetadataUpdate({
@@ -34,6 +36,8 @@ export function buildBatchMetadataUpdate({
   codexFingerprintMode,
   updateTimezone,
   timezone,
+  updateUseTickets,
+  useTickets,
 }: BuildBatchMetadataUpdateOptions): BatchUpdateAccountsRequest {
   const payload: BatchUpdateAccountsRequest = { ids: [...ids] };
   if (updateTags) payload.tags = [...tags];
@@ -45,5 +49,6 @@ export function buildBatchMetadataUpdate({
   if (updateCodexFingerprintMode)
     payload.codex_fingerprint_mode = codexFingerprintMode ?? "off";
   if (updateTimezone) payload.timezone = (timezone ?? "").trim();
+  if (updateUseTickets) payload.use_tickets = useTickets ?? false;
   return payload;
 }

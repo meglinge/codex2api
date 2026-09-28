@@ -129,11 +129,41 @@ func dispatchPolicyForModel(model string) auth.DispatchPolicy {
 	return auth.DispatchPolicyStandard
 }
 
+// continuationPinBreak 判断续轮钉号要不要解开。绑定号已不在内存池返回 removed；
+// 票号歇票、测票或还没连上返回对应原因。空串表示继续钉住。
+func (h *Handler) continuationPinBreak(affinityKey string, apiKeyID int64, filter auth.AccountFilter, policy auth.DispatchPolicy, now time.Time) (int64, string) {
+	if h == nil || h.store == nil {
+		return 0, ""
+	}
+	boundID, ok := h.store.SessionAffinityAccountID(affinityKey)
+	if !ok || boundID == 0 {
+		return 0, ""
+	}
+	account := h.store.FindByID(boundID)
+	if account == nil {
+		return boundID, "removed"
+	}
+	if reason := FreePoolAccountBlocked(account, now); reason != "" {
+		return boundID, reason
+	}
+	// 票号被停调度、冷却或按模型冷却后，本请求内回不来。继续钉住会秒回无可用账号。
+	if account.UsesTickets() && !h.store.HasContinuationCandidate(affinityKey, apiKeyID, filter, policy) {
+		return boundID, "unavailable"
+	}
+	return boundID, ""
+}
+
 func (h *Handler) withModelCooldownFilter(ctx context.Context, model string, filter auth.AccountFilter) auth.AccountFilter {
 	if h == nil || h.store == nil {
 		return filter
 	}
-	return h.store.WithModelCooldownFilterContext(ctx, model, filter)
+	base := h.store.WithModelCooldownFilterContext(ctx, model, filter)
+	return func(account *auth.Account) bool {
+		if FreePoolAccountBlocked(account, time.Now()) != "" {
+			return false
+		}
+		return base == nil || base(account)
+	}
 }
 
 func (h *Handler) shouldUseWebsocketForHTTP() bool {
@@ -3250,6 +3280,9 @@ func (h *Handler) authMiddlewareWithQuotaRead(allowQuotaRead bool) gin.HandlerFu
 		attachUserAgentAudit(c)
 		attachCodexTurnStateAudit(c)
 		attachTurnStateTemplateAudit(c)
+		if c.Request != nil {
+			c.Request = c.Request.WithContext(AttachFreePoolTicketLog(c.Request.Context()))
+		}
 		attachWsAcquireAudit(c)
 		attachUpstreamTrace(c, h.store)
 		// 如果没有配置任何密钥
@@ -4053,7 +4086,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	} else {
 		accountFilter = accountFilterForResponsesModelWithOriginal(logModel, effectiveModel, allowCodexAccounts)
 	}
-	accountFilter = h.withModelCooldownFilter(c.Request.Context(), effectiveModel, accountFilter)
+	accountFilter = h.store.WithModelCooldownFilterContext(c.Request.Context(), effectiveModel, accountFilter)
 	if continuationUnavailable {
 		accountFilter = relayOnlyAccountFilter(accountFilter)
 	}
@@ -4072,6 +4105,9 @@ func (h *Handler) Responses(c *gin.Context) {
 		accountFilter = compactionDomainFilter(compactionAffinity.CompatibilityDomain, accountFilter)
 		c.Request = c.Request.WithContext(withCompactionAffinity(c.Request.Context(), compactionAffinity))
 	}
+	accountFilter, ticketPending := freePoolTicketGate(accountFilter)
+	ticketHold := newFreePoolHold(ticketPending, isStream)
+	c.Request = c.Request.WithContext(withFreePoolHold(c.Request.Context(), ticketHold))
 	// scope 并发位在选中账号后才能占，请求退出时统一释放（issue #439 v2）。
 	defer h.ReleaseAPIKeyScopeConcurrency(c)
 	stopRetryDeadline := installContinuousRetryHTTPDeadline(c, continuousRetryPolicy, continuousRetryProtocolResponses)
@@ -4079,11 +4115,16 @@ func (h *Handler) Responses(c *gin.Context) {
 	stopRetryKeepalive := installContinuousRetrySSEKeepalive(c, isStream, "text/event-stream")
 	defer stopRetryKeepalive()
 	activateContinuousRetryKeepalive(c.Request.Context())
+	if isStream && freePoolTicketsActive() {
+		holdContinuousRetryKeepaliveUntil(c.Request.Context(), time.Now().Add(freePoolFirstPingDelay))
+	}
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
 	maxRateLimitRetries := h.getMaxRateLimitRetries()
 	generalRetries := 0
+	freePoolSwitches := 0
+	preferConnectedTicket := false
 	rateLimitRetries := 0
 	var lastStatusCode int
 	var lastBody []byte
@@ -4114,17 +4155,33 @@ func (h *Handler) Responses(c *gin.Context) {
 		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
 		if !retainedHTTPFallback {
 			affinityGuard = auth.SessionAffinityGuard{}
+			if turnContinuationPinned {
+				if boundID, reason := h.continuationPinBreak(affinityKey, apiKeyID, accountFilter, dispatchPolicy, time.Now()); reason != "" {
+					h.store.UnbindSessionAffinity(affinityKey, boundID)
+					turnContinuationPinned = false
+					log.Printf("[free-pool] consumer=%d %s, unpin sticky request", boundID, reason)
+					preferConnectedTicket = true
+				}
+			}
 			if attempt == 0 && compactionAffinity.Known && !turnContinuationPinned {
 				account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+			}
+			if account == nil && preferConnectedTicket {
+				if connected, ok := FreePoolConnectedAccountFilter(c.Request.Context(), effectiveModel, accountFilter); ok {
+					account = h.store.AcquireLeastOccupiedMatchingTicketAccount(affinityKey, apiKeyID, retryExclusions.ForSelection(), connected, dispatchPolicy)
+					if account != nil {
+						log.Printf("[free-pool] switch to connected ticket account=%d", account.ID())
+					}
+				}
 			}
 			if account != nil {
 				stickyProxyURL = account.GetProxyURL()
 			} else if continuationUnavailable && !relayContinuationAttempted {
 				account, stickyProxyURL, affinityGuard = h.nextAccountForSessionWithDispatchGuard(affinityKey, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
 			} else if turnContinuationPinned {
-				account, stickyProxyURL, selectionErr = h.nextRetryAccountForContinuationWithDispatch(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
+				account, stickyProxyURL, selectionErr = h.nextRetryAccountForContinuationWithDispatch(withFreePoolHold(c.Request.Context(), ticketHold), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
 			} else {
-				account, stickyProxyURL, affinityGuard, selectionErr = h.nextRetryAccountForSessionWithDispatchGuard(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
+				account, stickyProxyURL, affinityGuard, selectionErr = h.nextRetryAccountForSessionWithDispatchGuard(withFreePoolHold(c.Request.Context(), ticketHold), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
 			}
 		}
 		if account == nil {
@@ -4691,6 +4748,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					if !ttftRecorded && isFirstToken {
 						firstTokenMs = int(time.Since(start).Milliseconds())
 						ttftRecorded = true
+						NoteFreePoolFirstToken(upstreamCtx)
 					}
 					if !contentTokenSeen && isFirstTokenResult(parsed) {
 						contentTokenSeen = true
@@ -5051,7 +5109,9 @@ func (h *Handler) Responses(c *gin.Context) {
 		attemptIdentity := ruleIdentity.WithSelectedAccount(account, h.store)
 		upstreamCtx = WithPayloadRuleIdentity(upstreamCtx, attemptIdentity)
 		lastUpstreamCancel = upstreamCancel
-		ttftGuard := newFirstTokenTimeoutGuard(firstTokenTimeoutForRequest(currentFirstTokenTimeout(), bodySignalCompact), upstreamCancel)
+		ttftTimeout := firstTokenTimeoutForRequest(currentFirstTokenTimeout(), bodySignalCompact)
+		ttftGuard := newFirstTokenTimeoutGuard(ttftTimeout, upstreamCancel)
+		armFirstToken := deferFirstTokenTimeout(ttftGuard)
 		// WebSocket 上游下剥离自动注入的图片工具，防止模型自主生图产生大体积
 		// 数据卡死 WS 流（issue #220）。显式生图请求已在上面强制走 HTTP。
 		upstreamBody := codexBody
@@ -5070,15 +5130,49 @@ func (h *Handler) Responses(c *gin.Context) {
 		durationMs := int(time.Since(start).Milliseconds())
 
 		if reqErr != nil {
+			if IsFreePoolRequestError(reqErr) && isRetryableRequestError(reqErr) {
+				ttftGuard.Stop()
+				var typed *Error
+				claimBusy := errors.As(reqErr, &typed) && typed.Code == "free_pool_claim_failed"
+				if !claimBusy {
+					h.store.UnbindSessionAffinity(affinityKey, account.ID())
+					retryExclusions.MarkTransient(account.ID())
+					turnContinuationPinned = false
+				}
+				h.store.Release(account)
+				freePoolSwitches++
+				if !ticketHold.requeues(account) && freePoolSwitches > freePoolMaxAccountSwitches {
+					log.Printf("[free-pool] consumer=%d %s, switch limit %d reached", account.ID(), reqErr.Error(), freePoolMaxAccountSwitches)
+					limitErr := FreePoolRequestError("switch_limit")
+					if isStream && writeCommittedResponsesRetryError(c, continuousRetryRequestErrorMessage(limitErr)) {
+						return
+					}
+					ErrorToGinResponse(c, limitErr)
+					return
+				}
+				log.Printf("[free-pool] consumer=%d %s, switching account (%d/%d)", account.ID(), reqErr.Error(), freePoolSwitches, freePoolMaxAccountSwitches)
+				preferConnectedTicket = true
+				if claimBusy {
+					timer := time.NewTimer(500 * time.Millisecond)
+					select {
+					case <-timer.C:
+					case <-c.Request.Context().Done():
+						timer.Stop()
+						return
+					}
+				}
+				continue
+			}
 			if apiKeyModelRequestError(reqErr) != nil {
 				ttftGuard.Stop()
 				h.store.Release(account)
 				sendAPIKeyModelRequestQuotaError(c, reqErr)
 				return
 			}
-			timedOut := ttftGuard.TimedOut()
+			poolTimedOut := FreePoolFirstTokenTimedOut(reqErr)
+			timedOut := ttftGuard.TimedOut() || poolTimedOut
 			ttftGuard.Stop()
-			if timedOut {
+			if timedOut && !poolTimedOut {
 				reqErr = firstTokenTimeoutError(currentFirstTokenTimeout())
 			}
 			kind := classifyTransportFailure(reqErr)
@@ -5349,7 +5443,13 @@ func (h *Handler) Responses(c *gin.Context) {
 			preflightSettings.ContinuousRetryPolicy = continuousRetryPolicy
 			preflightPassthrough := continuousRetryPreflightPassthrough(preflightSettings)
 			emptyIncomplete := &emptyIncompleteTracker{}
+			freePoolVisible := !account.UsesTickets()
+			firstTokenArmed := false
 			forwardWithEvent := func(sseEvent string, data []byte) bool {
+				if !firstTokenArmed {
+					firstTokenArmed = true
+					armFirstToken()
+				}
 				streamDiag.markUpstreamFrame()
 				if continuousRetryBuffersAttempts(continuousRetryPolicy) {
 					compactionProvenancePayloads = append(compactionProvenancePayloads, bytes.Clone(data))
@@ -5367,12 +5467,15 @@ func (h *Handler) Responses(c *gin.Context) {
 				parsed := gjson.ParseBytes(data)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
 
-				// TTFT: 记录第一个实际内容事件的时间
 				ttftGuard.MarkProgress(eventType)
+				if account.UsesTickets() && freePoolUserVisibleEvent(eventType, data) {
+					freePoolVisible = true
+				}
 				isFirstToken := isLooseFirstTokenResult(parsed)
 				if !ttftRecorded && isFirstToken {
 					firstTokenMs = int(time.Since(start).Milliseconds())
 					ttftRecorded = true
+					NoteFreePoolFirstToken(upstreamCtx)
 				}
 				// contentTokenSeen 用严格判定（与宽松首字统计无关）：宽松口径下
 				// codex.rate_limits 等前置事件也会置位 ttftRecorded，若用它做"首 token 前"
@@ -5475,6 +5578,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					// 始终缓冲：立即写出会置位 wroteAnyBody，随后的 response.failed 就
 					// 进不了首包前静默换号/超窗压缩分支。必须写出时改写降载码。
 					shouldDefer := shouldDeferPreContentSSEEvent(eventType, contentTokenSeen, gotTerminal, preflightPassthrough) ||
+						(!freePoolVisible && !gotTerminal) ||
 						(!contentTokenSeen && !visibleBody && !gotTerminal && isRetryableUpstreamErrorFrame(eventType, data, continuousRetryPolicy))
 					wrote, err := writeDeferredSSEData(streamWriter, &pendingFirstTokenEvents, sanitizeCapacityShedEventForClient(eventType, data), shouldDefer)
 					if err != nil {
@@ -5610,6 +5714,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			seenImageOutputs := make(map[string]struct{})
 			emptyIncomplete := &emptyIncompleteTracker{}
 			readErr = readSSEStreamWithContinuousRetryKeepalive(readCtx, resp.Body, func(sseEvent string, data []byte) bool {
+				armFirstToken()
 				if continuousRetryBuffersAttempts(continuousRetryPolicy) {
 					compactionProvenancePayloads = append(compactionProvenancePayloads, bytes.Clone(data))
 				} else {
@@ -5635,6 +5740,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				if !ttftRecorded && isLooseFirstTokenResult(parsed) {
 					firstTokenMs = int(time.Since(start).Milliseconds())
 					ttftRecorded = true
+					NoteFreePoolFirstToken(upstreamCtx)
 				}
 				// 累计 delta 字符数
 				if eventType == "response.output_text.delta" {
@@ -5685,8 +5791,10 @@ func (h *Handler) Responses(c *gin.Context) {
 		if candidatePromoted && isStream {
 			abortedForHTTPError = true
 		}
-		if ttftGuard.TimedOut() && !ttftRecorded && !gotTerminal {
-			outcome = firstTokenTimeoutOutcome(currentFirstTokenTimeout())
+		if FreePoolFirstTokenTimedOut(readErr) && !gotTerminal {
+			outcome = firstTokenTimeoutOutcome(FreePoolFirstTokenBudget(readErr))
+		} else if ttftGuard.TimedOut() && !ttftRecorded && !gotTerminal {
+			outcome = firstTokenTimeoutOutcome(ttftGuardTimeout(ttftGuard))
 		}
 		outcome = annotateStreamBreakDiagnostics(outcome, streamDiag)
 		ttftGuard.Stop()
@@ -6059,7 +6167,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	// compact 同时允许官方 Codex OAuth 账号与中转（OpenAI Responses API）账号：
 	// 中转账号会命中上游自身的 /responses/compact，使仅接入中转的用户也能压缩（issue #174）。
 	accountFilter := accountFilterForCompactResponsesModelWithOriginal(routingModel, effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
-	accountFilter = h.withModelCooldownFilter(c.Request.Context(), effectiveModel, accountFilter)
+	accountFilter = h.store.WithModelCooldownFilterContext(c.Request.Context(), effectiveModel, accountFilter)
 	accountFilter = excludeClaudeAccountsFilter(accountFilter)
 	if continuationUnavailable {
 		accountFilter = relayOnlyAccountFilter(accountFilter)
@@ -6076,6 +6184,9 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	if compactionAffinity.Known {
 		accountFilter = compactionDomainFilter(compactionAffinity.CompatibilityDomain, accountFilter)
 	}
+	accountFilter, ticketPending := freePoolTicketGate(accountFilter)
+	ticketHold := newFreePoolHold(ticketPending, false)
+	c.Request = c.Request.WithContext(withFreePoolHold(c.Request.Context(), ticketHold))
 	// scope 并发位在选中账号后才能占，请求退出时统一释放（issue #439 v2）。
 	defer h.ReleaseAPIKeyScopeConcurrency(c)
 
@@ -6133,7 +6244,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				sendResponseContextUnavailable(c, continuationStatus, continuationReason)
 				return
 			}
-			account, stickyProxyURL, affinityGuard, selectionErr = h.nextRetryAccountForSessionWithDispatchGuard(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
+			account, stickyProxyURL, affinityGuard, selectionErr = h.nextRetryAccountForSessionWithDispatchGuard(withFreePoolHold(c.Request.Context(), ticketHold), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
 			if account == nil {
 				if writeSchedulerQueueError(c, selectionErr, continuousRetryProtocolResponses) {
 					return
@@ -6905,7 +7016,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	// /v1/chat/completions 同时允许官方 Codex OAuth 账号与中转（OpenAI Responses API）账号：
 	// 翻译后的请求体本身就是 Responses 形态，中转账号直接以 HTTP 转发（issue #181）。
 	accountFilter := accountFilterForResponsesModelWithOriginal(logModel, effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
-	accountFilter = h.withModelCooldownFilter(c.Request.Context(), effectiveModel, accountFilter)
+	accountFilter = h.store.WithModelCooldownFilterContext(c.Request.Context(), effectiveModel, accountFilter)
 	accountFilter = h.applyUpstreamChannelFilter(c, effectiveModel, accountFilter)
 	accountFilter = excludeClaudeAccountsFilter(accountFilter)
 	accountFilter = h.applyScopeBudgetFilter(c, accountFilter)
@@ -6916,9 +7027,15 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	stopRetryKeepalive := installContinuousRetrySSEKeepalive(c, isStream, "text/event-stream")
 	defer stopRetryKeepalive()
 	activateContinuousRetryKeepalive(c.Request.Context())
+	if isStream && freePoolTicketsActive() {
+		holdContinuousRetryKeepaliveUntil(c.Request.Context(), time.Now().Add(freePoolFirstPingDelay))
+	}
 
 	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, codexBody)
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
+	accountFilter, ticketPending := freePoolTicketGate(accountFilter)
+	ticketHold := newFreePoolHold(ticketPending, isStream)
+	c.Request = c.Request.WithContext(withFreePoolHold(c.Request.Context(), ticketHold))
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
 
@@ -6951,7 +7068,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
 		if !retainedHTTPFallback {
 			affinityGuard = auth.SessionAffinityGuard{}
-			account, stickyProxyURL, affinityGuard, selectionErr = h.nextRetryAccountForSessionWithDispatchGuard(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
+			account, stickyProxyURL, affinityGuard, selectionErr = h.nextRetryAccountForSessionWithDispatchGuard(withFreePoolHold(c.Request.Context(), ticketHold), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
 		}
 		if account == nil {
 			if writeSchedulerQueueError(c, selectionErr, continuousRetryProtocolChat) {
@@ -7616,6 +7733,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				if !ttftRecorded && isLooseFirstTokenResult(parsed) {
 					firstTokenMs = int(time.Since(start).Milliseconds())
 					ttftRecorded = true
+					NoteFreePoolFirstToken(upstreamCtx)
 				}
 				eventType, data, parsed = rewriteEmptyIncompleteTerminal(emptyIncomplete, eventType, data, parsed)
 				switch eventType {
@@ -8477,6 +8595,32 @@ func (h *Handler) applyCooldown(account *auth.Account, statusCode int, body []by
 	h.applyCooldownForModel(account, statusCode, body, resp, "")
 }
 
+// pauseAccountDispatch 把普通 Codex 账号移出用户请求调度。
+// 库里 enabled=false，运行时不再被选。冷却到期、恢复探测、重启都不会自动回来，只能手动启用。
+// 中转号和铸票临时号不在这里停。
+func (h *Handler) pauseAccountDispatch(account *auth.Account, source string) {
+	if account == nil || account.ID() <= 0 || account.IsRelayStyle() {
+		return
+	}
+	if atomic.SwapInt32(&account.DispatchPaused, 1) != 0 {
+		return
+	}
+	if h.store != nil {
+		h.store.ApplyAccountEnabled(account.ID(), false)
+	}
+	log.Printf("账号 %d 用户请求被上游拒绝 (%s)，已停用调度", account.ID(), source)
+	if h.db == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := h.db.SetAccountEnabled(ctx, account.ID(), false); err != nil {
+		log.Printf("账号 %d 停用调度落库失败: %v", account.ID(), err)
+		return
+	}
+	h.db.InsertAccountEventAsync(account.ID(), "updated", source)
+}
+
 func (h *Handler) applyCooldownForModel(account *auth.Account, statusCode int, body []byte, resp *http.Response, model string) codex429Decision {
 	// Grok 上游的错误语义与 Codex 不同（免费额度耗尽/超支限制/Retry-After），单独映射。
 	if account.IsGrokAPI() {
@@ -8496,6 +8640,9 @@ func (h *Handler) applyCooldownForModel(account *auth.Account, statusCode int, b
 	if IsUsageLimitReachedError(body) {
 		decision := Apply429Cooldown(h.store, account, body, resp, model)
 		log.Printf("账号 %d 触发用量上限 (status=%d, plan=%s, reason=%s)，冷却到 %s", account.ID(), statusCode, account.GetPlanType(), decision.Reason, decision.ResetAt.Format(time.RFC3339))
+		if decision.Scope == rateLimitScopeAccount {
+			h.pauseAccountDispatch(account, "auto_disable_429")
+		}
 		return decision
 	}
 	switch statusCode {
@@ -8548,6 +8695,7 @@ func (h *Handler) applyCooldownForModel(account *auth.Account, statusCode int, b
 			h.store.RemoveAccount(account.ID())
 		} else {
 			h.store.MarkCooldownWithError(account, 5*time.Minute, "unauthorized", upstreamAccountErrorMessage(statusCode, body))
+			h.pauseAccountDispatch(account, "auto_disable_401")
 		}
 	case http.StatusPaymentRequired, http.StatusForbidden:
 		if statusCode == http.StatusForbidden && IsAgentRuntimeDeletedError(body) {

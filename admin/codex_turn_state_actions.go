@@ -75,6 +75,8 @@ func (h *Handler) ListCodexTurnStateRefreshEvents(c *gin.Context) {
 // RefreshCodexTurnStateCell 强制重刷一格：作废现有 blob 后立即 ping。
 // POST /api/admin/codex-turn-states/refresh
 func (h *Handler) RefreshCodexTurnStateCell(c *gin.Context) {
+	writeError(c, http.StatusGone, "旧的 X-Codex-Turn-State 获取已停用；请使用 Free 票池")
+	return
 	account, model, ok := h.bindCodexTurnStateCell(c)
 	if !ok {
 		return

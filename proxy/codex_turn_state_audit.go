@@ -16,9 +16,10 @@ const maxUsageLogCodexTurnStateLength = 4096
 type codexTurnStateAuditContextKey struct{}
 
 type codexTurnStateAudit struct {
-	mu       sync.RWMutex
-	outbound string
-	inbound  string
+	freePoolSensitive bool
+	mu                sync.RWMutex
+	outbound          string
+	inbound           string
 }
 
 func withCodexTurnStateAudit(ctx context.Context) context.Context {
@@ -57,7 +58,32 @@ func attachCodexTurnStateAudit(c *gin.Context) {
 
 // RecordOutboundCodexTurnState 记录这次尝试真正发往上游的 turn-state。
 // 空值有意义：Ping 或不带头的请求应显示未发送。
+func markFreePoolSensitive(ctx context.Context) {
+	if audit := codexTurnStateAuditFromContext(ctx); audit != nil {
+		audit.mu.Lock()
+		audit.freePoolSensitive = true
+		audit.outbound = ""
+		audit.inbound = ""
+		audit.mu.Unlock()
+	}
+}
+
+func freePoolSensitive(ctx context.Context) bool {
+	if FreePoolInUse(ctx) {
+		return true
+	}
+	if audit := codexTurnStateAuditFromContext(ctx); audit != nil {
+		audit.mu.RLock()
+		defer audit.mu.RUnlock()
+		return audit.freePoolSensitive
+	}
+	return false
+}
+
 func RecordOutboundCodexTurnState(ctx context.Context, value string) {
+	if freePoolSensitive(ctx) {
+		return
+	}
 	if audit := codexTurnStateAuditFromContext(ctx); audit != nil {
 		audit.mu.Lock()
 		audit.outbound = normalizeUsageLogCodexTurnState(value)
@@ -68,6 +94,9 @@ func RecordOutboundCodexTurnState(ctx context.Context, value string) {
 // RecordInboundCodexTurnState 记录上游返回的 turn-state（HTTP 响应头或 WS metadata 帧）。
 // 空值不覆盖已记录的值：握手头和后续 metadata 帧可能分两次到达。
 func RecordInboundCodexTurnState(ctx context.Context, value string) {
+	if freePoolSensitive(ctx) {
+		return
+	}
 	value = normalizeUsageLogCodexTurnState(value)
 	if value == "" {
 		return
@@ -85,6 +114,7 @@ func recordInboundCodexTurnStateFromHeaders(ctx context.Context, headers http.He
 		return
 	}
 	RecordInboundCodexTurnState(ctx, headers.Get(codexTurnStateHeader))
+	noteFreePoolUpstreamResponse(ctx, 200, headers)
 }
 
 func recordInboundCodexTurnStateFromEvent(ctx context.Context, payload []byte) {
@@ -129,6 +159,12 @@ func populateCodexTurnStateMetaFromRequest(c *gin.Context, input *database.Usage
 		return
 	}
 	audit.mu.RLock()
+	if audit.freePoolSensitive {
+		input.OutboundCodexTurnState = ""
+		input.InboundCodexTurnState = ""
+		audit.mu.RUnlock()
+		return
+	}
 	defer audit.mu.RUnlock()
 	input.OutboundCodexTurnState = audit.outbound
 	input.InboundCodexTurnState = audit.inbound

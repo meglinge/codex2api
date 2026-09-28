@@ -516,7 +516,7 @@ func resolveUpstreamSessionID(apiKeyID int64, upstreamSeed, explicitSessionID st
 // sessionID 可选，用于 prompt cache 会话绑定
 // useWebsocket 可选：未传时遵循全局强制 WS；传 true/false 时由调用方显式控制。
 // headers 下游请求头，用于设备指纹学习
-func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, useWebsocket ...bool) (upstreamResponse *http.Response, upstreamErr error) {
+func executeRequestWithoutFreePool(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, useWebsocket ...bool) (upstreamResponse *http.Response, upstreamErr error) {
 	// Defense in depth: this executor sends account.AccessToken to ChatGPT.
 	// Relay/Grok/Antigravity credentials must never cross that provider boundary,
 	// even if a future routing regression selects the wrong account type.
@@ -538,13 +538,6 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	requestBody, encryptedAttempt = prepareEncryptedContentAttempt(ctx, account, requestBody, sessionID, headers)
 	defer func() { encryptedAttempt.observeResponse(upstreamResponse, requestBody) }()
 	officialUpstream := requestUsesOfficialCodexUpstream(ctx, requestBody)
-	var readyErr error
-	if officialUpstream {
-		ctx, readyErr = ensureCodexTurnStateReady(ctx, account, requestBody)
-		if readyErr != nil {
-			return nil, readyErr
-		}
-	}
 
 	// Payload 规则改写：在 WS/HTTP 分叉前统一应用，两条上游路径共享改写结果。
 	// 生图请求跳过——其 instructions/工具由网关自行构造，改写会破坏桥接协议。
@@ -590,9 +583,6 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		apiKey: apiKey, deviceCfg: deviceCfg, headers: telemetryHeaders,
 	})
 	defer func() { telemetryAttempt.observeResult(upstreamResponse, upstreamErr) }()
-	if dedicated := CodexTurnStateRefreshProxy(ctx, account); dedicated != "" {
-		proxyOverride = dedicated
-	}
 
 	// 凭据级 turn state 强制注入：模型已由入口映射/规则定稿，传输方式也已定。
 	// 未配置的账号这里是空操作。自定义上游不注入：防降智只服务官方 Codex 后端。
@@ -632,7 +622,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	// Ping 用 WithSkipStoredCodexTurnState 跳过。HTTP/SSE 与 WebSocket 共用这一步。
 	// 自定义上游不回放：那些 blob 只对官方 chatgpt.com 后端有效。
 	if officialUpstream {
-		requestBody, headers = injectStoredCodexTurnState(ctx, account, requestBody, headers)
+
 		RecordOutboundCodexTurnState(ctx, headers.Get(codexTurnStateHeader))
 	}
 	if wantWebsocket && WebsocketExecuteFunc != nil {
@@ -698,6 +688,11 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	}
 
 	// 2. 清理可能导致上游报错的多余字段
+	if FreePoolInUse(ctx) && strings.TrimSpace(gjson.GetBytes(requestBody, "previous_response_id").String()) != "" {
+		err := FreePoolRequestError("previous_response_unavailable")
+		err.HTTPStatus = http.StatusConflict
+		return nil, err
+	}
 	requestBody, _ = sjson.DeleteBytes(requestBody, "previous_response_id")
 	// 注意：HTTP /responses 上游不接受 prompt_cache_retention（会 400），必须删除；
 	// 该字段的 cache 收益只在 WS 路径注入（见 wsrelay 的 prepareWebsocketBody）。
@@ -782,9 +777,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		// 按最终请求体中的精确上游 model 查找模板。
 		model := strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())
 		outboundHeaders := headers.Clone()
-		if officialUpstream {
-			ApplyCodexTurnStateTemplate(ctx, outboundHeaders, account, model)
-		}
+
 		applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, outboundHeaders)
 		// 凭据级 turn state 注入在账号自定义头之后落定：自定义头与自动模板都不该顶掉它。
 		if officialUpstream {
@@ -825,6 +818,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		if pipeline := pipelineFromContext(ctx); pipeline != nil {
 			pipeline.Release()
 			log.Printf("[image-pipeline] job=%d stage=waiting_upstream request_bytes=%d", pipeline.jobID, req.ContentLength)
+		}
+		if err := CheckFreePoolDispatch(ctx, account, req.Header, logicalEndpoint, proxyURL); err != nil {
+			return nil, err
 		}
 		resp, err := doTracedUpstreamRequest(client, req, account, proxyURL)
 		if err != nil {
@@ -1098,6 +1094,13 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	_, usesTickets, ticketModeErr := freePoolMode(ctx, account)
+	if ticketModeErr != nil {
+		return nil, ticketModeErr
+	}
+	if usesTickets {
+		return nil, FreePoolRequestError("compact_not_supported")
+	}
 	ctx = attachCodexUpstreamRoutes(ctx)
 	ctx = BeginCodexTurnStateTemplateAttempt(ctx)
 	headers = headers.Clone()
@@ -1110,13 +1113,6 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	requestBody, encryptedAttempt = prepareEncryptedContentAttempt(ctx, account, requestBody, sessionID, headers)
 	defer func() { encryptedAttempt.observeResponse(upstreamResponse, requestBody) }()
 	officialUpstream := requestUsesOfficialCodexUpstream(ctx, requestBody)
-	var readyErr error
-	if officialUpstream {
-		ctx, readyErr = ensureCodexTurnStateReady(ctx, account, requestBody)
-		if readyErr != nil {
-			return nil, readyErr
-		}
-	}
 	responsesLite := gateResponsesLiteForAccount(codexResponsesLiteRequested(requestBody, headers), requestBody, account)
 
 	account.Mu().RLock()
@@ -1135,6 +1131,11 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	// 与 ExecuteRequest 相同的请求体优化
 	if !gjson.GetBytes(requestBody, "instructions").Exists() {
 		requestBody, _ = sjson.SetBytes(requestBody, "instructions", "")
+	}
+	if FreePoolInUse(ctx) && strings.TrimSpace(gjson.GetBytes(requestBody, "previous_response_id").String()) != "" {
+		err := FreePoolRequestError("previous_response_unavailable")
+		err.HTTPStatus = http.StatusConflict
+		return nil, err
 	}
 	requestBody, _ = sjson.DeleteBytes(requestBody, "previous_response_id")
 	// compact 端点同样走 HTTP，不接受 prompt_cache_retention，必须删除。
@@ -1162,7 +1163,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	// 自定义上游不回放防降智 blob，也不带官方路由 cookie。
 	if officialUpstream {
 		ctx, requestBody, headers = prepareCodexTurnStateInjection(ctx, account, requestBody, headers, false)
-		requestBody, headers = injectStoredCodexTurnState(ctx, account, requestBody, headers)
+
 		RecordOutboundCodexTurnState(ctx, headers.Get(codexTurnStateHeader))
 	}
 
@@ -1187,9 +1188,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	}
 
 	// compact: same order — template Apply then manual credential inject last.
-	if officialUpstream {
-		ApplyCodexTurnStateTemplate(ctx, headers, account, strings.TrimSpace(gjson.GetBytes(requestBody, "model").String()))
-	}
+
 	applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
 	if officialUpstream {
 		applyCodexTurnStateInjectionHeader(ctx, req.Header)
@@ -1202,6 +1201,9 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 
 	egress.ApplyHeaders(req.Header)
 	logCodexFingerprintDebug("compact", account, egress.DialProxyURL, req.Header)
+	if err := CheckFreePoolDispatch(ctx, account, req.Header, logicalEndpoint, proxyURL); err != nil {
+		return nil, err
+	}
 
 	if err := ConsumeAPIKeyModelRequestQuota(ctx, gjson.GetBytes(requestBody, "model").String()); err != nil {
 		return nil, err

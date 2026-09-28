@@ -15,6 +15,7 @@ import type {
   CodexFingerprintMode,
 } from "../types";
 import { api } from "../api";
+import AccountTicketSwitch from "./AccountTicketSwitch";
 import { useToast } from "../hooks/useToast";
 import { getErrorMessage } from "../utils/error";
 import {
@@ -423,6 +424,7 @@ export default function AccountQuickConfigSheet({
                 onCheckedChange={(checked) => patchForm({ skipWarmTier: checked })}
               />
             </div>
+            <AccountTicketSwitch key={account.id} account={account} onSaved={onSaved} />
 
             <div className="space-y-1.5 pt-1 border-t border-border/40">
               <label className="block text-xs font-semibold text-foreground">

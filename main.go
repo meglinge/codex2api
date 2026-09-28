@@ -426,17 +426,38 @@ func main() {
 	// 从环境变量读取 Codex 画像与 Beta 配置。
 	deviceCfg := proxy.DeviceProfileConfigFromEnv(os.Getenv)
 	handler := proxy.NewHandler(store, db, cfg, deviceCfg)
-	proxy.InstallCodexTurnStateCache(db, store)
+
 	handler.SetRuntimeCache(tc)
 	defer handler.CloseAPIKeyAuthCache()
 	adminHandler.SetAPIKeyAuthCacheHandler(handler)
 
 	// 注册 WebSocket 执行函数（避免 proxy ↔ wsrelay 循环依赖）
 	proxy.WebsocketExecuteFunc = wsrelay.ExecuteRequestWebsocket
+	if db.FreePoolSupported() {
+		consumer, consumerErr := proxy.NewFreePoolConsumer(db, proxy.NewFreePoolVerifyHTTPUpstream())
+		if consumerErr != nil {
+			log.Fatal("[free-pool] consumer initialization failed")
+		}
+		proxy.SetFreePoolConsumer(consumer)
+		consumer.Start(backgroundCtx, store.FindByID, store.NotifyAccountAvailable)
+	}
 
 	// 注册 Agent Identity task 确保函数（proxy 无 Store 引用，启动时注入）
 	proxy.EnsureCodexAgentIdentityTaskFunc = store.EnsureCodexAgentIdentityTask
-	adminHandler.StartCodexTurnStateRenewal(backgroundCtx)
+
+	var freePoolMinter *proxy.FreePoolMinter
+	if db.FreePoolSupported() {
+		decoder, decoderErr := proxy.NewFreePoolJWTSourceDecoder(os.Getenv("FREE_POOL_GATEWAY_CLAIM"), os.Getenv("FREE_POOL_COLO_CLAIM"))
+		if decoderErr != nil {
+			log.Print("[free-pool] disabled: verified source claim mapping required")
+		} else if minter, minterErr := proxy.NewFreePoolMinter(db, proxy.NewFreePoolHTTPUpstream(), decoder); minterErr != nil {
+			log.Print("[free-pool] disabled: initialization failed")
+		} else {
+			freePoolMinter = minter
+			freePoolMinter.Start(backgroundCtx)
+			log.Printf("[free-pool] mint workers=%d", freePoolMinter.Workers())
+		}
+	}
 
 	// 上游 WS 空闲连接保活常驻任务（默认关闭：goroutine 常驻但仅在运行时开关开启时才发送 Ping）
 	wsKeepalive := wsrelay.NewKeepaliveTask(
@@ -669,7 +690,11 @@ func main() {
 	adminHandler.WaitAutoResetCredits()
 	adminHandler.WaitAutoActivate5hWindow()
 	adminHandler.WaitQualityTests()
-	adminHandler.WaitCodexTurnStateRenewal()
+
+	freePoolMinter.Wait()
+	if consumer := proxy.CurrentFreePoolConsumer(); consumer != nil {
+		consumer.Wait()
+	}
 	wsKeepalive.Stop()
 	wsrelay.ShutdownExecutor()
 	if !proxy.DrainResponseCacheBackendWrites(2 * time.Second) {

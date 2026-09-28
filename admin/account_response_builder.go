@@ -243,6 +243,7 @@ func (h *Handler) buildAccountResponse(
 		CreditEnabled:                row.CreditEnabled,
 		CreditSkipUsageWindow:        row.CreditSkipUsageWindow,
 		SkipWarmTier:                 row.SkipWarmTier,
+		UseTickets:                   row.UseTickets,
 		AccountType:                  row.Type,
 		AccessTokenType:              accountAccessTokenType(row),
 		OpenAIResponsesAPI:           isOpenAIResponsesAccount,

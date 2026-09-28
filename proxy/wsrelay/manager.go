@@ -99,6 +99,8 @@ type WsConnection struct {
 	// 永久 reader 失败回调。Manager 使用指针级 CompareAndDelete 精确移除
 	// 当前连接，避免误删同 PoolKey 下已经重建的连接。
 	onReadFailure func(wc *WsConnection)
+	// transportScope 是建连时冻结的票范围。空表示不是票池连接。
+	transportScope string
 
 	// Protected by the owning Manager's respConnMu. Once removed from the pool,
 	// late completion callbacks must never retain this connection again.
@@ -548,7 +550,7 @@ func (m *Manager) hasLiveResponseBinding(wc *WsConnection) bool {
 // ensureAccountConnectionCapacity 为即将创建的新连接腾出一个账号级槽位。
 // 只淘汰没有在途请求的最久未使用连接，绝不打断活跃响应。调用方必须持有该账号的
 // accountLock，因此不同 session 同时建连也不会越过动态并发上限。
-func (m *Manager) ensureAccountConnectionCapacity(accountID int64, limit int, protectedKey string, pendingCreates int) bool {
+func (m *Manager) ensureAccountConnectionCapacity(accountID int64, limit int, protectedKey string, pendingCreates int, evictIdle bool) bool {
 	if limit < 1 {
 		limit = 1
 	}
@@ -575,6 +577,9 @@ func (m *Manager) ensureAccountConnectionCapacity(accountID int64, limit int, pr
 	}
 	if count+pendingCreates < limit {
 		return true
+	}
+	if !evictIdle {
+		return false
 	}
 	sortIdleForEviction(idle)
 	for _, candidate := range idle {
@@ -636,11 +641,11 @@ func (m *Manager) trimIdleAccountConnections(accountID int64, limit int, protect
 	}
 }
 
-func (m *Manager) reserveAccountConnectionCapacity(accountID int64, limit int, protectedKey string) bool {
+func (m *Manager) reserveAccountConnectionCapacity(accountID int64, limit int, protectedKey string, evictIdle bool) bool {
 	m.capacityMu.Lock()
 	pending := m.pendingCreates[accountID]
 	m.capacityMu.Unlock()
-	if !m.ensureAccountConnectionCapacity(accountID, limit, protectedKey, pending) {
+	if !m.ensureAccountConnectionCapacity(accountID, limit, protectedKey, pending, evictIdle) {
 		return false
 	}
 	m.capacityMu.Lock()
@@ -803,7 +808,7 @@ func (m *Manager) AcquireConnection(
 			m.DiscardConnection(wc)
 		}
 		accountLock.Lock()
-		if !m.reserveAccountConnectionCapacity(account.ID(), accountConnectionLimit(account), key) {
+		if !m.reserveAccountConnectionCapacity(account.ID(), accountConnectionLimit(account), key, true) {
 			accountLock.Unlock()
 			lock.Unlock()
 			if maxWait := busyAcquireMaxWait(); waited >= maxWait {
@@ -935,7 +940,7 @@ func (m *Manager) tryAcquireBusyOverflow(
 			lock.Unlock()
 			continue
 		}
-		if !m.reserveAccountConnectionCapacity(account.ID(), accountLimit, key) {
+		if !m.reserveAccountConnectionCapacity(account.ID(), accountLimit, key, true) {
 			// 账号连接容量已满：不为 overflow 挤占更多连接，放弃降级回到等待
 			accountLock.Unlock()
 			lock.Unlock()
@@ -989,6 +994,88 @@ const maxCreateLeaseAttempts = 3
 // already queued with the handshake before returning a newly reserved lease.
 const newConnectionReadFailureGrace = 5 * time.Millisecond
 
+func reusableSlotCount(slots, accountLimit int) int {
+	if accountLimit < 1 {
+		accountLimit = 1
+	}
+	if slots < 1 || slots > accountLimit {
+		return accountLimit
+	}
+	return slots
+}
+
+// PrewarmReusableConnections 用这次正式请求的握手头，把同一组空槽补成空闲连接。
+// 只填空槽，不淘汰正在用或可复用的连接。账号连接数到上限、或拨号失败，就停。
+func (m *Manager) PrewarmReusableConnections(ctx context.Context, account *auth.Account, wsURL, baseKey string, slots int, headers http.Header, proxyOverride string, keepGoing func() bool) int {
+	if m == nil || account == nil || strings.TrimSpace(baseKey) == "" || weakNetworkModeEnabled() {
+		return 0
+	}
+	if keepGoing == nil {
+		keepGoing = func() bool { return true }
+	}
+	accountLimit := accountConnectionLimit(account)
+	slots = reusableSlotCount(slots, accountLimit)
+	proxyURL := effectiveProxyURL(account, proxyOverride)
+	created := 0
+	for i := 0; i < slots; i++ {
+		if ctx.Err() != nil || !keepGoing() {
+			break
+		}
+		slotSession := fmt.Sprintf("%s#%d", baseKey, i)
+		key := m.poolKey(account.ID(), wsURL, slotSession, proxyURL)
+		lock, releaseKeyLock := m.keyLock(key)
+		if !lock.TryLock() {
+			releaseKeyLock()
+			continue
+		}
+		if _, ok := m.connections.Load(key); ok {
+			lock.Unlock()
+			releaseKeyLock()
+			continue
+		}
+		accountLock, releaseAccountLock := m.accountLock(account.ID())
+		accountLock.Lock()
+		if _, ok := m.connections.Load(key); ok {
+			accountLock.Unlock()
+			releaseAccountLock()
+			lock.Unlock()
+			releaseKeyLock()
+			continue
+		}
+		if !m.reserveAccountConnectionCapacity(account.ID(), accountLimit, key, false) {
+			accountLock.Unlock()
+			releaseAccountLock()
+			lock.Unlock()
+			releaseKeyLock()
+			break
+		}
+		accountLock.Unlock()
+		releaseAccountLock()
+		wc, err := m.createConnection(ctx, account, wsURL, slotSession, headers, proxyOverride)
+		if err != nil {
+			m.releaseAccountConnectionCapacity(account.ID())
+			lock.Unlock()
+			releaseKeyLock()
+			log.Printf("[ws] free-pool prewarm account=%d slot=%d failed: %v", account.ID(), i, err)
+			break
+		}
+		m.connections.Store(key, wc)
+		if m.afterConnectionStored != nil {
+			m.afterConnectionStored(wc)
+		}
+		m.releaseAccountConnectionCapacity(account.ID())
+		wc.touchInbound()
+		m.StartHeartbeat(wc)
+		lock.Unlock()
+		releaseKeyLock()
+		if fn := m.getOnConnected(); fn != nil {
+			fn(account.ID(), wc.session)
+		}
+		created++
+	}
+	return created
+}
+
 // AcquireReusableConnection 在固定槽位内复用或创建连接，返回实际使用的 session key。
 // 第一遍只复用已存在且空闲的连接；第二遍在空槽位新建持久连接；槽位全忙时回退到
 // fallbackKey 的临时连接。所有路径仍受账号动态并发对应的连接总数上限约束。
@@ -1004,9 +1091,7 @@ func (m *Manager) AcquireReusableConnection(
 ) (*WsConnection, *PendingRequest, string, error) {
 	proxyURL := effectiveProxyURL(account, proxyOverride)
 	accountLimit := accountConnectionLimit(account)
-	if slots < 1 || slots > accountLimit {
-		slots = accountLimit
-	}
+	slots = reusableSlotCount(slots, accountLimit)
 	accountLock, releaseAccountLock := m.accountLock(account.ID())
 	defer releaseAccountLock()
 	// 第一遍：复用空闲连接（探活失败或已断开的顺手清理，让第二遍可以补位）
@@ -1065,7 +1150,7 @@ func (m *Manager) AcquireReusableConnection(
 			lock.Unlock()
 			continue
 		}
-		if !m.reserveAccountConnectionCapacity(account.ID(), accountLimit, key) {
+		if !m.reserveAccountConnectionCapacity(account.ID(), accountLimit, key, true) {
 			accountLock.Unlock()
 			lock.Unlock()
 			continue
@@ -1223,9 +1308,6 @@ func (m *Manager) createConnection(
 	// (传入的 wsURL 已是 Resin 反代地址);poolKey 仍按第 2 层代理分池,保持既有键不变。
 	proxyURL := effectiveProxyURL(account, proxyOverride)
 	dialProxy := proxy.CodexDialProxyURLForTarget(account, wsURL, proxyURL)
-	if dedicated := proxy.CodexTurnStateRefreshProxy(ctx, account); dedicated != "" {
-		dialProxy = dedicated
-	}
 	if dialProxy != "" {
 		if err := configureWebsocketDialerProxy(dialer, dialProxy); err != nil {
 			return nil, err
@@ -1263,6 +1345,7 @@ func (m *Manager) createConnection(
 	wc := NewWsConnection(conn, session, wsURL)
 	wc.account = account
 	wc.PoolKey = poolKey
+	wc.transportScope = proxy.FreePoolTransportScope(ctx)
 	wc.upstreamUserAgent = strings.TrimSpace(headers.Get("User-Agent"))
 	wc.upstreamUserAgentKnown = true
 	wc.httpResp = resp
@@ -1427,9 +1510,10 @@ func (m *Manager) lookupResponseConn(responseID string, accountID int64, apiKey 
 // 成功返回 (连接, pendingRequest, 池内 sessionKey)；绑定失效或连接忙时返回 nil，
 // 调用方回退到常规 acquire 路径。忙时不等待：续链上下文虽在原连接，但排队会
 // 阻塞在前一个长响应后面，且该场景（同会话并发续链）极少，退化为缓存 miss 更稳。
-func (m *Manager) AcquirePreferredConnection(responseID string, accountID int64, apiKey string) (*WsConnection, *PendingRequest, string) {
+func (m *Manager) AcquirePreferredConnection(responseID string, accountID int64, apiKey, transportScope string) (*WsConnection, *PendingRequest, string) {
 	wc, sessionKey := m.lookupResponseConn(responseID, accountID, apiKey)
-	if wc == nil {
+	if wc == nil || wc.transportScope != transportScope {
+		// 原连接是别的票握手的。票只在新连接上生效，不复用，也不拆正在跑的旧连接。
 		return nil, nil, ""
 	}
 	accountLock, releaseAccountLock := m.accountLock(accountID)

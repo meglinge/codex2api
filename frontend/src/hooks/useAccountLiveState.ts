@@ -11,6 +11,8 @@ export function mergeAccountLiveState<T extends {
   active_requests?: number
   occupied_requests?: number
   session_slot_buffer_enabled?: boolean
+  ticket_status?: AccountLiveStateResponse['accounts'][string]['ticket_status']
+  health_buckets?: AccountLiveStateResponse['accounts'][string]['health_buckets']
 }>(
   current: T[],
   response: AccountLiveStateResponse,
@@ -25,7 +27,9 @@ export function mergeAccountLiveState<T extends {
       (account.active_requests ?? 0) === activeRequests &&
       (account.occupied_requests ?? account.active_requests ?? 0) === occupiedRequests &&
       (account.session_slot_buffer_enabled ?? false) === slotBufferEnabled &&
-      (!live || JSON.stringify(account.codex_turn_state_status) === JSON.stringify(live.codex_turn_state_status))
+      (!live || JSON.stringify(account.codex_turn_state_status) === JSON.stringify(live.codex_turn_state_status)) &&
+      JSON.stringify(account.ticket_status ?? []) === JSON.stringify(live?.ticket_status ?? []) &&
+      JSON.stringify(account.health_buckets ?? []) === JSON.stringify(live?.health_buckets ?? [])
     ) return account
     changed = true
     return {
@@ -33,6 +37,8 @@ export function mergeAccountLiveState<T extends {
       active_requests: activeRequests,
       occupied_requests: occupiedRequests,
       session_slot_buffer_enabled: slotBufferEnabled,
+      ticket_status: live?.ticket_status,
+      health_buckets: live?.health_buckets,
       ...(live ? { codex_turn_state_status: live.codex_turn_state_status } : {}),
     }
   })

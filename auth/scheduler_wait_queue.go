@@ -292,6 +292,35 @@ func (s *Store) SetSchedulerWaitLimits(total, perKey int) {
 	h.mu.Unlock()
 }
 
+type pendingDispatchFilterKey struct{}
+
+// WithPendingDispatchFilter 附上现在不能接、但很快可能能接的候选。
+// 只决定要不要进队等，这些号本身不会被选中。
+func WithPendingDispatchFilter(ctx context.Context, pending AccountFilter) context.Context {
+	if ctx == nil || pending == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, pendingDispatchFilterKey{}, pending)
+}
+
+func pendingDispatchFilter(ctx context.Context) AccountFilter {
+	if ctx == nil {
+		return nil
+	}
+	pending, _ := ctx.Value(pendingDispatchFilterKey{}).(AccountFilter)
+	return pending
+}
+
+// NotifyAccountAvailable 在账号从不能接变成能接时叫醒等待者。
+func (s *Store) NotifyAccountAvailable(accountID int64) {
+	if s == nil || accountID <= 0 {
+		return
+	}
+	if acc := s.FindByID(accountID); acc != nil {
+		s.notifySchedulerAccountAvailability(acc, true)
+	}
+}
+
 func (s *Store) notifySchedulerAccountAvailability(acc *Account, drain bool) {
 	if s == nil || acc == nil {
 		return

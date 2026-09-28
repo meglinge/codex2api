@@ -480,6 +480,9 @@ func (s *turnStateTemplateStore) strikesForTest(accountID int64, model string) i
 }
 
 func accountEligibleForTurnStateTemplate(account *auth.Account) bool {
+	if account != nil && account.UsesTickets() {
+		return false
+	}
 	if account == nil || account.ID() <= 0 {
 		return false
 	}
@@ -495,6 +498,9 @@ func accountEligibleForTurnStateTemplate(account *auth.Account) bool {
 // shapes. Never harvest client request headers. When this request rewrote outbound
 // state, observes response shape; a failed observation does not extend or revoke TTL.
 func CaptureCodexTurnStateTemplate(ctx context.Context, account *auth.Account, model string, headers http.Header) {
+	if FreePoolInUse(ctx) {
+		return
+	}
 	cfg := loadTurnStateTemplateConfig()
 	if !accountEligibleForTurnStateTemplate(account) || headers == nil || strings.TrimSpace(model) == "" {
 		return
@@ -594,6 +600,9 @@ func injectTurnStateReason(value string, parsed, degraded bool, policy turnState
 // Clear then Set to avoid duplicate casings. Never logs the state value.
 // ctx carries usage-log audit (turn-state decision/lengths); nil ctx skips audit.
 func ApplyCodexTurnStateTemplate(ctx context.Context, headers http.Header, account *auth.Account, model string) {
+	if FreePoolInUse(ctx) {
+		return
+	}
 	cfg := loadTurnStateTemplateConfig()
 	if !cfg.Enabled || headers == nil || !CodexTurnStateInjectionEnabled(account) || skipStoredCodexTurnState(ctx) {
 		return
@@ -735,17 +744,30 @@ func populateTurnStateTemplateMetaFromRequest(c *gin.Context, input *database.Us
 		return
 	}
 	audit := turnStateTemplateAuditFromContext(c.Request.Context())
+	ticket := ""
+	if c.Request != nil {
+		ticket = FreePoolTicketLogNote(c.Request.Context())
+	}
 	if audit == nil {
+		if ticket != "" {
+			input.TurnStateRewriteNote = ticket
+		}
 		return
 	}
 	audit.mu.Lock()
 	defer audit.mu.Unlock()
 	if !audit.recorded {
+		if ticket != "" {
+			input.TurnStateRewriteNote = ticket
+		}
 		return
 	}
 	// Only annotate when a rewrite was decided (substitute/inject). Pass stays blank
 	// so the Usage table mirrors UA: silence unless something changed.
 	if audit.decision != "substitute" && audit.decision != "inject" {
+		if ticket != "" {
+			input.TurnStateRewriteNote = ticket
+		}
 		return
 	}
 	input.TurnStateOverridden = audit.rewritten
@@ -759,6 +781,12 @@ func populateTurnStateTemplateMetaFromRequest(c *gin.Context, input *database.Us
 		} else {
 			note = "inject " + strconv.Itoa(audit.inboundLen) + "→" + strconv.Itoa(audit.outboundLen)
 		}
+	}
+	if ticket != "" {
+		if note != "" {
+			note += " "
+		}
+		note += ticket
 	}
 	input.TurnStateRewriteNote = note
 }

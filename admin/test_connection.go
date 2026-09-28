@@ -83,6 +83,12 @@ func (h *Handler) applyResponsesUsageLimitFailure(account *auth.Account, resp *h
 // TestConnection 测试账号连接（SSE 流式返回）
 // GET /api/admin/accounts/:id/test
 func (h *Handler) TestConnection(c *gin.Context) {
+	if id, err := strconv.ParseInt(c.Param("id"), 10, 64); err == nil && id > 0 {
+		if account := h.store.FindByID(id); account != nil && account.UsesTickets() {
+			writeError(c, http.StatusConflict, "票池账号暂不使用旧测连诊断；请通过正常请求验证")
+			return
+		}
+	}
 	h.testConnection(c, nil)
 }
 
@@ -1658,6 +1664,9 @@ func (h *Handler) emitBatchTestProgress(
 }
 
 func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (string, string) {
+	if acc != nil && acc.UsesTickets() {
+		return "skipped", "票池账号不使用旧测连诊断"
+	}
 	testCtx, cancel := context.WithTimeout(ctx, batchTestAccountTimeout)
 	defer cancel()
 	if acc == nil {
@@ -1818,6 +1827,9 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 // 全程不调用任何会回写账号/调度状态的方法（MarkError/MarkCooldown/
 // RecordManualTestSuccess 等），测试结果仅用于展示。
 func (h *Handler) runRecycleBinSingleTest(ctx context.Context, acc *auth.Account) (string, string) {
+	if acc != nil && acc.UsesTickets() {
+		return "skipped", "票池账号不使用旧测连诊断"
+	}
 	testCtx, cancel := context.WithTimeout(ctx, batchTestAccountTimeout)
 	defer cancel()
 	if acc == nil {

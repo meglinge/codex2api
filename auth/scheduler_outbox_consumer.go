@@ -552,6 +552,7 @@ func (s *Store) applyPersistentAccountSnapshot(dst, src *Account, enabled bool) 
 	dst.CreditSkipUsageWindow = src.CreditSkipUsageWindow
 	dst.IgnoreUsageLimitStatusOverride = cloneBoolPtr(src.IgnoreUsageLimitStatusOverride)
 	dst.SkipWarmTier = src.SkipWarmTier
+	dst.UseTickets = src.UseTickets
 	dst.AllowedAPIKeyIDs = cloneInt64Slice(src.AllowedAPIKeyIDs)
 	dst.setAllowedAPIKeyIDsLocked(src.AllowedAPIKeyIDs)
 	dst.Tags = cloneStringSlice(src.Tags)

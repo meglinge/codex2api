@@ -49,6 +49,8 @@ type codexTurnStateRefreshResult struct {
 
 // RefreshCodexTurnStateTemplates acquires and validates scoped models with SSE progress.
 func (h *Handler) RefreshCodexTurnStateTemplates(c *gin.Context) {
+	writeError(c, http.StatusGone, "旧的 X-Codex-Turn-State 获取已停用；请使用 Free 票池")
+	return
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || id <= 0 {
 		writeError(c, http.StatusBadRequest, "无效的账号 ID")

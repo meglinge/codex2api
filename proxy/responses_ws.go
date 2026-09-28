@@ -509,7 +509,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	}
 
 	accountFilter := accountFilterForResponsesWebSocket(effectiveModel)
-	accountFilter = h.withModelCooldownFilter(c.Request.Context(), effectiveModel, accountFilter)
+	accountFilter = h.store.WithModelCooldownFilterContext(c.Request.Context(), effectiveModel, accountFilter)
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
 	accountFilter = h.applyScopeBudgetFilter(c, accountFilter)
 	// resolveCompactionAffinity 只在已知来源相互冲突时报错；缓存故障按未知
@@ -523,6 +523,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	if compactionAffinity.Known {
 		accountFilter = compactionDomainFilter(compactionAffinity.CompatibilityDomain, accountFilter)
 	}
+	accountFilter, ticketPending := freePoolTicketGate(accountFilter)
+	ticketHold := newFreePoolHold(ticketPending, true)
+	c.Request = c.Request.WithContext(withFreePoolHold(c.Request.Context(), ticketHold))
 	// scope 并发位在选中账号后才能占，请求退出时统一释放（issue #439 v2）。
 	defer h.ReleaseAPIKeyScopeConcurrency(c)
 
@@ -612,6 +615,8 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	dispatchPolicy := dispatchPolicyForModel(effectiveModel)
 	var affinityGuard auth.SessionAffinityGuard
 	var selectionErr error
+	freePoolSwitches := 0
+	preferConnectedTicket := false
 	for attempt := 0; ; attempt++ {
 		if c.Request.Context().Err() != nil {
 			return errResponsesWSClientGone
@@ -619,6 +624,20 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
 		if !retainedHTTPFallback {
 			affinityGuard = auth.SessionAffinityGuard{}
+			if continuationPinned {
+				if boundID, reason := h.continuationPinBreak(affinityKey, apiKeyID, accountFilter, dispatchPolicy, time.Now()); reason != "" {
+					h.store.UnbindSessionAffinity(affinityKey, boundID)
+					continuationPinned = false
+					log.Printf("[free-pool] consumer=%d %s, unpin sticky request", boundID, reason)
+					preferConnectedTicket = true
+					if canDegradeContinuation() {
+						if contextErr := degradeContinuation(fmt.Sprintf("bound account %d %s", boundID, reason), attempt+1); contextErr != nil {
+							_ = writeResponsesWSError(conn, contextErr)
+							return newResponsesWSCloseError(responsesWSContextCloseCode(contextErr), contextErr.Message, contextErr)
+						}
+					}
+				}
+			}
 			if !continuationPinned && hasPreviousResponse && !continuationDegraded {
 				// 绑定账号已被本次请求硬排除（上一轮 429/5xx 等）时不必再等它 30s：
 				// 排除在本请求内不会解除，直接剥离 previous_response_id 换号。
@@ -636,12 +655,20 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			if attempt == 0 && compactionAffinity.Known && !continuationPinned {
 				account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
 			}
+			if account == nil && preferConnectedTicket {
+				if connected, ok := FreePoolConnectedAccountFilter(c.Request.Context(), effectiveModel, accountFilter); ok {
+					account = h.store.AcquireLeastOccupiedMatchingTicketAccount(affinityKey, apiKeyID, retryExclusions.ForSelection(), connected, dispatchPolicy)
+					if account != nil {
+						log.Printf("[free-pool] switch to connected ticket account=%d", account.ID())
+					}
+				}
+			}
 			if account != nil {
 				stickyProxyURL = account.GetProxyURL()
 			} else if continuationPinned {
-				account, stickyProxyURL, selectionErr = h.nextRetryAccountForContinuationWithDispatch(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
+				account, stickyProxyURL, selectionErr = h.nextRetryAccountForContinuationWithDispatch(withFreePoolHold(c.Request.Context(), ticketHold), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
 			} else {
-				account, stickyProxyURL, affinityGuard, selectionErr = h.nextRetryAccountForSessionWithDispatchGuard(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
+				account, stickyProxyURL, affinityGuard, selectionErr = h.nextRetryAccountForSessionWithDispatchGuard(withFreePoolHold(c.Request.Context(), ticketHold), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
 			}
 		}
 		if account == nil {
@@ -705,7 +732,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		attemptIdentity := ruleIdentity.WithSelectedAccount(account, h.store)
 		upstreamCtx = WithPayloadRuleIdentity(upstreamCtx, attemptIdentity)
 		lastUpstreamCancel = upstreamCancel
-		ttftGuard := newFirstTokenTimeoutGuard(firstTokenTimeoutForRequest(currentFirstTokenTimeout(), bodySignalCompact), upstreamCancel)
+		ttftTimeout := firstTokenTimeoutForRequest(currentFirstTokenTimeout(), bodySignalCompact)
+		ttftGuard := newFirstTokenTimeoutGuard(ttftTimeout, upstreamCancel)
+		armFirstToken := deferFirstTokenTimeout(ttftGuard)
 		useWebsocket := !wsHTTPFallback.ForceHTTP()
 		// 生图请求改走 HTTP 上游（客户端仍是 WS）：WebSocket 上游传输大体积
 		// 图片数据会卡死（issue #220）；自然语言生图意图也需保留图片工具（issue #288）。
@@ -775,15 +804,48 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		}
 
 		if reqErr != nil {
+			if IsFreePoolRequestError(reqErr) && isRetryableRequestError(reqErr) {
+				ttftGuard.Stop()
+				var typed *Error
+				claimBusy := errors.As(reqErr, &typed) && typed.Code == "free_pool_claim_failed"
+				if !claimBusy {
+					h.store.UnbindSessionAffinity(affinityKey, account.ID())
+					retryExclusions.MarkTransient(account.ID())
+					continuationPinned = false
+				}
+				h.store.Release(account)
+				freePoolSwitches++
+				if !ticketHold.requeues(account) && freePoolSwitches > freePoolMaxAccountSwitches {
+					log.Printf("[free-pool] consumer=%d %s, switch limit %d reached", account.ID(), reqErr.Error(), freePoolMaxAccountSwitches)
+					if !claimContinuousRetrySuccessContext(c.Request.Context()) {
+						return errResponsesWSClientGone
+					}
+					limitErr := api.NewAPIError(api.ErrorCode("free_pool_switch_limit"), FreePoolRequestError("switch_limit").Message, api.ErrorTypeServer)
+					return writeResponsesWSError(conn, limitErr)
+				}
+				log.Printf("[free-pool] consumer=%d %s, switching account (%d/%d)", account.ID(), reqErr.Error(), freePoolSwitches, freePoolMaxAccountSwitches)
+				preferConnectedTicket = true
+				if claimBusy {
+					timer := time.NewTimer(500 * time.Millisecond)
+					select {
+					case <-timer.C:
+					case <-c.Request.Context().Done():
+						timer.Stop()
+						return errResponsesWSClientGone
+					}
+				}
+				continue
+			}
 			if quotaErr := apiKeyModelRequestError(reqErr); quotaErr != nil {
 				ttftGuard.Stop()
 				h.store.Release(account)
 				// A model-specific budget must not close the connection for other models.
 				return writeResponsesWSError(conn, quotaErr.apiErr)
 			}
-			timedOut := ttftGuard.TimedOut()
+			poolTimedOut := FreePoolFirstTokenTimedOut(reqErr)
+			timedOut := ttftGuard.TimedOut() || poolTimedOut
 			ttftGuard.Stop()
-			if timedOut {
+			if timedOut && !poolTimedOut {
 				reqErr = firstTokenTimeoutError(currentFirstTokenTimeout())
 			}
 			kind := classifyTransportFailure(reqErr)
@@ -986,7 +1048,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		}
 		preserveAffinity := preserveContinuationBinding()
 		allowContinuationDegrade := canDegradeContinuation()
-		if err := h.streamResponsesWSUpstream(c, conn, resp, account, proxyURL, affinityKey, affinityGuard, preserveAffinity, allowContinuationDegrade, logModel, effectiveModel, logEffectiveModel, reasoningEffort, serviceTier, respCacheOwner, attemptReplay, start, ttftGuard, retryEnabled, hideUpstreamErrors, useWebsocket, fallbackLog, attempt+1, options, continuousRetryPolicy); err != nil {
+		if err := h.streamResponsesWSUpstream(c, conn, resp, account, proxyURL, affinityKey, affinityGuard, preserveAffinity, allowContinuationDegrade, logModel, effectiveModel, logEffectiveModel, reasoningEffort, serviceTier, respCacheOwner, attemptReplay, start, ttftGuard, armFirstToken, retryEnabled, hideUpstreamErrors, useWebsocket, fallbackLog, attempt+1, options, continuousRetryPolicy); err != nil {
 			if continuousRetryDeadlineExceeded(c.Request.Context()) {
 				return errResponsesWSClientGone
 			}
@@ -1107,6 +1169,7 @@ func (h *Handler) streamResponsesWSUpstream(
 	replayInput *responsesWSReplaySource,
 	start time.Time,
 	ttftGuard *firstTokenTimeoutGuard,
+	armFirstToken func(),
 	retryEnabled bool,
 	hideUpstreamErrors bool,
 	viaWebsocket bool,
@@ -1192,6 +1255,10 @@ func (h *Handler) streamResponsesWSUpstream(
 	}
 
 	readErr = readSSEStreamWithContinuousRetryKeepalive(c.Request.Context(), resp.Body, func(sseEvent string, data []byte) bool {
+		if armFirstToken != nil {
+			armFirstToken()
+			armFirstToken = nil
+		}
 		if wsReplay == nil {
 			h.recordCompactionProvenanceFromPayload(context.Background(), account, data)
 		}
@@ -1289,7 +1356,8 @@ func (h *Handler) streamResponsesWSUpstream(
 			// 就进不了下面的续链降级分支。
 			shouldDefer := shouldDeferPreContentSSEEvent(eventType, contentTokenSeen, gotTerminal, preflightPassthrough) ||
 				(!contentTokenSeen && !wroteAnyBody && !gotTerminal && isRetryableUpstreamErrorFrame(eventType, data, continuousRetryPolicy)) ||
-				(allowContinuationDegrade && !contentTokenSeen && !gotTerminal && eventType == "error" && isPreviousResponseNotFoundBody(data))
+				(allowContinuationDegrade && !contentTokenSeen && !gotTerminal && eventType == "error" && isPreviousResponseNotFoundBody(data)) ||
+				(account.UsesTickets() && !freePoolUserVisibleEvent(eventType, data) && !gotTerminal && pendingFirstTokenBytes+len(clientData) <= 1024*1024)
 			if shouldDefer {
 				pendingFirstTokenMessages = append(pendingFirstTokenMessages, append([]byte(nil), clientData...))
 				pendingFirstTokenBytes += len(clientData)
@@ -1385,8 +1453,10 @@ func (h *Handler) streamResponsesWSUpstream(
 	} else if len(terminalFailurePayload) > 0 && terminalFailureEventType == "" {
 		terminalFailureEventType = gjson.GetBytes(terminalFailurePayload, "type").String()
 	}
-	if ttftGuard.TimedOut() && !ttftRecorded && !gotTerminal {
-		outcome = firstTokenTimeoutOutcome(currentFirstTokenTimeout())
+	if FreePoolFirstTokenTimedOut(readErr) && !gotTerminal {
+		outcome = firstTokenTimeoutOutcome(FreePoolFirstTokenBudget(readErr))
+	} else if ttftGuard.TimedOut() && !ttftRecorded && !gotTerminal {
+		outcome = firstTokenTimeoutOutcome(ttftGuardTimeout(ttftGuard))
 	}
 	ttftGuard.Stop()
 	var responseFailedDecision codex429Decision

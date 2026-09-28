@@ -11,12 +11,13 @@ import { ThemeProvider } from './hooks/useTheme'
 import Dashboard from './pages/Dashboard'
 
 const Accounts = lazy(() => import('./pages/Accounts'))
+const FreePool = lazy(() => import('./pages/FreePool'))
+const FreePoolFirstUse = lazy(() => import('./pages/FreePoolFirstUse'))
 const Operations = lazy(() => import('./pages/Operations'))
 const OperationsErrors = lazy(() => import('./pages/OperationsErrors'))
 const RuntimeStatus = lazy(() => import('./pages/RuntimeStatus'))
 const Proxies = lazy(() => import('./pages/Proxies'))
 const SchedulerBoard = lazy(() => import('./pages/SchedulerBoard'))
-const Intelligence = lazy(() => import('./pages/Intelligence'))
 const Settings = lazy(() => import('./pages/Settings'))
 const Docs = lazy(() => import('./pages/Docs'))
 const APIKeys = lazy(() => import('./pages/APIKeys'))
@@ -64,6 +65,8 @@ function AdminApp() {
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/accounts" element={<Accounts />} />
+          <Route path="/free-pool" element={<FreePool />} />
+          <Route path="/free-pool/first-use" element={<FreePoolFirstUse />} />
           <Route path="/accounts/grok" element={<Accounts />} />
           <Route path="/accounts/antigravity" element={<Accounts />} />
           <Route path="/accounts/claude" element={<Accounts />} />
@@ -81,7 +84,7 @@ function AdminApp() {
           <Route path="/ops/runtime" element={<RuntimeStatus />} />
           <Route path="/ops/errors" element={<OperationsErrors />} />
           <Route path="/ops/scheduler" element={<SchedulerBoard />} />
-          <Route path="/ops/intelligence" element={<Intelligence />} />
+          <Route path="/ops/intelligence" element={<Navigate to="/free-pool" replace />} />
           <Route path="/usage" element={<Usage />} />
           <Route path="/model-pricing" element={<ModelPricing />} />
           <Route path="/payload-rules" element={<Navigate to="/payload-rules/editor" replace />} />

@@ -118,7 +118,12 @@ func beginUpstreamTrace(ctx context.Context, account *auth.Account, proxyURL str
 		label = auth.ProxyAuditLabel{Name: "resin"}
 	}
 	label.Name = security.MaskSensitiveData(label.Name)
-	attempt := &upstreamTraceAttempt{accountID: account.ID(), proxy: label, injectedTurnState: CodexTurnStateInjectionFromContext(ctx)}
+	sensitive := freePoolSensitive(ctx)
+	injected := CodexTurnStateInjectionFromContext(ctx)
+	if sensitive {
+		injected = ""
+	}
+	attempt := &upstreamTraceAttempt{accountID: account.ID(), proxy: label, injectedTurnState: injected}
 	a.mu.Lock()
 	a.current = attempt
 	a.mu.Unlock()
@@ -128,6 +133,9 @@ func beginUpstreamTrace(ctx context.Context, account *auth.Account, proxyURL str
 			return
 		} // A WS handshake ID is not a per-turn ID; WS turn state arrives per frame, see ObserveCodexTurnStateFrame.
 		turnState := observedCodexTurnState(resp.Header.Get(codexTurnStateHeader))
+		if sensitive {
+			turnState = ""
+		}
 		id := ""
 		if header != "" && auth.ValidateUpstreamRequestIDHeader(header) == nil {
 			id = resp.Header.Get(header)
@@ -153,6 +161,9 @@ func beginUpstreamTrace(ctx context.Context, account *auth.Account, proxyURL str
 // noteUpstreamTurnState 把上游回带的 turn state 记到当前尝试上；WS 路径逐帧调用，
 // 后到的值覆盖先到的。
 func noteUpstreamTurnState(ctx context.Context, state string) {
+	if freePoolSensitive(ctx) {
+		return
+	}
 	a := upstreamTraceFromContext(ctx)
 	if a == nil || state == "" {
 		return

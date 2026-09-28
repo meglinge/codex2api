@@ -313,6 +313,52 @@ function loadAPIAccountBalance(
 const formatMB = (bytes: number): string =>
   `${Math.round(bytes / (1024 * 1024))}MB`;
 
+function AccountTicketBadge({ account }: { account: AccountRow }) {
+  const item = account.ticket_status?.[0];
+  const remaining = useCountdownRemaining(item?.rest_until);
+  if (!item) return null;
+  const resting = Boolean(item.rest_until);
+  const model = item.model || "";
+  const spareModel = item.spare_model ? `（${item.spare_model}）` : "";
+  const spareLabel = item.spare === "ready"
+    ? `备用票已就绪${spareModel}`
+    : item.spare === "failed"
+      ? `备用票没过${spareModel}`
+      : item.spare === "scheduled" || item.spare === "probing"
+        ? `正在测备用票${spareModel}`
+        : "";
+  const title = [
+    resting
+      ? `整号歇票，所有模型暂停${model ? `，由 ${model} 连续换票触发` : ""}`
+      : item.bound
+        ? `票已连上${model ? `，最近模型 ${model}` : ""}`
+        : item.testing
+          ? `正在测 ${item.probing || 1} 张新票，不接新请求`
+          : item.fails > 0
+            ? `已连续换票失败 ${item.fails} 次`
+            : "",
+    spareLabel,
+  ].filter(Boolean).join("\n");
+  const label = resting ? `歇票 ${remaining}` : item.bound ? "票已连上" : item.testing ? (item.probing > 0 ? `测票中 ×${item.probing}` : "测票中") : `失败 ${item.fails}`;
+  const tone = resting
+    ? "bg-rose-50 text-rose-700 ring-rose-500/20 dark:bg-rose-950 dark:text-rose-300"
+    : item.bound
+      ? "bg-emerald-50 text-emerald-700 ring-emerald-500/20 dark:bg-emerald-950 dark:text-emerald-300"
+      : "bg-amber-50 text-amber-700 ring-amber-500/20 dark:bg-amber-950 dark:text-amber-300";
+  return (
+    <>
+      <span className={`inline-flex items-center rounded-md px-1.5 py-0.5 text-[11px] font-medium ring-1 ring-inset ${tone}`} title={title}>
+        {label}
+      </span>
+      {spareLabel ? (
+        <span className={`ml-1 inline-flex items-center rounded-md px-1.5 py-0.5 text-[11px] font-medium ring-1 ring-inset ${item.spare === "ready" ? "bg-sky-50 text-sky-700 ring-sky-500/20 dark:bg-sky-950 dark:text-sky-300" : "bg-amber-50 text-amber-700 ring-amber-500/20 dark:bg-amber-950 dark:text-amber-300"}`} title={spareLabel}>
+          {item.spare === "ready" ? "备用票就绪" : item.spare === "failed" ? "备用票没过" : "测备用票"}
+        </span>
+      ) : null}
+    </>
+  );
+}
+
 function AccountConcurrencyBadge({ account }: { account: AccountRow }) {
   const { t } = useTranslation();
   const active = Math.max(0, account.active_requests ?? 0);
@@ -1096,8 +1142,8 @@ interface AccountRowActions {
 }
 
 function formatCountdownRemaining(untilMs: number, nowMs: number): string {
-  const diff = Math.max(0, untilMs - nowMs);
-  if (diff <= 0) return "";
+  const diff = untilMs - nowMs;
+  if (!Number.isFinite(untilMs) || diff <= 0) return "0s";
   const hours = Math.floor(diff / 3600000);
   const minutes = Math.floor((diff % 3600000) / 60000);
   const seconds = Math.floor((diff % 60000) / 1000);
@@ -1118,8 +1164,12 @@ function useCountdownRemaining(until?: string): string {
       setRemaining("");
       return;
     }
-    const target = new Date(until).getTime();
+    const target = Date.parse(until);
     const update = () => {
+      if (!Number.isFinite(target)) {
+        setRemaining("");
+        return;
+      }
       setRemaining(formatCountdownRemaining(target, Date.now()));
     };
     update();
@@ -1488,9 +1538,10 @@ const AccountTableRow = memo(function AccountTableRow({
                                         <AccountStatusCountdown account={account} />
                                       )}
                                       <AccountConcurrencyBadge account={account} />
+                                      <AccountTicketBadge account={account} />
                                     </div>
                                     <AccountHealthBar
-                                      buckets={healthBuckets}
+                                      buckets={account.health_buckets ?? healthBuckets}
                                     />
                                   </div>
                                 )}
@@ -2178,6 +2229,8 @@ export default function Accounts() {
   const [batchCodexFingerprintMode, setBatchCodexFingerprintMode] =
     useState<CodexFingerprintMode>("off");
   const [batchUpdateTimezone, setBatchUpdateTimezone] = useState(false);
+  const [batchUpdateUseTickets, setBatchUpdateUseTickets] = useState(false);
+  const [batchUseTickets, setBatchUseTickets] = useState(true);
   const [batchTimezone, setBatchTimezone] = useState("");
   const [batchTimezoneCustom, setBatchTimezoneCustom] = useState(false);
   const [batchMetaSubmitting, setBatchMetaSubmitting] = useState(false);
@@ -2909,7 +2962,15 @@ export default function Accounts() {
     () => data.accounts.map((account) => account.id),
     [data.accounts],
   );
+  const [freePoolLive, setFreePoolLive] = useState({ queued: 0, responding: 0 });
   const applyAccountLiveState = useCallback((response: AccountLiveStateResponse) => {
+    if (response.free_pool) {
+      setFreePoolLive((current) =>
+        current.queued === response.free_pool!.queued && current.responding === response.free_pool!.responding
+          ? current
+          : response.free_pool!,
+      );
+    }
     setData((current) => {
       const accounts = mergeAccountLiveState(current.accounts, response);
       return accounts === current.accounts ? current : { ...current, accounts };
@@ -5367,7 +5428,8 @@ export default function Accounts() {
     batchUpdateBaseConcurrency ||
     batchUpdateSchedulerPriority ||
     batchUpdateCodexFingerprintMode ||
-    batchUpdateTimezone;
+    batchUpdateTimezone ||
+    batchUpdateUseTickets;
   const batchMetaInvalid =
     batchScoreBiasInvalid ||
     batchBaseConcurrencyInvalid ||
@@ -5401,6 +5463,8 @@ export default function Accounts() {
           codexFingerprintMode: batchCodexFingerprintMode,
           updateTimezone: batchUpdateTimezone,
           timezone: batchTimezone,
+          updateUseTickets: batchUpdateUseTickets,
+          useTickets: batchUseTickets,
         }),
       );
       showToast(
@@ -6275,6 +6339,14 @@ export default function Accounts() {
             titleAdornment={
               <div className="flex items-center gap-2">
                 {providerSwitcher}
+                {providerView === "codex" ? (
+                  <span
+                    className="rounded-md border border-border px-2 py-1 text-xs text-muted-foreground"
+                    title="排队：在等票已连上号的请求，流式最长 240 秒，非流式 90 秒。正在响应：已分到票号、上游还没结束的请求。每秒刷新。"
+                  >
+                    票池排队 {freePoolLive.queued} · 正在响应 {freePoolLive.responding}
+                  </span>
+                ) : null}
                 <Select
                   className="w-32"
                   compact
@@ -10697,6 +10769,23 @@ export default function Accounts() {
                   <div className="rounded-xl border border-border p-4 md:col-span-2">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
+                        <div className="text-sm font-semibold text-foreground">{t("accounts.batchUseTickets")}</div>
+                        <div className="mt-1 text-xs text-muted-foreground">{t("accounts.batchUseTicketsHint")}</div>
+                      </div>
+                      <Switch
+                        checked={batchUpdateUseTickets}
+                        onCheckedChange={setBatchUpdateUseTickets}
+                        aria-label={`${t("accounts.batchMetaTitle")}: ${t("accounts.batchUseTickets")}`}
+                      />
+                    </div>
+                    <div className="mt-3 flex items-center justify-between gap-3">
+                      <span className="text-sm text-muted-foreground">{batchUseTickets ? t("common.enabled") : t("common.disabled")}</span>
+                      <Switch checked={batchUseTickets} disabled={!batchUpdateUseTickets} onCheckedChange={setBatchUseTickets} aria-label={t("accounts.batchUseTickets")} />
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-border p-4 md:col-span-2">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
                         <div className="text-sm font-semibold text-foreground">
                           {t("accounts.codexTimezoneTitle")}
                         </div>
@@ -13870,6 +13959,7 @@ function AccountMobileCard({
                     <AccountStatusCountdown account={account} />
                   )}
                   <AccountConcurrencyBadge account={account} />
+                  <AccountTicketBadge account={account} />
                 </>
               )}
               {isFullCard && resetCredits > 0 && (
@@ -13977,7 +14067,7 @@ function AccountMobileCard({
                     {formatHealthTier(account.health_tier, t)}
                   </span>
                 </div>
-                <AccountHealthBar buckets={healthBuckets} />
+                <AccountHealthBar buckets={account.health_buckets ?? healthBuckets} />
               </div>
             </section>
           )}

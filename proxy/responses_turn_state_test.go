@@ -93,6 +93,49 @@ func TestResponsesTurnStateAllowsOnlyBoundTurnPastWHAMLimit(t *testing.T) {
 	}
 }
 
+func TestResponsesTurnStateRemovedBoundAccountReroutes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousRuntime := CurrentRuntimeSettings()
+	nextRuntime := previousRuntime
+	nextRuntime.ContinuousRetryPolicy = database.ContinuousRetryPolicy{}
+	ApplyRuntimeSettings(nextRuntime)
+	t.Cleanup(func() { ApplyRuntimeSettings(previousRuntime) })
+
+	newUpstream := func(hits *atomic.Int64) *httptest.Server {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: "+`{"type":"response.completed","response":{"id":"resp_done","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`+"\n\n")
+		}))
+		t.Cleanup(server.Close)
+		return server
+	}
+	var boundHits, fallbackHits atomic.Int64
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, MaxRetries: 0, MaxRateLimitRetries: 0})
+	t.Cleanup(store.Stop)
+	bound := &auth.Account{DBID: 1, UpstreamType: auth.UpstreamOpenAIResponses, BaseURL: newUpstream(&boundHits).URL, APIKey: "bound-token", Models: []string{"gpt-5.5"}, PlanType: "api"}
+	fallback := &auth.Account{DBID: 2, UpstreamType: auth.UpstreamOpenAIResponses, BaseURL: newUpstream(&fallbackHits).URL, APIKey: "fallback-token", Models: []string{"gpt-5.5"}, PlanType: "api"}
+	store.AddAccount(bound)
+	store.AddAccount(fallback)
+	store.BindSessionAffinity("removed-http-turn", bound, "")
+	store.RemoveAccount(bound.ID())
+
+	handler := NewHandler(store, nil, nil, nil)
+	recorder := invokeResponsesHandlerWithContext(t, func(c *gin.Context) {
+		c.Request.Header.Set("Session-Id", "removed-http-turn")
+		c.Request.Header.Set(codexTurnStateHeader, "turn-state")
+	}, handler.Responses, []byte(`{"model":"gpt-5.5","input":"continue","stream":true}`))
+	if recorder.Code != http.StatusOK || strings.Contains(recorder.Body.String(), "no_available_account") {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if boundHits.Load() != 0 || fallbackHits.Load() != 1 {
+		t.Fatalf("bound=%d fallback=%d", boundHits.Load(), fallbackHits.Load())
+	}
+	if id, ok := store.SessionAffinityAccountID("removed-http-turn"); !ok || id != fallback.ID() {
+		t.Fatalf("affinity = %d ok=%v, want %d", id, ok, fallback.ID())
+	}
+}
+
 func TestResponsesTurnStateExpiredBindingUsesBaselineSchedulerWhenContinuousRetryDisabled(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	t.Setenv("CODEX_SESSION_AFFINITY_TTL", "1ns")

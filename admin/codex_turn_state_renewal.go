@@ -19,6 +19,7 @@ const codexTurnStateRenewalRetryInterval = 10 * time.Second
 // StartCodexTurnStateRenewal starts one bounded worker pool. No account/page
 // polling or incoming request is needed to keep an existing template alive.
 func (h *Handler) StartCodexTurnStateRenewal(ctx context.Context) {
+	return
 	if h == nil || h.db == nil || h.store == nil {
 		return
 	}

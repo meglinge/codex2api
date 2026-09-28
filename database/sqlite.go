@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -61,16 +63,51 @@ func applySQLiteConnLimits(conn *sql.DB, n int) {
 }
 
 func (db *DB) withSQLiteWriteLock(ctx context.Context, fn func() error) error {
+	return db.acquireSQLiteWriteLock(ctx, 1, fn)
+}
+
+// acquireSQLiteWriteLock 的 skip 是从本函数再往外跳的层数。
+// withSQLiteWriteLock 传 1，withWriteTx 传 2，这样日志打到真正占锁的函数，而不是 withWriteTx。
+func (db *DB) acquireSQLiteWriteLock(ctx context.Context, skip int, fn func() error) error {
 	if !db.isSQLite() || db.sqliteWriteSem == nil {
 		return fn()
 	}
+	// PC 只在慢路径解析成函数名。调用方必须在进锁前取，不能等进锁后再取。
+	callerPC, _, _, callerOK := runtime.Caller(skip + 1)
+	waitStart := time.Now()
 	select {
 	case db.sqliteWriteSem <- struct{}{}:
-		defer func() { <-db.sqliteWriteSem }()
+		waited := time.Since(waitStart)
+		heldStart := time.Now()
+		defer func() {
+			held := time.Since(heldStart)
+			<-db.sqliteWriteSem
+			if waited > time.Second || held > 200*time.Millisecond {
+				log.Printf("[sqlite] write lock slow caller=%s wait=%s hold=%s", sqliteWriteLockCaller(callerPC, callerOK), waited, held)
+			}
+		}()
 		return fn()
 	case <-ctx.Done():
+		if waited := time.Since(waitStart); waited > time.Second {
+			log.Printf("[sqlite] write lock slow caller=%s wait=%s hold=%s err=%v", sqliteWriteLockCaller(callerPC, callerOK), waited, time.Duration(0), ctx.Err())
+		}
 		return ctx.Err()
 	}
+}
+
+func sqliteWriteLockCaller(pc uintptr, ok bool) string {
+	if !ok {
+		return "unknown"
+	}
+	fn := runtime.FuncForPC(pc)
+	if fn == nil {
+		return "unknown"
+	}
+	name := fn.Name()
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	return name
 }
 
 // withWriteTx serializes top-level SQLite mutations while preserving the
@@ -91,7 +128,7 @@ func (db *DB) withWriteTx(ctx context.Context, fn func(*sql.Tx) error) error {
 		}
 		return tx.Commit()
 	}
-	return db.withSQLiteWriteLock(ctx, run)
+	return db.acquireSQLiteWriteLock(ctx, 2, run)
 }
 
 func (db *DB) configureSQLite(ctx context.Context) error {
@@ -118,6 +155,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			credentials TEXT NOT NULL DEFAULT '{}',
 			proxy_url TEXT DEFAULT '',
 			status TEXT DEFAULT 'active',
+			use_tickets BOOLEAN NOT NULL DEFAULT false CHECK(use_tickets IN (0, 1)),
 			cooldown_reason TEXT DEFAULT '',
 			cooldown_until TIMESTAMP NULL,
 			score_bias_override INTEGER NULL,
@@ -805,6 +843,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"accounts", "credit_enabled", "INTEGER DEFAULT 0"},
 		{"accounts", "credit_skip_usage_window", "INTEGER DEFAULT 0"},
 		{"accounts", "skip_warm_tier", "INTEGER DEFAULT 0"},
+		{"accounts", "use_tickets", "BOOLEAN NOT NULL DEFAULT false CHECK(use_tickets IN (0, 1))"},
 		{"accounts", "image_quota_remaining", "INTEGER NULL"},
 		{"accounts", "image_quota_total", "INTEGER NULL"},
 		{"accounts", "today_used_count", "INTEGER DEFAULT 0"},
@@ -906,6 +945,9 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 	}
 	if err := db.installSchedulerOutboxTriggers(ctx); err != nil {
 		return fmt.Errorf("install scheduler outbox triggers: %w", err)
+	}
+	if err := db.ensureFreePoolSQLiteSchema(ctx); err != nil {
+		return fmt.Errorf("initialize free pool schema: %w", err)
 	}
 
 	return db.runDataMigrationsWithTimeout()

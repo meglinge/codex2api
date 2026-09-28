@@ -1,4 +1,15 @@
 import { turnStateHistoryQuery, type TurnStateHistoryFilter, type TurnStateHistoryPage } from './lib/turnStateHistory.ts'
+import {
+  freePoolQuery,
+  type CreateFreePoolAccountRequest,
+  type FreePoolAccountListParams,
+  type FreePoolAccountStatus,
+  type FreePoolAccountSummary,
+  type FreePoolPage,
+  type FreePoolProbeSummary,
+  type FreePoolTicketListParams,
+  type FreePoolTicketSummary,
+} from './lib/freePool.ts'
 import { qualityTestFilterQuery, type QualityTestJob, type QualityTestJobsFilter, type QualityTestJobsResponse, type QualityTestPrompt } from './lib/qualityTest.ts'
 // 取 i18next 单例而不是 ./i18n:后者在模块加载时就要读 localStorage / navigator,
 // 会让 Node 下直接 import 本文件的单测(src/lib/usageLogApi.test.mjs)崩掉。
@@ -909,6 +920,8 @@ export const api = {
     request<{ supported: boolean; subscription?: import('./types').SubscriptionStatus }>(`/accounts/${id}/subscription`, { signal }),
   refreshAccountSubscription: (id: number) =>
     request<import('./types').SubscriptionRefreshResponse>(`/accounts/${id}/subscription/refresh`, { method: 'POST', timeoutMs: 30_000 }),
+  updateAccountUseTickets: (id: number, useTickets: boolean) =>
+    request<{ id: number; use_tickets: boolean }>(`/accounts/${id}/use-tickets`, { method: 'PATCH', body: JSON.stringify({ use_tickets: useTickets }) }),
   updateAccountScheduler: (id: number, data: UpdateAccountSchedulerRequest) =>
     request<MessageResponse>(`/accounts/${id}/scheduler`, { method: 'PATCH', body: JSON.stringify(data) }),
   // 设置 OAuth 账号的支持模型白名单;空数组表示清空(该账号可调度所有模型)。返回归一化后的白名单。
@@ -930,6 +943,30 @@ export const api = {
     request<MessageResponse>(`/account-groups/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteAccountGroup: (id: number, force = false) =>
     request<MessageResponse>(`/account-groups/${id}${force ? '?force=true' : ''}`, { method: 'DELETE' }),
+  getFreePoolFirstUseStats: (hours = 24, signal?: AbortSignal) => request<{ total: number; passed: number; failed: number; pending: number; nodes: number; gateways: { gateway: string; edge_colo: string; edges: string[]; total: number; passed: number; failed: number; pending: number; unused_ready: number }[] }>(`/free-pool/first-use-stats?hours=${hours}`, { signal }),
+  getFreePoolSettings: (signal?: AbortSignal) => request<{ mint_workers: number; max_mint_workers: number; proxy_template: string; countries: string[]; validation_attempts: number; max_validation_attempts: number; mint_failure_strikes: number; max_mint_failure_strikes: number; exclusive_tickets: boolean; first_token_timeout_seconds: number; first_token_strikes: number; max_first_token_strikes: number; switch_rest_strikes: number; max_switch_rest_strikes: number; spare_delay_seconds: number; max_spare_delay_seconds: number; probe_concurrency: number; max_probe_concurrency: number }>('/free-pool/settings', { signal }),
+  updateFreePoolSettings: (settings: { mint_workers: number; proxy_template: string; countries: string[]; validation_attempts: number; mint_failure_strikes: number; exclusive_tickets: boolean; first_token_timeout_seconds: number; first_token_strikes: number; switch_rest_strikes: number; spare_delay_seconds: number; probe_concurrency: number }) => request<{ mint_workers: number; proxy_template: string; countries: string[]; validation_attempts: number; mint_failure_strikes: number; exclusive_tickets: boolean; first_token_timeout_seconds: number; first_token_strikes: number; switch_rest_strikes: number; spare_delay_seconds: number; probe_concurrency: number }>('/free-pool/settings', { method: 'PUT', body: JSON.stringify(settings) }),
+  listFreePoolAccounts: (params: FreePoolAccountListParams = {}, signal?: AbortSignal) =>
+    request<FreePoolPage<FreePoolAccountSummary>>(`/free-pool/accounts?${freePoolQuery(params)}`, { signal }),
+  createFreePoolAccount: (data: CreateFreePoolAccountRequest) =>
+    request<{ id: number }>('/free-pool/accounts', { method: 'POST', body: JSON.stringify(data) }),
+  importFreePoolAccounts: (file: File, status: FreePoolAccountStatus) => {
+    const body = new FormData()
+    body.set('file', file)
+    body.set('status', status)
+    return request<{ created: number; skipped: number; ids: number[] }>('/free-pool/accounts/import', { method: 'POST', body })
+  },
+  setFreePoolAccountStatus: (id: number, status: FreePoolAccountStatus) =>
+    request<{ id: number; status: FreePoolAccountStatus }>(`/free-pool/accounts/${id}`, { method: 'PATCH', body: JSON.stringify({ status }) }),
+  setAllFreePoolAccountStatus: (status: FreePoolAccountStatus) =>
+    request<{ status: FreePoolAccountStatus; updated: number }>('/free-pool/accounts/status', { method: 'POST', body: JSON.stringify({ status }) }),
+  deleteFreePoolAccount: (id: number) =>
+    request<void>(`/free-pool/accounts/${id}`, { method: 'DELETE' }),
+  listFreePoolTickets: (params: FreePoolTicketListParams = {}, signal?: AbortSignal) =>
+    request<FreePoolPage<FreePoolTicketSummary>>(`/free-pool/tickets?${freePoolQuery(params)}`, { signal }),
+  getFreePoolProbeSummary: (ticketID: number, signal?: AbortSignal) =>
+    request<FreePoolProbeSummary>(`/free-pool/tickets/${ticketID}/probes`, { signal }),
+  clearFreePoolClaimRecords: () => request<{ rejections: number; verifications: number; bindings: number; leases: number; released: number }>('/free-pool/claim-records/clear', { method: 'POST' }),
   toggleAccountEnabled: (id: number, enabled: boolean) =>
     request<MessageResponse>(`/accounts/${id}/enable`, { method: 'POST', body: JSON.stringify({ enabled }) }),
   toggleAccountLock: (id: number, locked: boolean) =>

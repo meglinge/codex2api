@@ -117,9 +117,6 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	}
 
 	ctx = proxy.BeginCodexTurnStateTemplateAttempt(ctx)
-	if dedicated := proxy.CodexTurnStateRefreshProxy(ctx, account); dedicated != "" {
-		proxyOverride = dedicated
-	}
 
 	account.Mu().RLock()
 	accessToken := account.AccessToken
@@ -198,9 +195,11 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	var wc *WsConnection
 	var pr *PendingRequest
 	var err2 error
+	reusable := false
 	acquireStart := time.Now()
+	transportScope := proxy.FreePoolTransportScope(ctx)
 	if prevRespID := strings.TrimSpace(gjson.GetBytes(wsBody, "previous_response_id").String()); prevRespID != "" {
-		if pwc, ppr, slotKey := e.manager.AcquirePreferredConnection(prevRespID, account.ID(), apiKey); pwc != nil {
+		if pwc, ppr, slotKey := e.manager.AcquirePreferredConnection(prevRespID, account.ID(), apiKey, transportScope); pwc != nil {
 			wc, pr, poolSessionID = pwc, ppr, slotKey
 		}
 	}
@@ -218,7 +217,11 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		// A pooled handshake must belong to the same mapped conversation/thread.
 		poolSessionID = proxy.ScopeCodexFingerprintTransportKey(poolSessionID, account, ginHeaders)
 		baseKey = proxy.ScopeCodexFingerprintTransportKey(baseKey, account, ginHeaders)
+		// 握手头在建连时冻结。槽位按票隔离，换票必须重连，不能复用旧票的空闲连接。
+		poolSessionID = proxy.ScopeFreePoolConnectionKey(ctx, poolSessionID)
+		baseKey = proxy.ScopeFreePoolConnectionKey(ctx, baseKey)
 		if proxy.IsStatelessWebsocketSessionID(sessionID) && baseKey != "" && !statelessOneShotEnabled() {
+			reusable = true
 			wc, pr, poolSessionID, err2 = e.manager.AcquireReusableConnection(ctx, account, wsURL, baseKey, sessionID, statelessConnectionSlots(), headers, proxyOverride)
 		} else {
 			wc, pr, err2 = e.manager.AcquireConnection(ctx, account, wsURL, poolSessionID, headers, proxyOverride)
@@ -279,6 +282,18 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 
 	// 启动心跳
 	e.manager.StartHeartbeat(wc)
+	if reusable && transportScope != "" && proxy.FreePoolFreshTicket(ctx) {
+		prewarmHeaders := headers.Clone()
+		prewarmBaseKey := baseKey
+		slots := statelessConnectionSlots()
+		go func() {
+			prewarmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), HandshakeTimeout)
+			defer cancel()
+			e.manager.PrewarmReusableConnections(prewarmCtx, account, wsURL, prewarmBaseKey, slots, prewarmHeaders, proxyOverride, func() bool {
+				return !proxy.FreePoolStateChanged(prewarmCtx)
+			})
+		}()
+	}
 
 	proxy.ConfirmCodexTurnStateTemplate(ctx, headers, account, gjson.GetBytes(wsBody, "model").String())
 	return &WsResponse{
@@ -423,7 +438,7 @@ func (e *Executor) prepareWebsocketHeaders(ctx context.Context, accessToken stri
 	// 跨账号回声守卫必须在模板替换/注入之前。
 	proxy.GuardCodexTurnStateEcho(affinityKey, account, headers)
 	// 292 模板替换/注入：在透传+守卫之后、指纹收敛之前。
-	proxy.ApplyCodexTurnStateTemplate(ctx, headers, account, strings.TrimSpace(gjson.GetBytes(wsBody, "model").String()))
+
 	// 指纹收敛：在透传之后覆盖客户端原值，在账号自定义头之前保留运维覆盖优先级。
 	// 握手头是逐连接冻结的，复用连接沿用建连时的取值；收敛值按账号恒定，正好与
 	// 这一语义相容。off 档为空操作。
@@ -841,7 +856,7 @@ func websocketResponseToHTTP(ctx context.Context, wsResp *WsResponse, statusCode
 		case <-ctx.Done():
 			// 先关 pipe 再关 WS 响应：pipe 以第一个错误为准，保证下游读到的是
 			// cancellation 而不是随后销毁连接引发的 read error。
-			_ = pw.CloseWithError(ctx.Err())
+			_ = pw.CloseWithError(context.Cause(ctx))
 			_ = wsResp.Close()
 		case <-done:
 		}
@@ -866,7 +881,11 @@ func websocketResponseToHTTP(ctx context.Context, wsResp *WsResponse, statusCode
 			// 上游回带的 turn state 只在帧里（握手头是建连时的旧快照），逐帧观测记进追踪。
 			if state := proxy.ObserveCodexTurnStateFrame(ctx, data); state != "" {
 				turnState = state
+				if proxy.FreePoolStateChanged(ctx) {
+					return false
+				}
 			}
+			_ = proxy.NoteFreePoolFirstTokenPayload(ctx, data)
 			// 同一轮可能多次携带 metadata，只按最终形态计一次；终止帧发布前入缓存。
 			switch gjson.GetBytes(data, "type").String() {
 			case "response.completed", "response.failed", "error":

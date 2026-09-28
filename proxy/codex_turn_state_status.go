@@ -207,6 +207,9 @@ func BeginCodexTurnStateTemplateAttempt(ctx context.Context) context.Context {
 // Confirm is called only after a successful transport send. Custom/manual
 // overrides that replaced the auto template must not claim automatic recovery.
 func ConfirmCodexTurnStateTemplate(ctx context.Context, headers http.Header, account *auth.Account, model string) {
+	if FreePoolInUse(ctx) {
+		return
+	}
 	audit := turnStateTemplateAuditFromContext(ctx)
 	if audit == nil || !CodexTurnStateInjectionEnabled(account) {
 		return

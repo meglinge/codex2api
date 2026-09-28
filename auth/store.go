@@ -440,6 +440,7 @@ type Account struct {
 	IgnoreUsageLimitStatusOverride *bool
 	ignoreUsageLimitStatus         bool
 	SkipWarmTier                   bool // 跳过 warm 层级降级
+	UseTickets                     bool
 	AllowedAPIKeyIDs               []int64
 	allowedAPIKeySet               map[int64]struct{}
 	Tags                           []string
@@ -5730,6 +5731,7 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 	account.ModelCooldownBackoffOverride = row.GetCredentialOptionalBool("model_cooldown_backoff_override")
 	account.recomputeEffectiveIgnoreUsageLimitStatus(s.IgnoreUsageLimitStatus())
 	account.SkipWarmTier = row.SkipWarmTier
+	account.UseTickets = row.UseTickets
 	if row.Status == "error" {
 		account.Status = StatusError
 		account.ErrorMsg = row.ErrorMessage
@@ -7102,7 +7104,7 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 	}
 	key = strings.TrimSpace(key)
 	if key == "" {
-		return s.NextExcludingWithDispatch(apiKeyID, exclude, filter, policy), "", SessionAffinityGuard{}
+		return s.nextAccountForFreshAffinityWithDispatch("", apiKeyID, exclude, filter, policy), "", SessionAffinityGuard{}
 	}
 
 	now := time.Now()
@@ -7166,8 +7168,9 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 				if fallback == nil {
 					return nil, "", SessionAffinityGuard{}
 				}
-				log.Printf("会话粘性容量溢出: 绑定账号=%d 并发满,本请求借用账号=%d(该请求预期上游缓存未命中)", binding.accountID, fallback.DBID)
-				return fallback, "", SessionAffinityGuard{preserveAccountID: binding.accountID}
+				guard := s.ticketSpilloverGuard(binding.accountID, fallback)
+				log.Printf("会话粘性容量溢出: 绑定账号=%d 并发满,本请求借用账号=%d 迁移绑定=%t", binding.accountID, fallback.DBID, !guard.PreservesExisting())
+				return fallback, "", guard
 			}
 		}
 	}
@@ -7205,8 +7208,9 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 				if fallback == nil {
 					return nil, "", SessionAffinityGuard{}
 				}
-				log.Printf("会话粘性容量溢出: 绑定账号=%d 并发满,本请求借用账号=%d(该请求预期上游缓存未命中)", binding.accountID, fallback.DBID)
-				return fallback, "", SessionAffinityGuard{preserveAccountID: binding.accountID}
+				guard := s.ticketSpilloverGuard(binding.accountID, fallback)
+				log.Printf("会话粘性容量溢出: 绑定账号=%d 并发满,本请求借用账号=%d 迁移绑定=%t", binding.accountID, fallback.DBID, !guard.PreservesExisting())
+				return fallback, "", guard
 			}
 		}
 	}
@@ -7227,9 +7231,117 @@ func (s *Store) nextAccountForFreshAffinity(key string, apiKeyID int64, exclude 
 	return s.nextAccountForFreshAffinityWithDispatch(key, apiKeyID, exclude, filter, DispatchPolicyStandard)
 }
 
+func (s *Store) ticketSpilloverGuard(boundID int64, fallback *Account) SessionAffinityGuard {
+	bound := s.FindByID(boundID)
+	if fallback != nil && fallback.UsesTickets() && bound != nil && bound.UsesTickets() {
+		return SessionAffinityGuard{}
+	}
+	return SessionAffinityGuard{preserveAccountID: boundID}
+}
+
+func (s *Store) acquireLeastOccupiedTicketAccount(key string, apiKeyID int64, exclude map[int64]bool, filter AccountFilter, policy DispatchPolicy) (*Account, bool) {
+	if s == nil {
+		return nil, false
+	}
+	type candidate struct {
+		acc    *Account
+		prio   int64
+		tier   int
+		load   int64
+		limit  int64
+		weight uint64
+	}
+	maxConcurrency := atomic.LoadInt64(&s.maxConcurrency)
+	seen := 0
+	var candidates []candidate
+	for _, acc := range s.accountSnapshotAccounts() {
+		if acc == nil || (exclude != nil && exclude[acc.DBID]) || !acc.dispatchableForPolicy(policy) || !s.accountAllowedForAPIKey(acc, apiKeyID) || (filter != nil && !filter(acc)) {
+			continue
+		}
+		if !acc.UsesTickets() {
+			return nil, false
+		}
+		seen++
+		tier, _, _, limit := acc.schedulerSnapshotForPolicy(maxConcurrency, policy)
+		load := accountOccupiedRequests(acc)
+		if limit <= 0 || load >= limit {
+			continue
+		}
+		candidates = append(candidates, candidate{
+			acc: acc, prio: acc.schedulerPriority(), tier: tierPriority(tier),
+			load: load, limit: limit, weight: affinityKeyHash(key + ":" + strconv.FormatInt(acc.DBID, 10)),
+		})
+	}
+	if seen == 0 {
+		return nil, false
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		a, b := candidates[i], candidates[j]
+		if a.prio != b.prio {
+			return a.prio > b.prio
+		}
+		if a.load != b.load {
+			return a.load < b.load
+		}
+		if a.tier != b.tier {
+			return a.tier > b.tier
+		}
+		return a.weight > b.weight
+	})
+	for _, item := range candidates {
+		if s.accountHasBlockingCachedCooldown(item.acc, policy) {
+			continue
+		}
+		if s.tryAcquireAccount(item.acc, item.limit, true) {
+			return item.acc, true
+		}
+	}
+	return nil, true
+}
+
+// AcquireLeastOccupiedMatchingTicketAccount 在开了票据的号里，按占用最少挑一个同时满足 filter 的号。
+// 没有符合的号就返回 nil，不回退到普通选号。调用方拿到的号已经占了并发槽。
+func (s *Store) AcquireLeastOccupiedMatchingTicketAccount(key string, apiKeyID int64, exclude map[int64]bool, filter AccountFilter, policy DispatchPolicy) *Account {
+	if s == nil {
+		return nil
+	}
+	acc, ok := s.acquireLeastOccupiedTicketAccount(key, apiKeyID, exclude, s.withUsableEgressFilter(filter), policy)
+	if !ok {
+		return nil
+	}
+	return acc
+}
+
+func (s *Store) ticketPoolShouldSpread(apiKeyID int64, exclude map[int64]bool, filter AccountFilter, policy DispatchPolicy) bool {
+	if s == nil {
+		return false
+	}
+	ticket, plain := 0, 0
+	for _, acc := range s.accountSnapshotAccounts() {
+		if acc == nil || exclude != nil && exclude[acc.DBID] || !acc.dispatchableForPolicy(policy) || !s.accountAllowedForAPIKey(acc, apiKeyID) {
+			continue
+		}
+		if filter != nil && !filter(acc) {
+			continue
+		}
+		if acc.UseTickets {
+			ticket++
+		} else {
+			plain++
+		}
+	}
+	return ticket > 0 && plain == 0
+}
+
 func (s *Store) nextAccountForFreshAffinityWithDispatch(key string, apiKeyID int64, exclude map[int64]bool, filter AccountFilter, policy DispatchPolicy) *Account {
 	if s == nil {
 		return nil
+	}
+	if acc, ok := s.acquireLeastOccupiedTicketAccount(key, apiKeyID, exclude, s.withUsableEgressFilter(filter), policy); ok {
+		if acc != nil {
+			return acc
+		}
+		return s.NextExcludingWithDispatch(apiKeyID, exclude, filter, policy)
 	}
 	if !s.GetSessionAffinitySpread() || strings.TrimSpace(key) == "" {
 		return s.NextExcludingWithDispatch(apiKeyID, exclude, filter, policy)
@@ -7238,7 +7350,13 @@ func (s *Store) nextAccountForFreshAffinityWithDispatch(key string, apiKeyID int
 	if s.SchedulerEngine() == "indexed" {
 		if scheduler := s.routingFastScheduler(apiKeyID); scheduler != nil {
 			started := time.Now()
-			acc := scheduler.AcquireForAffinityWithDispatch(affinityKeyHash(key), apiKeyID, exclude, filter, policy)
+			var acc *Account
+			if s.ticketPoolShouldSpread(apiKeyID, exclude, filter, policy) {
+				// 用票据的号不按会话哈希钉死，按当前连接数摊开。已有会话仍走上面的绑定。
+				acc = scheduler.AcquireExcludingWithDispatch(apiKeyID, exclude, filter, policy)
+			} else {
+				acc = scheduler.AcquireForAffinityWithDispatch(affinityKeyHash(key), apiKeyID, exclude, filter, policy)
+			}
 			if acc != nil && s.accountHasBlockingCachedCooldown(acc, policy) {
 				s.Release(acc)
 				acc = nil
@@ -7574,6 +7692,11 @@ func (s *Store) hasDispatchCandidateWithFilter(apiKeyID int64, exclude map[int64
 	return s.hasDispatchCandidateWithDispatch(apiKeyID, exclude, filter, DispatchPolicyStandard)
 }
 
+// HasDispatchCandidate 只看结构性候选，不看空闲槽。
+func (s *Store) HasDispatchCandidate(apiKeyID int64, exclude map[int64]bool, filter AccountFilter, policy DispatchPolicy) bool {
+	return s.hasDispatchCandidateWithDispatch(apiKeyID, exclude, filter, policy)
+}
+
 func (s *Store) hasDispatchCandidateWithDispatch(apiKeyID int64, exclude map[int64]bool, filter AccountFilter, policy DispatchPolicy) bool {
 	if s == nil {
 		return false
@@ -7742,6 +7865,14 @@ func (s *Store) hasContinuationCandidateWithFilter(key string, apiKeyID int64, e
 	return s.hasContinuationCandidateWithDispatch(key, apiKeyID, exclude, filter, DispatchPolicyStandard)
 }
 
+// HasContinuationCandidate 只看绑定号结构上还能不能接这个续轮，不看空闲槽。
+func (s *Store) HasContinuationCandidate(key string, apiKeyID int64, filter AccountFilter, policy DispatchPolicy) bool {
+	if s == nil {
+		return false
+	}
+	return s.hasContinuationCandidateWithDispatch(key, apiKeyID, nil, filter, policy)
+}
+
 func (s *Store) hasContinuationCandidateWithDispatch(key string, apiKeyID int64, exclude map[int64]bool, filter AccountFilter, policy DispatchPolicy) bool {
 	accountID, ok := s.SessionAffinityAccountID(key)
 	if !ok || accountID == 0 || (exclude != nil && exclude[accountID]) {
@@ -7828,11 +7959,13 @@ func (s *Store) waitForSessionAvailableWithFilter(ctx context.Context, key strin
 	if timeout <= 0 || ctx.Err() != nil {
 		return nil, "", SessionAffinityGuard{}, ctx.Err()
 	}
+	pending := pendingDispatchFilter(ctx)
 	hasCandidate := func() bool {
 		if preserveBinding {
 			return s.hasContinuationCandidateWithDispatch(key, apiKeyID, exclude, filter, policy)
 		}
-		return s.hasDispatchCandidateWithDispatch(apiKeyID, exclude, filter, policy)
+		return s.hasDispatchCandidateWithDispatch(apiKeyID, exclude, filter, policy) ||
+			(pending != nil && s.hasDispatchCandidateWithDispatch(apiKeyID, exclude, pending, policy))
 	}
 	// Indexed/shadow also wait on an empty snapshot: another replica may add
 	// an account and notify this process through the durable outbox.
@@ -10506,12 +10639,25 @@ func (s *Store) ClearUsageLimitCooldownSince(acc *Account, observedAt time.Time)
 		return true
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if _, err := s.db.ClearCooldownIfReasonAndUntil(ctx, acc.DBID, reason, until); err != nil {
+	if err := s.clearPersistedCooldown(acc.DBID, reason, until); err != nil {
 		log.Printf("[账号 %d] 清理过期用量冷却状态失败: %v", acc.DBID, err)
 	}
 	return true
+}
+
+func (s *Store) clearPersistedCooldown(id int64, reason string, until time.Time) error {
+	var last error
+	for attempt := 0; attempt < 3; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, err := s.db.ClearCooldownIfReasonAndUntil(ctx, id, reason, until)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		last = err
+		time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+	}
+	return last
 }
 
 func isUsageLimitCooldownReason(reason string) bool {

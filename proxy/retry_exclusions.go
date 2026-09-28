@@ -423,11 +423,11 @@ var dispatchAccountWaitTimeout = 30 * time.Second
 // waitForRetryAccountAvailable keeps one queue admission for the normal
 // 30-second wait, including continuous-retry SSE/WebSocket heartbeats.
 func (h *Handler) waitForRetryAccountAvailable(ctx context.Context, affinityKey string, apiKeyID int64, exclude map[int64]bool, filter auth.AccountFilter, preserveBinding bool, policy auth.DispatchPolicy) (*auth.Account, string, error) {
-	account, proxyURL, _, err := h.waitForRetryAccountAvailableWithGuard(ctx, affinityKey, apiKeyID, exclude, filter, preserveBinding, policy)
+	account, proxyURL, _, err := h.waitForRetryAccountAvailableWithGuard(ctx, affinityKey, apiKeyID, exclude, filter, preserveBinding, policy, dispatchAccountWaitTimeout)
 	return account, proxyURL, err
 }
 
-func (h *Handler) waitForRetryAccountAvailableWithGuard(ctx context.Context, affinityKey string, apiKeyID int64, exclude map[int64]bool, filter auth.AccountFilter, preserveBinding bool, policy auth.DispatchPolicy) (*auth.Account, string, auth.SessionAffinityGuard, error) {
+func (h *Handler) waitForRetryAccountAvailableWithGuard(ctx context.Context, affinityKey string, apiKeyID int64, exclude map[int64]bool, filter auth.AccountFilter, preserveBinding bool, policy auth.DispatchPolicy, timeout time.Duration) (*auth.Account, string, auth.SessionAffinityGuard, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -449,7 +449,10 @@ func (h *Handler) waitForRetryAccountAvailableWithGuard(ctx context.Context, aff
 			return step, nil
 		}
 	}
-	account, proxyURL, guard, err := h.store.WaitForDispatchAvailable(ctx, affinityKey, dispatchAccountWaitTimeout, apiKeyID, exclude, filter, preserveBinding, policy, heartbeat)
+	if timeout <= 0 {
+		timeout = dispatchAccountWaitTimeout
+	}
+	account, proxyURL, guard, err := h.store.WaitForDispatchAvailable(ctx, affinityKey, timeout, apiKeyID, exclude, filter, preserveBinding, policy, heartbeat)
 	account, proxyURL = guardRetryAccountContext(ctx, h.store.Release, account, proxyURL)
 	if account == nil {
 		guard = auth.SessionAffinityGuard{}
@@ -491,7 +494,7 @@ func (h *Handler) nextRetryAccount(ctx context.Context, affinityKey string, apiK
 // pool waits/retry cycles. The upstream first-token guard starts too late to
 // protect this phase. This context is canceled on return, so it never limits a
 // successfully selected account's subsequent streaming response.
-const accountSelectionTimeout = 30 * time.Second
+var accountSelectionTimeout = 30 * time.Second
 
 func selectionFilterWithContext(ctx context.Context, filter auth.AccountFilter) auth.AccountFilter {
 	return func(acc *auth.Account) bool {
@@ -509,7 +512,18 @@ func (h *Handler) nextRetryAccountWithGuard(ctx context.Context, affinityKey str
 	if h == nil || h.store == nil {
 		return nil, "", auth.SessionAffinityGuard{}, nil
 	}
-	ctx, cancelSelection := context.WithTimeout(ctx, accountSelectionTimeout)
+	requestCtx := ctx
+	hold := freePoolHoldFrom(ctx)
+	if preserveBinding || hold == nil || !hold.enabled() {
+		hold = nil
+	}
+	selectionTimeout := accountSelectionTimeout
+	if hold != nil {
+		if until := time.Until(hold.deadline); until > selectionTimeout {
+			selectionTimeout = until
+		}
+	}
+	ctx, cancelSelection := context.WithTimeout(ctx, selectionTimeout)
 	defer cancelSelection()
 	filter = selectionFilterWithContext(ctx, filter)
 	for {
@@ -536,8 +550,42 @@ func (h *Handler) nextRetryAccountWithGuard(ctx context.Context, affinityKey str
 			return nil, "", auth.SessionAffinityGuard{}, ctx.Err()
 		}
 		h.store.TriggerDispatchStateReconcileAsync()
+		waitCtx, cancelWait := ctx, context.CancelFunc(func() {})
+		holding := false
+		var endHold func()
+		waitTimeout := dispatchAccountWaitTimeout
+		if hold != nil {
+			remaining := time.Until(hold.deadline)
+			if remaining <= 0 {
+				return nil, "", auth.SessionAffinityGuard{}, hold.timeoutError()
+			}
+			if remaining < waitTimeout {
+				waitTimeout = remaining
+			}
+			if h.store.HasDispatchCandidate(apiKeyID, exclude, hold.pending, policy) {
+				holding = true
+				endHold = beginFreePoolHold()
+				waitCtx, cancelWait = context.WithDeadline(auth.WithPendingDispatchFilter(ctx, hold.pending), hold.deadline)
+			}
+		}
 		var admissionErr error
-		account, stickyProxyURL, guard, admissionErr = h.waitForRetryAccountAvailableWithGuard(ctx, affinityKey, apiKeyID, exclude, filter, preserveBinding, policy)
+		account, stickyProxyURL, guard, admissionErr = h.waitForRetryAccountAvailableWithGuard(waitCtx, affinityKey, apiKeyID, exclude, filter, preserveBinding, policy, waitTimeout)
+		cancelWait()
+		if endHold != nil {
+			endHold()
+		}
+		if requestCtx.Err() != nil && account == nil {
+			return nil, "", auth.SessionAffinityGuard{}, requestCtx.Err()
+		}
+		if hold != nil && account == nil && !time.Now().Before(hold.deadline) {
+			return nil, "", auth.SessionAffinityGuard{}, hold.timeoutError()
+		}
+		if hold != nil && account == nil && holding {
+			// 这一段没分到号。清掉本轮排除，掉过的号重新连上票后还能再选。
+			exclusions.ResetSoft()
+			exclusions.ResetTransient()
+			continue
+		}
 		if account != nil {
 			if ctx.Err() != nil {
 				h.store.Release(account)

@@ -191,7 +191,7 @@ func TestSchedulerWaitHeartbeatPreservesOneAdmission(t *testing.T) {
 	keepalive := &recordingContinuousRetryKeepalive{active: true}
 	ctx, cancel := context.WithTimeout(contextWithContinuousRetryKeepalive(keepalive), 35*time.Millisecond)
 	defer cancel()
-	_, _, _, _ = h.waitForRetryAccountAvailableWithGuard(ctx, "", 0, nil, nil, false, auth.DispatchPolicyStandard)
+	_, _, _, _ = h.waitForRetryAccountAvailableWithGuard(ctx, "", 0, nil, nil, false, auth.DispatchPolicyStandard, dispatchAccountWaitTimeout)
 	m := store.GetSchedulerMetrics()
 	if keepalive.writes < 2 || m.WaitStarted != 1 || m.Waiters != 0 || m.SelectionTotal != 1 {
 		t.Fatalf("heartbeats disturbed queue: writes=%d metrics=%+v", keepalive.writes, m)

@@ -27,13 +27,15 @@ type continuousRetryKeepalive interface {
 type continuousRetryKeepaliveContextKey struct{}
 
 type requestContinuousRetryKeepalive struct {
-	mu       sync.Mutex
-	active   bool
-	disabled bool
-	ctx      context.Context
-	last     time.Time
-	write    func() error
-	cancel   context.CancelCauseFunc
+	mu         sync.Mutex
+	active     bool
+	disabled   bool
+	ctx        context.Context
+	last       time.Time
+	quietUntil time.Time
+	committed  func() bool
+	write      func() error
+	cancel     context.CancelCauseFunc
 }
 
 // Activate 开始请求级保活时间窗；重复激活不会重置已有时间窗。
@@ -91,6 +93,9 @@ func (k *requestContinuousRetryKeepalive) Keepalive() error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if !k.activeLocked() || k.write == nil {
+		return nil
+	}
+	if k.quietLocked(time.Now()) > 0 {
 		return nil
 	}
 	if continuousRetryKeepaliveInterval <= 0 {
@@ -153,7 +158,7 @@ func installContinuousRetrySSEKeepaliveWithOptions(c *gin.Context, stream bool, 
 	}
 	original := c.Request
 	requestCtx, cancel := context.WithCancelCause(original.Context())
-	keepalive := &requestContinuousRetryKeepalive{ctx: requestCtx, write: func() error {
+	keepalive := &requestContinuousRetryKeepalive{ctx: requestCtx, committed: func() bool { return c.Writer.Written() }, write: func() error {
 		setSSEStreamHeaders(c, options.contentType)
 		if !c.Writer.Written() {
 			// Cloudflare 对 102 之后的最终响应仍有 125s 限制；长期保活
@@ -291,9 +296,38 @@ func continuousRetryKeepaliveDelay(keepalive continuousRetryKeepalive) time.Dura
 	}
 	delay := continuousRetryKeepaliveInterval - time.Since(requestKeepalive.last)
 	if delay < 0 {
-		return 0
+		delay = 0
+	}
+	if quiet := requestKeepalive.quietLocked(time.Now()); quiet > delay {
+		return quiet
 	}
 	return delay
+}
+
+func (k *requestContinuousRetryKeepalive) HoldFirstWriteUntil(until time.Time) {
+	if k == nil {
+		return
+	}
+	k.mu.Lock()
+	k.quietUntil = until
+	k.mu.Unlock()
+}
+
+func (k *requestContinuousRetryKeepalive) quietLocked(now time.Time) time.Duration {
+	if k == nil || k.quietUntil.IsZero() || (k.committed != nil && k.committed()) {
+		return 0
+	}
+	if remaining := k.quietUntil.Sub(now); remaining > 0 {
+		return remaining
+	}
+	return 0
+}
+
+func holdContinuousRetryKeepaliveUntil(ctx context.Context, until time.Time) {
+	keepalive, ok := continuousRetryKeepaliveForContext(ctx).(*requestContinuousRetryKeepalive)
+	if ok {
+		keepalive.HoldFirstWriteUntil(until)
+	}
 }
 
 func continuousRetryContextError(ctx context.Context) error {

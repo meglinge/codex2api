@@ -3999,6 +3999,64 @@ func TestApplyCooldownForModelUnauthorizedUsesPreviousFailureWindowAndDetail(t *
 	}
 }
 
+func TestApplyCooldownUnauthorizedPausesDispatchPastCooldown(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.5"})
+	defer store.Stop()
+	account := &auth.Account{DBID: 42, AccessToken: "at", Status: auth.StatusReady, HealthTier: auth.HealthTierHealthy}
+	handler := &Handler{store: store}
+	body := []byte(`{"error":{"type":"authentication_error","message":"token revoked"}}`)
+	handler.applyCooldownForModel(account, http.StatusUnauthorized, body, &http.Response{Header: make(http.Header)}, "gpt-6-astra")
+	if atomic.LoadInt32(&account.DispatchPaused) != 1 {
+		t.Fatal("401 did not pause dispatch")
+	}
+	account.Mu().Lock()
+	account.CooldownUtil = time.Now().Add(-time.Second)
+	account.HealthTier = auth.HealthTierWarm
+	account.Status = auth.StatusReady
+	account.Mu().Unlock()
+	atomic.StoreInt32(&account.Disabled, 0)
+	if account.IsAvailable() {
+		t.Fatal("paused account became available after cooldown")
+	}
+	atomic.StoreInt32(&account.DispatchPaused, 0)
+	if !account.IsAvailable() {
+		t.Fatal("clearing the pause should restore availability")
+	}
+}
+
+func TestApplyCooldownMissingScopeDoesNotPauseDispatch(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.5"})
+	defer store.Stop()
+	account := &auth.Account{DBID: 43, AccessToken: "at", Status: auth.StatusReady, HealthTier: auth.HealthTierHealthy}
+	handler := &Handler{store: store}
+	body := []byte(`{"error":{"message":"missing scope api.responses.write","code":"missing_scope"}}`)
+	handler.applyCooldownForModel(account, http.StatusUnauthorized, body, &http.Response{Header: make(http.Header)}, "gpt-6-astra")
+	if atomic.LoadInt32(&account.DispatchPaused) != 0 || atomic.LoadInt32(&account.Disabled) != 0 {
+		t.Fatal("missing_scope paused or disabled the account")
+	}
+}
+
+func TestApplyCooldownAccountRateLimitPausesModelCapacityDoesNot(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.5"})
+	defer store.Stop()
+	handler := &Handler{store: store}
+	limited := &auth.Account{DBID: 44, AccessToken: "at", Status: auth.StatusReady, HealthTier: auth.HealthTierHealthy, PlanType: "plus"}
+	decision := handler.applyCooldownForModel(limited, http.StatusTooManyRequests, []byte(`{"error":{"code":"rate_limit_exceeded","message":"Too many requests"}}`), &http.Response{Header: make(http.Header)}, "gpt-6-astra")
+	if decision.Scope != rateLimitScopeAccount || atomic.LoadInt32(&limited.DispatchPaused) != 0 {
+		t.Fatalf("bare 429 scope=%s paused=%d, want cooldown only", decision.Scope, atomic.LoadInt32(&limited.DispatchPaused))
+	}
+	exhausted := &auth.Account{DBID: 46, AccessToken: "at", Status: auth.StatusReady, HealthTier: auth.HealthTierHealthy, PlanType: "plus"}
+	decision = handler.applyCooldownForModel(exhausted, http.StatusTooManyRequests, []byte(`{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}`), &http.Response{Header: make(http.Header)}, "gpt-6-astra")
+	if decision.Scope != rateLimitScopeAccount || atomic.LoadInt32(&exhausted.DispatchPaused) != 1 {
+		t.Fatalf("usage limit scope=%s paused=%d", decision.Scope, atomic.LoadInt32(&exhausted.DispatchPaused))
+	}
+	capacity := &auth.Account{DBID: 45, AccessToken: "at", Status: auth.StatusReady, HealthTier: auth.HealthTierHealthy, PlanType: "plus"}
+	decision = handler.applyCooldownForModel(capacity, http.StatusTooManyRequests, []byte(`{"error":{"message":"The selected model is at capacity. Please try a different model."}}`), &http.Response{Header: make(http.Header)}, "gpt-5.5")
+	if decision.Scope == rateLimitScopeAccount || atomic.LoadInt32(&capacity.DispatchPaused) != 0 {
+		t.Fatalf("model capacity scope=%s paused=%d", decision.Scope, atomic.LoadInt32(&capacity.DispatchPaused))
+	}
+}
+
 func TestSendFinalUpstreamError_UsageLimitRewrites429(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

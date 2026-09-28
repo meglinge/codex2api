@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,6 +30,24 @@ func newFirstTokenTimeoutGuard(timeout time.Duration, cancel context.CancelFunc)
 		cancel()
 	})
 	return guard
+}
+
+// deferFirstTokenTimeout 先停掉建连阶段启动的计时，等上游开始回数据后再计。
+// 票池双 400 可能已经花掉大半个超时，不能把校验时间算进首字等待。
+func deferFirstTokenTimeout(guard *firstTokenTimeoutGuard) func() {
+	if guard == nil || guard.timer == nil {
+		return func() {}
+	}
+	guard.timer.Stop()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			if guard.fired.Load() {
+				return
+			}
+			guard.timer.Reset(guard.timeout)
+		})
+	}
 }
 
 func (g *firstTokenTimeoutGuard) Stop() {
@@ -75,8 +94,28 @@ func (g *firstTokenTimeoutGuard) MarkProgress(eventType string) {
 	g.Stop()
 }
 
+// MarkUserVisibleOutput 只在用户能看见的输出上停表。rate_limits、metadata
+// 这类空帧不算，否则静默流会在第一帧就把 45 秒计时停掉。
+func (g *firstTokenTimeoutGuard) MarkUserVisibleOutput(eventType string) {
+	if g == nil {
+		return
+	}
+	switch strings.TrimSpace(eventType) {
+	case "response.output_text.delta", "response.output_item.added",
+		"response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+		g.Stop()
+	}
+}
+
 func (g *firstTokenTimeoutGuard) TimedOut() bool {
 	return g != nil && g.fired.Load()
+}
+
+func ttftGuardTimeout(g *firstTokenTimeoutGuard) time.Duration {
+	if g == nil {
+		return 0
+	}
+	return g.timeout
 }
 
 func firstTokenTimeoutOutcome(timeout time.Duration) streamOutcome {

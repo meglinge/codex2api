@@ -493,6 +493,7 @@ export interface AccountRow {
   base_concurrency_override?: number | null
   base_concurrency_effective?: number
   skip_warm_tier?: boolean
+  use_tickets?: boolean
   dynamic_concurrency_limit?: number
   allowed_api_key_ids?: number[]
   tags?: string[]
@@ -523,6 +524,8 @@ export interface AccountRow {
   active_requests?: number
   occupied_requests?: number
   session_slot_buffer_enabled?: boolean
+  ticket_status?: AccountTicketStatus[]
+  health_buckets?: AccountHealthBucket[]
   total_requests?: number
   last_used_at?: ISODateString
   success_requests?: number
@@ -689,13 +692,30 @@ export interface CodexTurnStateStatus {
   }[]
 }
 
+export interface AccountTicketStatus {
+  model?: string
+  testing: boolean
+  bound: boolean
+  fails: number
+  probing?: number
+  spare?: string
+  spare_model?: string
+  rest_until?: string
+}
+
 export interface AccountLiveStateResponse {
   accounts: Record<string, {
     codex_turn_state_status?: CodexTurnStateStatus
     active_requests: number
     occupied_requests: number
+    ticket_status?: AccountTicketStatus[]
+    health_buckets?: AccountHealthBucket[]
   }>
   session_slot_buffer_enabled: boolean
+  free_pool?: {
+    queued: number
+    responding: number
+  }
 }
 
 export type SubscriptionFilter =
@@ -1644,6 +1664,7 @@ export interface BatchUpdateAccountsRequest extends UpdateAccountSchedulerReques
   selector?: AccountOperationSelector
   enabled?: boolean
   locked?: boolean
+  use_tickets?: boolean
 }
 
 export interface AccountGroup {
