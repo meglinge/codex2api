@@ -298,6 +298,7 @@ func TestIsAllowedUpstreamCodexModel_Policy(t *testing.T) {
 		"gpt-5.4":             false,
 		"gpt-5.4-mini":        false,
 		"gpt-6.0":             true,
+		"gpt-6.1-sol":         true,
 		"gpt-5.3-codex-spark": true,
 		"gpt-5.3-codex":       false,
 		"gpt-5.3":             false,

@@ -253,6 +253,9 @@ func canonicalizeCodexModel(model string, supportedModels []string) string {
 		"gpt5-6-luna":  "gpt-5.6-luna",
 		"gpt5.6-luna":  "gpt-5.6-luna",
 		"gpt6-astra":   "gpt-6-astra",
+		"gpt6.1-sol":   "gpt-6.1-sol",
+		"gpt61-sol":    "gpt-6.1-sol",
+		"gpt-6.1-sol":  "gpt-6.1-sol",
 	}
 	if canonical, ok := aliases[lower]; ok {
 		for _, supported := range supportedModels {

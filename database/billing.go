@@ -65,6 +65,14 @@ var (
 
 	modelPricingRules = []modelPricingRule{
 		// GPT-6 Sol/Luna 使用官方标准价和超过 272K 的长上下文价，fast 档沿用 2×。
+		{model: "gpt-6.1-sol", pricing: ModelPricing{
+			InputPricePerMToken:         2.0,
+			OutputPricePerMToken:        10.0,
+			CacheReadPricePerMToken:     0.2,
+			LongInputPricePerMToken:     4.0,
+			LongOutputPricePerMToken:    15.0,
+			LongCacheReadPricePerMToken: 0.4,
+		}},
 		{model: "gpt-6-sol", pricing: ModelPricing{
 			InputPricePerMToken:         2.0,
 			OutputPricePerMToken:        10.0,
@@ -499,6 +507,8 @@ func normalizeBillingModelName(model string) string {
 func normalizeCodexBillingModel(model string) (string, bool) {
 	compact := strings.NewReplacer(" ", "-", "_", "-").Replace(strings.ToLower(model))
 	switch {
+	case strings.HasPrefix(compact, "gpt-6.1-sol") || strings.HasPrefix(compact, "gpt6.1-sol") || strings.HasPrefix(compact, "gpt61-sol"):
+		return "gpt-6.1-sol", true
 	case strings.HasPrefix(compact, "gpt-6-sol") || strings.HasPrefix(compact, "gpt6-sol"):
 		return "gpt-6-sol", true
 	case strings.HasPrefix(compact, "gpt-6-luna") || strings.HasPrefix(compact, "gpt6-luna"):
